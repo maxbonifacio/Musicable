@@ -39,6 +39,7 @@
 | New Return Track | Ctrl+Alt+T | `track.new_return_track` |
 | New Group Track |  | `track.new_group_track` |
 | Delete Tracks |  | `track.delete` |
+| Always Live |  | `track.toggle_always_live` |
 
 ### Clip
 

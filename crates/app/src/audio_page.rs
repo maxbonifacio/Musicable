@@ -485,9 +485,10 @@ fn render_ahead_choice(ui: &mut Ui, current: RenderAhead) -> Option<RenderAhead>
     ui.label(
         RichText::new(
             "Musicable renders the project this far ahead of the device, on all its cores, so a \
-             small buffer plays a heavy mix without dropouts. A track monitoring its input renders \
-             live, with what it plays into, so what you play is heard at the buffer's latency. \
-             Knobs turned by hand elsewhere, Stop and jumps are heard up to this much later.",
+             small buffer plays a heavy mix without dropouts. A track monitoring its input, or set \
+             to Always Live, renders live, with what it plays into, so what you play is heard at \
+             the buffer's latency. Knobs turned by hand elsewhere, Stop and jumps are heard up to \
+             this much later.",
         )
         .weak(),
     );

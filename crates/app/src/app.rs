@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use musicable_audio::InputKind;
 use musicable_commands::{Args, CommandError, Focus, Keymap, Request, arrange, browser, device};
-use musicable_engine::{EngineHandle, Meter, Meters};
+use musicable_engine::{EngineHandle, Lead, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
 use musicable_library::Queue;
 use musicable_model::modulation;
@@ -36,7 +36,7 @@ use crate::library::{self, LIBRARY_FILE, Library, Listing};
 use crate::log_file;
 use crate::mouse_file::UserMouse;
 use crate::mouse_page::Asked as MouseAsked;
-use crate::performance::Figures;
+use crate::performance::{Figures, LiveMarks};
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
 use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
@@ -109,6 +109,9 @@ pub struct App {
     levels: Levels,
     /// The CPU figures, as last worked out.
     performance: Figures,
+    /// The tracks that render live while the rest of the project renders
+    /// ahead, for their headers' Live marks.
+    live: LiveMarks,
     /// Where the settings, the user's keymap, mouse map, themes, workspaces
     /// and profiles live.
     config_dir: Option<PathBuf>,
@@ -279,6 +282,7 @@ impl App {
             messages,
             levels: Levels::default(),
             performance: Figures::default(),
+            live: LiveMarks::default(),
             config_dir,
             settings,
             profiles,
@@ -1722,7 +1726,11 @@ impl eframe::App for App {
         let config = self.session.engine_config();
         let (loads, project) = (self.session.loads(), self.session.project());
         let period = self.output.info().map(|info| info.period);
-        (self.performance).update(Instant::now(), loads, period, &stats, config, project);
+        let figured = loads.map(Arc::as_ref);
+        (self.performance).update(Instant::now(), figured, period, &stats, config, project);
+        // Only some of the project renders live while the rest renders ahead.
+        let ahead = playing && self.session.lead() != Lead::Off;
+        self.live.update(loads.filter(|_| ahead), project);
         // The meters fall back for a few seconds after the music stops. They
         // only move while a device plays.
         let metering = playing && (self.levels.moving() || modulating);
@@ -1803,6 +1811,7 @@ impl eframe::App for App {
             recordings: &recordings,
             levels: &self.levels,
             performance: self.performance.performance(),
+            live: self.live.marks(),
             inputs: &self.input_choices,
             midi_inputs: &self.midi_choices,
             waveforms: self.audio_files.waveforms(),

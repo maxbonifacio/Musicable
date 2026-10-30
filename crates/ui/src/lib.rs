@@ -63,7 +63,7 @@ pub use panels::{
     ARRANGEMENT, BROWSER, DEVICES, HISTORY, MIXER, PERFORMANCE, PIANO_ROLL, ROUTING, SAMPLE_EDITOR,
 };
 pub use parts::{Lineup, MIXER_STRIP, TRACK_HEADER, TRANSPORT_BAR, Views};
-pub use performance::{Cpu, Performance, Row};
+pub use performance::{Cpu, Live, Performance, Row};
 pub use shell::{
     Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, LeadGauge, Playback, Recording, SaveChoice,
     Shell, View, Workspaces, ask_to_save,

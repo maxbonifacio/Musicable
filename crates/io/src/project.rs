@@ -35,7 +35,7 @@ pub const FORMAT: &str = "musicable-project";
 
 /// The format version this build writes. It reads every version up to this
 /// one.
-pub const VERSION: u32 = 25;
+pub const VERSION: u32 = 26;
 
 /// How far from the start of the song a position in a file can be, either
 /// way, in ticks. It's the largest whole number a double holds exactly, so a

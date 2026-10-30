@@ -635,6 +635,11 @@ mod tests {
                 from: Monitor::Auto,
                 to: Monitor::In,
             },
+            Edit::TrackAlwaysLive {
+                track: audio,
+                from: false,
+                to: true,
+            },
             Edit::TrackOutput {
                 track: audio,
                 from: Bus::Master,
@@ -996,7 +1001,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 77;
+    const KINDS: usize = 78;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -1079,6 +1084,7 @@ mod tests {
             Edit::PluginInputs { .. } => 74,
             Edit::WireChannel { .. } => 75,
             Edit::PluginNoteOutput { .. } => 76,
+            Edit::TrackAlwaysLive { .. } => 77,
         }
     }
 

@@ -63,6 +63,7 @@ const HEADER: Items = &[
     None,
     Some(view::TOGGLE_TAKE_LANES),
     Some(automation::SHOW),
+    Some(track::TOGGLE_ALWAYS_LIVE),
     None,
     Some(track::NEW_AUDIO_TRACK),
     Some(track::NEW_MIDI_TRACK),

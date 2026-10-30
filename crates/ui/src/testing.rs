@@ -17,12 +17,12 @@ use musicable_commands::{
 use musicable_library::{FileId, Index, Preset};
 use musicable_model::native::NativeKind;
 use musicable_model::time::Beats;
-use musicable_model::{DeviceId, Project};
+use musicable_model::{Chain, DeviceId, Project};
 
 use crate::{
-    Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, LeadGauge, Levels, Library, Listing, Peaks,
-    Performance, Playback, PluginEntry, PluginStatus, Plugins, Preview, Shell, View, Waveforms,
-    Workspaces,
+    Action, Audio, DEFAULT_WORKSPACE, KeymapStatus, LeadGauge, Levels, Library, Listing, Live,
+    Peaks, Performance, Playback, PluginEntry, PluginStatus, Plugins, Preview, Shell, View,
+    Waveforms, Workspaces,
 };
 
 /// What the shell shows in the tests, and what it hands back.
@@ -46,6 +46,8 @@ pub(crate) struct State {
     pub levels: Levels,
     /// What the CPU figures say.
     pub performance: Performance,
+    /// The channels that render live while the rest renders ahead.
+    pub live: BTreeMap<Chain, Live>,
     /// What the lead gauge shows, if it shows.
     pub lead: Option<LeadGauge>,
     /// The plugins installed, whether a scan is running, and how each
@@ -259,6 +261,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
         history: Document::default(),
         levels: Levels::default(),
         performance: Performance::default(),
+        live: BTreeMap::new(),
         lead: None,
         plugins: Vec::new(),
         scanning: false,
@@ -291,6 +294,7 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 recordings: &[],
                 levels: &state.levels,
                 performance: &state.performance,
+                live: &state.live,
                 inputs: &[],
                 midi_inputs: &[],
                 audio: Audio {

@@ -32,7 +32,8 @@ pub struct Theme {
     pub solo: Color32,
     #[serde(with = "values::colour")]
     pub arm: Color32,
-    /// Input monitoring's buttons, when they're on.
+    /// Input monitoring's buttons, when they're on, and the Live mark of a
+    /// track that renders live while the rest of the project renders ahead.
     #[serde(with = "values::colour")]
     pub monitor: Color32,
     /// Built-in devices' switches when they're on, and the Bypass buttons

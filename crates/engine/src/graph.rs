@@ -1,6 +1,7 @@
 //! Building processing graphs and preparing them to run.
 
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
@@ -519,14 +520,18 @@ impl Graph {
         self.targets_of = (0..len).map(|n| keys(&self.note_routes, n)).collect();
         self.made_of = (0..len).map(|n| keys(&self.made_routes, n)).collect();
         self.rank()?;
-        let live = self.liveness();
+        let sources = self.liveness();
+        let live: Vec<bool> = sources.iter().map(Option::is_some).collect();
         if !split || !live.contains(&true) {
-            let loads = Arc::new(NodeLoads::new(self.ids.clone(), len));
+            let loads = Arc::new(NodeLoads::new(self.ids.clone(), len, Vec::new()));
             return self.finish(config, latency, loads, 0);
         }
         let [ahead, live] = self.split(&live, config);
         let ids = ahead.ids.iter().chain(&live.ids).copied().collect();
-        let loads = Arc::new(NodeLoads::new(ids, ahead.nodes.len()));
+        // The live half has its nodes in the whole graph's order, and then
+        // its queues.
+        let sources = sources.into_iter().flatten().collect();
+        let loads = Arc::new(NodeLoads::new(ids, ahead.nodes.len(), sources));
         let mut live_ids: Vec<LoadKey> = live.ids.iter().flatten().copied().collect();
         live_ids.sort_unstable();
         let base = ahead.nodes.len();
@@ -546,16 +551,21 @@ impl Graph {
     /// half if there's one, so it carries on from the delay it takes over
     /// from whichever side its input renders on; a delay after the output,
     /// the cue output or a tap, on its input's.
-    fn liveness(&self) -> Vec<bool> {
-        let mut live = vec![false; self.nodes.len()];
-        let mut reached: Vec<NodeId> = (0..self.nodes.len())
+    ///
+    /// For each node that renders live, the key of what put it in the live
+    /// half: its own, for a live source or a node set live, or else one of
+    /// the nearest that reach it, counting the nodes between but not the
+    /// delays.
+    fn liveness(&self) -> Vec<Option<NodeKey>> {
+        let mut source = vec![None; self.nodes.len()];
+        let mut reached: VecDeque<NodeId> = (0..self.nodes.len())
             .map(NodeId)
             .filter(|n| self.nodes[n.0].live() == Some(true) || self.marks.contains(n))
             .collect();
         for n in &reached {
-            live[n.0] = true;
+            source[n.0] = Some(self.keys[n.0]);
         }
-        while let Some(n) = reached.pop() {
+        while let Some(n) = reached.pop_front() {
             let audio = self.outputs[n.0].iter().copied();
             let routes = self.note_routes.iter().chain(&self.made_routes);
             let notes = routes.filter(|r| r.0 == n).map(|r| r.1);
@@ -566,8 +576,15 @@ impl Graph {
                 _ => None,
             });
             for next in audio.chain(notes).chain(modulated).chain(together) {
-                if !std::mem::replace(&mut live[next.0], true) {
-                    reached.push(next);
+                if source[next.0].is_some() {
+                    continue;
+                }
+                source[next.0] = source[n.0];
+                // A delay is as near as the one node it delays, so it goes
+                // first.
+                match self.ids[next.0] {
+                    Some(LoadKey::Delay { .. }) => reached.push_front(next),
+                    _ => reached.push_back(next),
                 }
             }
         }
@@ -577,10 +594,10 @@ impl Graph {
                 ..
             }) = id
             {
-                live[n] = live[self.outputs[n][0].0];
+                source[n] = source[self.outputs[n][0].0];
             }
         }
-        live
+        source
     }
 
     /// Numbers the nodes that play notes, modulate others and make notes in
@@ -3913,6 +3930,51 @@ mod tests {
         // Kept together with a live node, `reached` renders live, but not
         // what feeds it.
         assert_eq!(sides(&graph), [vec![0, 3], vec![1, 2, 4, 5]]);
+    }
+
+    #[test]
+    fn each_live_node_has_the_nearest_live_source_that_reaches_it() {
+        // Two tracks monitoring their inputs, a track set live and a
+        // master they all reach. The master's nearest source is the
+        // second track's monitor, one node up, past the delay that lines
+        // it up with the latent first track, and the delays on the
+        // master's inputs have the master's.
+        let mut g = Graph::new();
+        let first = g.add(NodeKey(1), monitoring());
+        let latent_fx = g.add(NodeKey(2), latent(16));
+        let second = g.add(NodeKey(3), monitoring());
+        let marked = g.add(NodeKey(4), Constant::new(0.25));
+        let after = g.add(NodeKey(5), Gain::new(1.0));
+        let ahead = g.add(NodeKey(6), Constant::new(0.5));
+        let master = g.add(NodeKey(7), Sum::default());
+        g.connect(first, latent_fx).unwrap();
+        g.connect(latent_fx, master).unwrap();
+        g.connect(second, master).unwrap();
+        g.connect(marked, after).unwrap();
+        g.connect(after, master).unwrap();
+        g.connect(ahead, master).unwrap();
+        g.set_live(marked).unwrap();
+        g.set_output(master).unwrap();
+        let graph = g.prepare(&CONFIG).unwrap();
+        let sources: Vec<(LoadKey, Option<u64>)> = (graph.loads.sides())
+            .map(|(key, _, source)| (key, source.map(|key| key.0)))
+            .collect();
+        let node = |key| LoadKey::Node(NodeKey(key));
+        for (key, source) in [(1, 1), (2, 1), (3, 3), (4, 4), (5, 4), (7, 3)] {
+            assert!(
+                sources.contains(&(node(key), Some(source))),
+                "{key}: {sources:?}"
+            );
+        }
+        assert!(sources.contains(&(node(6), None)), "{sources:?}");
+        let delays: Vec<_> = (sources.iter())
+            .filter(|(key, _)| matches!(key, LoadKey::Delay { .. }))
+            .collect();
+        assert!(!delays.is_empty(), "{sources:?}");
+        assert!(
+            delays.iter().all(|(_, source)| *source == Some(3)),
+            "{delays:?}"
+        );
     }
 
     /// The node with `key` in either half of `graph`.

@@ -1883,7 +1883,10 @@ node that plays notes, makes them or sends modulation, in the order they'd
 run in the whole graph, and each event carries its sender's number. The
 ahead side renders a block only while each queue has room for a block's
 notes and modulation. A graph without live sources is one half, which
-renders ahead.
+renders ahead. The compiler sets a track's clip player, input monitor and
+bus live when the track is set to Always Live (`Track::always_live`), so
+the whole of its strip renders live, while what feeds a group or a return
+set to it renders ahead.
 
 **The live half** renders on the audio thread, stretch by stretch as each
 callback plays, with the renderer `Renderer::live_renderer` gives: the
@@ -1984,7 +1987,12 @@ each value is for ([Built-in devices](#built-in-devices)), so the app's
 meters and modulation dots show what the device plays, not what was
 rendered last. The app builds the engine with a `max_block` of at least
 `AHEAD_BLOCK` ([app.md](app.md#audio)). `NodeLoads::sides` says which nodes
-render live.
+render live, and for each the key of what put it in the live half: its
+own, for a live source or a node set live, or else one of the nearest of
+those that reach it, a hop for each node between them but none for the
+delays, which `Graph::prepare` works out as it finds what's live, from
+all the sources at once. The app's Live marks say from it why each track
+renders live ([app.md](app.md#cpu-figures)).
 
 **Previews and writers.** Previews play on the live side, from the next
 callback whatever the lead, on top of what was rendered. A record tap's

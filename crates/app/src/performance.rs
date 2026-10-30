@@ -15,14 +15,19 @@
 //! figures of the devices and channels in the live half have a longest
 //! block that matters: an ahead block has only to be ready before the lead
 //! runs out, and the engine leaves those out of a node's longest.
+//!
+//! The Live marks in the tracks' headers come from the same loads: a
+//! channel with a node in the live half renders live, as the track that
+//! put the node there has it, its own track if it's one of them.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use musicable_engine::compile::keys::{self, Owner};
 use musicable_engine::{EngineConfig, LoadKey, NodeLoads, Stats};
 use musicable_model::{Chain, DeviceId, Project, TrackId};
-use musicable_ui::{Cpu, Performance, Row};
+use musicable_ui::{Cpu, Live, Performance, Row};
 
 /// How often the figures are worked out again.
 const EVERY: Duration = Duration::from_millis(250);
@@ -121,14 +126,71 @@ fn read(loads: &NodeLoads, time: u64, ahead: bool) -> Reading {
         ahead,
         ..Reading::default()
     };
-    for (key, load, live) in loads.sides() {
+    for (key, load, source) in loads.sides() {
         reading.busy.insert(key, load.busy());
         reading.longest.insert(key, load.take_longest());
-        if live {
+        if source.is_some() {
             reading.live.insert(key);
         }
     }
     reading
+}
+
+/// The channels that render live while the rest of the project renders
+/// ahead, each with what has it render live, for the Live marks in the
+/// tracks' headers: worked out again for each graph sent to the engine.
+#[derive(Debug, Default)]
+pub struct LiveMarks {
+    /// The loads of the graph they're from.
+    loads: Option<Arc<NodeLoads>>,
+    marks: BTreeMap<Chain, Live>,
+}
+
+impl LiveMarks {
+    pub fn marks(&self) -> &BTreeMap<Chain, Live> {
+        &self.marks
+    }
+
+    /// Works the marks out from `loads`, those of the graph last sent to
+    /// the engine, if they're another graph's than last time, or none if
+    /// it has none, or renders nothing ahead.
+    pub fn update(&mut self, loads: Option<&Arc<NodeLoads>>, project: &Project) {
+        let same = match (&self.loads, loads) {
+            (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+            (old, new) => old.is_none() && new.is_none(),
+        };
+        if !same {
+            self.loads = loads.cloned();
+            self.marks = loads.map_or_else(BTreeMap::new, |loads| live_marks(loads, project));
+        }
+    }
+}
+
+/// Each channel with a node in the live half of the graph `loads` are
+/// from, with the track whose input or Always Live put the node there: the
+/// channel's own track if that's one, or else the first node's.
+fn live_marks(loads: &NodeLoads, project: &Project) -> BTreeMap<Chain, Live> {
+    let places = Places::new(project);
+    let chain_of = |key| keys::owner(key).and_then(|owner| places.owner_chain(owner));
+    let mut marks = BTreeMap::new();
+    for (key, _, source) in loads.sides() {
+        let (LoadKey::Node(key), Some(source)) = (key, source) else {
+            continue;
+        };
+        let Some(chain) = chain_of(key) else {
+            continue;
+        };
+        let Some(track) = chain_of(source).and_then(Chain::track) else {
+            continue;
+        };
+        let live = Live { track };
+        if chain == Chain::Track(track) {
+            marks.insert(chain, live);
+        } else {
+            marks.entry(chain).or_insert(live);
+        }
+    }
+    marks
 }
 
 /// The figures over `readings`, oldest first, of an engine rendering at
@@ -463,6 +525,33 @@ mod tests {
     }
 
     #[test]
+    fn live_marks_name_the_track_that_has_each_channel_render_live() {
+        let (mut project, ids) = project();
+        let reverbs = project.tracks[1].id;
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let pads = project.add_track("Pads", TrackKind::Midi);
+        for track in [ids.bass, keys] {
+            project.track_mut(track).unwrap().always_live = true;
+        }
+        let (_engine, handle) = Engine::new(CONFIG);
+        let mut session = Session::offline(project, None, Keymap::default_keymap(), handle);
+        session.wait_for_graph();
+        let mut marks = LiveMarks::default();
+        marks.update(session.loads(), session.project());
+        let mark = |chain| marks.marks().get(&chain).map(|live| live.track);
+        // Each Always Live track for itself, and the return the bass sends
+        // to, and wires into, for the bass.
+        assert_eq!(mark(Chain::Track(ids.bass)), Some(ids.bass));
+        assert_eq!(mark(Chain::Track(keys)), Some(keys));
+        assert_eq!(mark(Chain::Track(reverbs)), Some(ids.bass));
+        assert!([Some(ids.bass), Some(keys)].contains(&mark(Chain::Master)));
+        assert_eq!(mark(Chain::Track(pads)), None);
+        // Nothing renders ahead without a graph.
+        marks.update(None, session.project());
+        assert!(marks.marks().is_empty());
+    }
+
+    #[test]
     fn figures_count_the_frames_rendered_ahead() {
         let (project, ids) = project();
         let (mut engine, handle) = Engine::new(EngineConfig {
@@ -484,7 +573,8 @@ mod tests {
             }
             let (stats, project) = (session.stats(), session.project());
             let at = start + Duration::from_millis(after);
-            figures.update(at, session.loads(), Some(128), &stats, config, project);
+            let loads = session.loads().map(Arc::as_ref);
+            figures.update(at, loads, Some(128), &stats, config, project);
             stats
         };
         read(&mut figures, &mut engine, 0);
@@ -551,7 +641,8 @@ mod tests {
             let (stats, project) = (session.stats(), session.project());
             let at = start + Duration::from_millis(after);
             let period = playing.then_some(CONFIG.max_block as u32);
-            figures.update(at, session.loads(), period, &stats, CONFIG, project);
+            let loads = session.loads().map(Arc::as_ref);
+            figures.update(at, loads, period, &stats, CONFIG, project);
         };
         let mut buffer = vec![0.0; 2 * CONFIG.max_block];
         let mut play = |engine: &mut Engine, blocks| {

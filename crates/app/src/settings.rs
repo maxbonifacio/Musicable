@@ -522,9 +522,9 @@ pub struct AudioSettings {
 }
 
 /// How far ahead of the audio device the engine renders the project, all
-/// but what plays live, as a track monitoring its input does with what it
-/// reaches: `off`, `short` (about 20 ms), `normal` (about 50 ms) or `long`
-/// (about 200 ms).
+/// but what plays live, as a track monitoring its input or set to Always
+/// Live does with what it reaches: `off`, `short` (about 20 ms), `normal`
+/// (about 50 ms) or `long` (about 200 ms).
 /// See [`EngineHandle::set_lead`](musicable_engine::EngineHandle::set_lead).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

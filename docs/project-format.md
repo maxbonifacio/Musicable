@@ -18,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 25,
+  "version": 26,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -72,6 +72,7 @@ workspace:
         }
       },
       "monitor": "auto",
+      "always_live": false,
       "output": null,
       "sends": [
         {
@@ -122,6 +123,7 @@ workspace:
       "armed": false,
       "input": null,
       "monitor": "auto",
+      "always_live": false,
       "output": null,
       "sends": [],
       "tone": null,
@@ -153,6 +155,7 @@ workspace:
         }
       },
       "monitor": "auto",
+      "always_live": false,
       "output": null,
       "sends": [],
       "tone": null,
@@ -411,6 +414,7 @@ change starts at must start within the position limit.
 | `armed` | boolean | Whether the track is armed for recording. Only audio and MIDI tracks can be. |
 | `input` | input or `null` | What the track records from: an audio input on an audio track, a MIDI input on a MIDI track, a tap on another track, or `null` for nothing. Return and group tracks record nothing, so theirs is `null`. |
 | `monitor` | string | When the track plays what comes into its input instead of its clips: `"in"`, always; `"auto"`, while it's armed and the transport is stopped or recording it; or `"off"`, never. A track resampling the master never plays it, whatever this says. |
+| `always_live` | boolean | Whether the track renders live, as the audio device asks for each buffer, while the rest of the project renders ahead of it: its clips, its input, its devices and what it plays into. A track that can monitor its input renders live anyway. |
 | `output` | whole number, string or `null` | Where the track's output goes: the id of the group track it feeds, `"sends_only"` for nowhere, so it's heard only through its sends and what other tracks take from it, or `null` for the master. |
 | `sends` | array of sends | The track's sends to return tracks. |
 | `tone` | test tone or `null` | A test oscillator, Tier 0's only sound source. It plays along with the track's clips, and on a group or return track with what feeds the track. |
@@ -1197,6 +1201,7 @@ A **port** is an object with one field:
 | 23 | 2026-10-30 | MIDI tracks taking the notes a MIDI effect plays, at the point after it, which carries notes alone, or those that reach a MIDI track's instrument, at its Post FX. Version 22 inputs and wires from after a MIDI effect took its sound, which was silence, so they go, with the lanes and the routings that move those wires' gains. |
 | 24 | 2026-10-30 | Note wires, which play a MIDI track's notes on another's instrument or MIDI effect, through its `{"notes": id}` port, and every wire's `channel`, a note wire's MIDI channel. Version 23 wires are audio wires, so their channel is `null`. |
 | 25 | 2026-10-30 | Plugins' `note_output`, so the point after a plugin carries the notes it plays out as it renders, for a note wire or a MIDI track's input. Version 24 plugins have none until they next load. |
+| 26 | 2026-10-30 | Tracks' `always_live`, which has a track render live while the rest of the project renders ahead. Version 25 tracks aren't. |
 
 ## Changing the format
 

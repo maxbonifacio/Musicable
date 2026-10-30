@@ -1,11 +1,15 @@
-//! The parts of the tracks' headers: the track's colour, its name, the
+//! The parts of the tracks' headers: the track's colour, its name, with a
+//! Live mark while it renders live and the rest of the project ahead, the
 //! button that shows its automation, mute, solo and arm, and its meter.
 //! Headers are painted, so a hundred tracks stay quick: each part paints
 //! into its column of a header, and the columns are the same in every
 //! header, so the buttons line up. The master track's header has the same
 //! parts, but for mute, solo and arm.
 
-use egui::{Align2, FontId, Id, Painter, Rangef, Rect, Role, Sense, Ui, WidgetInfo, pos2};
+use egui::{
+    Align2, FontId, Id, Painter, Rangef, Rect, Role, Sense, Stroke, StrokeKind, Ui, WidgetInfo,
+    pos2, vec2,
+};
 use musicable_commands::mixer::Change;
 use musicable_commands::{Args, automation};
 use musicable_model::{Chain, Track, TrackKind};
@@ -54,13 +58,16 @@ pub(crate) fn register(registry: &mut Registry) {
             part.painter.rect_filled(part.rect, 0.0, colour);
         },
     ));
-    registry.register(part("name", "Name", Size::Rest, |_, part, _| {
+    registry.register(part("name", "Name", Size::Rest, |ui, part, _| {
         let theme = part.scene.theme;
         let inset = theme.padding / 2.0;
-        let room = Rect::from_x_y_ranges(
+        let mut room = Rect::from_x_y_ranges(
             part.rect.left() + inset..=part.rect.right() - inset,
             part.rect.top() + theme.padding..=part.rect.bottom(),
         );
+        if let Some(mark) = live_mark(ui, part, room) {
+            room.set_right(mark.left() - inset);
+        }
         let name = match part.owner {
             Owner::Track(_, track) => track.name.as_str(),
             Owner::Master => "Master",
@@ -119,6 +126,43 @@ pub(crate) fn register(registry: &mut Registry) {
             }
         },
     ));
+}
+
+/// What a Live mark's tooltip says after what has its channel render live.
+const LIVE: &str = "It renders as the audio device asks for each buffer, while the rest of the \
+                    project renders ahead, so what you play into it and the knobs you turn on it \
+                    are heard at once.";
+
+/// The Live mark at the end of the name, at the top right of `room`, while
+/// the header's channel renders live and the rest of the project renders
+/// ahead, with what has it render live in its tooltip. Where it went, if
+/// it shows: not where the name would have no room, nor out of sight.
+fn live_mark(ui: &mut Ui, part: &HeaderPart<'_>, room: Rect) -> Option<Rect> {
+    let scene = part.scene;
+    let chain = match part.owner {
+        Owner::Track(_, track) => Chain::Track(track.id),
+        Owner::Master => Chain::Master,
+    };
+    let live = scene.view.live.get(&chain)?;
+    let theme = scene.theme;
+    let font = FontId::proportional(theme.small_text);
+    let galley = (ui.painter()).layout_no_wrap("LIVE".to_owned(), font, theme.monitor);
+    // As tall as the buttons, and level with them.
+    let size = vec2(galley.size().x + theme.padding, theme.button.y);
+    let rect = Rect::from_min_size(pos2(room.right() - size.x, room.top()), size);
+    let visible = part.painter.clip_rect().contains_rect(rect);
+    if rect.left() < room.left() + size.x || rect.bottom() > part.rect.bottom() || !visible {
+        return None;
+    }
+    let reason = live.reason(scene.project(), chain);
+    let response = ui.interact(rect, Id::unique(("live mark", chain)), Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(Role::Label, true, &reason));
+    let outline = Stroke::new(1.0, theme.monitor);
+    (part.painter).rect_stroke(rect, theme.corner, outline, StrokeKind::Inside);
+    let at = rect.center() - galley.size() / 2.0;
+    part.painter.galley(at, galley, theme.monitor);
+    response.on_hover_text(format!("{reason}. {LIVE}"));
+    Some(rect)
 }
 
 /// A part of the tracks' headers, shown at first.

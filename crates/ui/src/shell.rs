@@ -2,7 +2,7 @@
 //! them, and a status bar, with the command palette, the box that renames
 //! things, and the Keys page of the app's Settings window.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use egui::{Align, Button, Layout, RichText, Ui};
@@ -32,7 +32,7 @@ use crate::panels::{
     ROUTING, SAMPLE_EDITOR,
 };
 use crate::parts::{Parts, Views};
-use crate::performance::Performance;
+use crate::performance::{Live, Performance};
 use crate::shortcuts::Shortcuts;
 use crate::theme::Theme;
 use crate::transport_bar;
@@ -71,6 +71,10 @@ pub struct View<'a> {
     /// What the project's devices and channels cost the CPU, as the app
     /// last worked it out.
     pub performance: &'a Performance,
+    /// The channels that render live while the rest of the project renders
+    /// ahead, and what has each render live, for the Live marks in the
+    /// tracks' headers. None while nothing renders ahead.
+    pub live: &'a BTreeMap<Chain, Live>,
     /// The audio inputs tracks can record from, for the mixer's input
     /// menus.
     pub inputs: &'a [InputChoice],
@@ -1543,6 +1547,9 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
         ClipContent::Audio(audio) => audio.is_warped(),
         ClipContent::Midi(_) => false,
     });
+    let always_live = (track::chosen(editor).first())
+        .and_then(|&id| project.track(id))
+        .is_some_and(|track| track.always_live);
     let toggles = [
         (transport::RECORD, view.playback.record),
         (transport::TOGGLE_PUNCH_IN, project.punch_in),
@@ -1559,11 +1566,26 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
             controllers::SHOW_VELOCITIES,
             editor.piano_roll.lane == Lane::Velocity,
         ),
+        (track::TOGGLE_ALWAYS_LIVE, always_live),
     ];
     toggles
         .into_iter()
         .find(|(toggle, _)| toggle == id)
         .map(|(_, on)| on)
+}
+
+/// Whether the command `id` is a toggle that's on, as [`toggled`] says, for
+/// the menu entry that runs it with `args`: Always Live for the tracks a
+/// context menu was opened on, as the first of them is.
+pub(crate) fn toggled_for(view: &View<'_>, id: &CommandId, args: &Args) -> Option<bool> {
+    let tracks: Option<Vec<TrackId>> = args.opt("tracks").ok().flatten();
+    match tracks {
+        Some(tracks) if *id == track::TOGGLE_ALWAYS_LIVE => Some(
+            (tracks.first().and_then(|&id| view.project.track(id)))
+                .is_some_and(|track| track.always_live),
+        ),
+        _ => toggled(view, id),
+    }
 }
 
 fn status_bar(ui: &mut Ui, view: &View<'_>, actions: &mut Vec<Action>) {

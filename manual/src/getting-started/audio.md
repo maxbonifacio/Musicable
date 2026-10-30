@@ -73,6 +73,15 @@ doesn't hold it up. A track taking its input from another track renders
 live only if that track does. Exports aren't played through the device,
 so Render Ahead makes no difference to them.
 
+**Always Live**, in a track's right-click menu in the arrangement or the
+mixer, or **Track > Always Live** for the selected tracks, has a track
+render live whatever its input, with what it plays into: for a plugin
+whose window has to keep time with what you hear, such as an analyser, or
+knobs you want to hear at once. Each track that renders live while the
+rest renders ahead has a **LIVE** mark at the end of its name, and its
+tooltip says why, such as "Live: fed by the armed track Vocal". The
+project keeps it, and Undo takes it back.
+
 Render Ahead changes at once, with no **Apply**, since the device needn't
 open again.
 

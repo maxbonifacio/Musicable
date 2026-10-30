@@ -22,7 +22,10 @@ and a whole drag is one step in the undo history.
   button, and a meter, which can be hidden, moved and some resized
   ([Workspaces](../customising/workspaces.md#hiding-and-moving-parts)). A
   selected track's header and lane are lighter. The corner over the headers
-  says what the grid is, such as "Grid 1/16".
+  says what the grid is, such as "Grid 1/16". While Render Ahead renders the
+  rest of the project ahead, a track that renders live has a **LIVE** mark
+  at the end of its name, as does the master, and hovering it says why
+  ([Render Ahead](../getting-started/audio.md#render-ahead)).
 - **The master track** is pinned along the bottom, as Live's Main track is,
   and the tracks scroll over it, with room under the last one for a new
   track. Its header has its name, A and its meter, the same parts as the
@@ -96,7 +99,7 @@ A right-click opens a menu of commands for what was clicked:
 |---|---|
 | A clip | Cut, Copy, Duplicate, Split, Quantize and the grid |
 | A lane | Insert MIDI Clip and Add Locator |
-| A track's header | The new tracks |
+| A track's header | Rename, Delete Tracks, Show/Hide Take Lanes, Show/Hide Automation, Always Live and the new tracks |
 | The master track's lane | Add Locator and Show/Hide Automation |
 | The master track's header | Show/Hide Automation |
 | The ruler | Locate and Toggle Loop |

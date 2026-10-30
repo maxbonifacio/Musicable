@@ -192,7 +192,7 @@ fn an_armed_track_renders_live_with_what_it_plays_into() {
     let live = |session: &Session, key| {
         let loads = session.loads().expect("a graph was sent");
         let side = loads.sides().find(|&(k, ..)| k == LoadKey::Node(key));
-        side.map(|(.., live)| live)
+        side.map(|(.., source)| source.is_some())
     };
     studio.session.wait_for_graph();
     for armed in [true, false, true] {

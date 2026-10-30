@@ -68,6 +68,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("notes-from-tracks", notes_from_tracks()),
         ("midi-to", midi_to()),
         ("made-notes", made_notes()),
+        ("always-live", always_live()),
     ]
 }
 
@@ -1603,6 +1604,22 @@ fn made_notes() -> Project {
     project.track_mut(vocal).unwrap().devices.push(detector);
     let wire = project.new_wire(Tap::Device(detector_id), Port::Notes(synth_id));
     project.wires.push(wire);
+    project
+}
+
+/// Tracks set to Always Live, which render live while the rest of the
+/// project renders ahead: an audio track and a group, and a track that
+/// isn't.
+fn always_live() -> Project {
+    let mut project = Project::new();
+    for (name, kind, always_live) in [
+        ("Vocal", TrackKind::Audio, true),
+        ("Pads", TrackKind::Midi, false),
+        ("Drums", TrackKind::Group, true),
+    ] {
+        let id = project.add_track(name, kind);
+        project.track_mut(id).unwrap().always_live = always_live;
+    }
     project
 }
 

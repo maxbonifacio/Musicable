@@ -196,7 +196,7 @@ Every setting can be left out:
 | `audio.exclusive` | Whether Musicable takes the device for itself, for the lowest latency. | `false` |
 | `audio.sample_rate` | The rate the device plays at. | The rate it runs at |
 | `audio.buffer_size` | The buffer size, in frames. | The smallest the device supports, or an ASIO driver's preferred size |
-| `audio.render_ahead` | How far ahead of the device Musicable renders the project, but for the tracks monitoring an input and what they play into: `off`, `short` (about 20 ms), `normal` (about 50 ms) or `long` (about 200 ms) ([Render Ahead](../getting-started/audio.md#render-ahead)). | `normal` |
+| `audio.render_ahead` | How far ahead of the device Musicable renders the project, but for the tracks monitoring an input or set to Always Live and what they play into: `off`, `short` (about 20 ms), `normal` (about 50 ms) or `long` (about 200 ms) ([Render Ahead](../getting-started/audio.md#render-ahead)). | `normal` |
 | `behaviour.play_from` | Where Play/Stop plays from: the start marker (`start_marker`) or where the playhead stopped (`playhead`). | `start_marker` |
 | `behaviour.middle_c` | What the piano roll calls MIDI note 60: `c3`, `c4` or `c5`. | `c3` |
 | `behaviour.warp_recordings` | Whether recordings follow the tempo they were played to. | `true` |

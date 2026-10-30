@@ -232,6 +232,7 @@ impl Bench {
                 recordings: &[],
                 levels: &self.levels,
                 performance: &Performance::default(),
+                live: &std::collections::BTreeMap::new(),
                 inputs: &[],
                 midi_inputs: &[],
                 audio: Audio {

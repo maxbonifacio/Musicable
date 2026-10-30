@@ -1,6 +1,7 @@
 //! The arrangement in a window, its gestures carried out on a document as
 //! the app carries them out.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,7 +21,7 @@ use musicable_model::{LocatorId, Project, TakeId, TrackId, TrackKind};
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
 use crate::testing::Player;
-use crate::{Levels, Plugins, Waveforms};
+use crate::{Levels, Live, Plugins, Waveforms};
 
 struct State {
     arrangement: Arrangement,
@@ -29,6 +30,8 @@ struct State {
     keymap: Keymap,
     player: Player,
     levels: Levels,
+    /// The tracks that render live while the rest renders ahead.
+    live: BTreeMap<Chain, Live>,
     waveforms: Waveforms,
     theme: Theme,
     mouse: MouseMap,
@@ -146,6 +149,7 @@ fn harness(project: Project) -> Harness<'static, State> {
         keymap: Keymap::default_keymap(),
         player: Player::default(),
         levels: Levels::default(),
+        live: BTreeMap::new(),
         waveforms: Waveforms::default(),
         theme: Theme::default(),
         mouse: MouseMap::live(),
@@ -184,6 +188,7 @@ fn harness(project: Project) -> Harness<'static, State> {
                         recordings: &[],
                         levels: &state.levels,
                         performance: &crate::Performance::default(),
+                        live: &state.live,
                         inputs: &[],
                         midi_inputs: &[],
                         audio: Audio {
@@ -818,6 +823,75 @@ fn header_buttons_mute_solo_and_arm() {
     assert!(track(ids.bass).armed);
     let mute = harness.get_by_label("Mute track Drums");
     assert_eq!(mute.accesskit_node().toggled(), Some(Toggled::True));
+}
+
+#[test]
+fn a_track_rendering_live_has_a_live_mark_that_says_why() {
+    let (mut project, ids) = project();
+    let reverb = project.tracks[3].id;
+    project.track_mut(ids.drums).unwrap().armed = true;
+    project.track_mut(ids.keys).unwrap().always_live = true;
+    let mut harness = harness(project);
+    assert!(harness.query_by_label_contains("Live:").is_none());
+    let live = |track| Live { track };
+    harness.state_mut().live = BTreeMap::from([
+        (Chain::Track(ids.drums), live(ids.drums)),
+        (Chain::Track(ids.keys), live(ids.keys)),
+        (Chain::Track(reverb), live(ids.drums)),
+        (Chain::Master, live(ids.keys)),
+    ]);
+    harness.run();
+    for reason in [
+        "Live: armed, monitoring its input",
+        "Live: set to Always Live",
+        "Live: fed by the armed track Drums",
+        "Live: fed by Keys, which is set to Always Live",
+    ] {
+        harness.get_by_label(reason);
+    }
+    // Each in its own header, at the end of the name, before the buttons.
+    let mark = harness.get_by_label("Live: set to Always Live").rect();
+    let header = harness.get_by_label("Track Keys").rect();
+    let button = harness.get_by_label("Show automation of track Keys").rect();
+    assert!(header.contains_rect(mark), "{mark:?} in {header:?}");
+    assert!(mark.right() < button.left() && mark.left() > header.left() + 40.0);
+    // Monitoring In, it says so.
+    harness.state_mut().document.transact("Monitor", |tx| {
+        tx.set_track_monitor(ids.drums, musicable_model::Monitor::In);
+    });
+    harness.run();
+    harness.get_by_label("Live: monitoring its input");
+    harness.get_by_label("Live: fed by Drums, which monitors its input");
+    assert!(
+        harness
+            .query_by_label("Live: armed, monitoring its input")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_track_header_menu_sets_the_track_always_live() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    for on in [true, false] {
+        harness.get_by_label("Track Bass").click_secondary();
+        harness.run();
+        let item = harness.get_by_label("Always Live");
+        let toggled = if on { Toggled::False } else { Toggled::True };
+        assert_eq!(item.accesskit_node().toggled(), Some(toggled));
+        item.click();
+        harness.run();
+        assert_eq!(
+            harness
+                .state()
+                .project()
+                .track(ids.bass)
+                .unwrap()
+                .always_live,
+            on
+        );
+    }
+    assert!(harness.state().errors.is_empty());
 }
 
 #[test]

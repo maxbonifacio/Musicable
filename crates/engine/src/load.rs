@@ -161,6 +161,10 @@ pub struct NodeLoads {
     /// Where the live half's loads start: after the last for a graph that
     /// renders whole.
     live_from: usize,
+    /// The live source that put each of the live half's nodes in it, from
+    /// `live_from` on: see [`sides`](NodeLoads::sides). The queues, after
+    /// them, have none.
+    sources: Vec<NodeKey>,
     /// By node.
     pub(crate) loads: Vec<Load>,
     /// Whether the engine has installed the graph, each load having carried
@@ -170,14 +174,15 @@ pub struct NodeLoads {
 
 impl NodeLoads {
     /// Loads for the nodes `keys` say, in order, the live half's from
-    /// `live_from` on.
-    pub(crate) fn new(keys: Vec<Option<LoadKey>>, live_from: usize) -> Self {
+    /// `live_from` on, the first of which `sources` put there.
+    pub(crate) fn new(keys: Vec<Option<LoadKey>>, live_from: usize, sources: Vec<NodeKey>) -> Self {
         // Off the audio thread, so the clock is ready before it's read there.
         ticks_per_second();
         let loads = keys.iter().map(|_| Load::new()).collect();
         Self {
             keys,
             live_from,
+            sources,
             loads,
             installed: AtomicBool::new(false),
         }
@@ -212,15 +217,21 @@ impl NodeLoads {
         (self.keys.iter().zip(&self.loads)).filter_map(|(key, load)| Some(((*key)?, load)))
     }
 
-    /// Each node's load, with whose it is and whether the node renders
-    /// live, as the device asks, rather than ahead of it: see
-    /// [`Graph::prepare`](crate::Graph::prepare). In a graph with nothing
-    /// live, every node renders ahead of the device while the engine has a
-    /// lead ([`EngineHandle::set_lead`](crate::EngineHandle::set_lead)).
-    pub fn sides(&self) -> impl Iterator<Item = (LoadKey, &Load, bool)> {
-        let live = (0..self.keys.len()).map(|n| n >= self.live_from);
-        (self.keys.iter().zip(&self.loads).zip(live))
-            .filter_map(|((key, load), live)| Some(((*key)?, load, live)))
+    /// Each node's load, with whose it is and, if the node renders live, as
+    /// the device asks, rather than ahead of it, the key of what put it in
+    /// the graph's live half ([`Graph::prepare`](crate::Graph::prepare)): a
+    /// live source ([`Node::live`](crate::Node::live)) or a node set live
+    /// ([`Graph::set_live`](crate::Graph::set_live)), its own key then, or
+    /// else one of the nearest that reach it. In a graph with nothing live,
+    /// every node renders ahead of the device while the engine has a lead
+    /// ([`EngineHandle::set_lead`](crate::EngineHandle::set_lead)).
+    pub fn sides(&self) -> impl Iterator<Item = (LoadKey, &Load, Option<NodeKey>)> {
+        let source = |n: usize| {
+            let n = n.checked_sub(self.live_from)?;
+            self.sources.get(n).copied()
+        };
+        (self.keys.iter().zip(&self.loads).enumerate())
+            .filter_map(move |(n, (key, load))| Some(((*key)?, load, source(n))))
     }
 
     /// The load of the node with `key`, if the graph has one.
