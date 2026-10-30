@@ -427,6 +427,11 @@ pub struct Track {
     /// buses don't.
     pub input: Option<Input>,
     pub monitor: Monitor,
+    /// Whether the track renders live, as the audio device asks for each
+    /// buffer, while the rest of the project renders ahead of it: so its
+    /// devices' knobs and windows keep time with what's heard, as they do
+    /// on a track monitoring its input.
+    pub always_live: bool,
     /// Where the track's output goes. See [`Project::can_feed`] for which
     /// buses a track can feed.
     pub output: Bus,
@@ -651,6 +656,7 @@ impl Project {
             armed: false,
             input: Input::default_for(kind),
             monitor: Monitor::Auto,
+            always_live: false,
             output: Bus::Master,
             sends: Vec::new(),
             tone: None,

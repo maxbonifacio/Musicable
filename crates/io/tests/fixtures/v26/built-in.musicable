@@ -1,0 +1,397 @@
+{
+  "format": "musicable-project",
+  "version": 26,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 3,
+  "next_send_id": 0,
+  "next_device_id": 9,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Drums",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 0,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "sampler",
+              "sample": "Samples/Kick \"808\".wav",
+              "params": {
+                "root": 36.0,
+                "transpose": 0.0,
+                "detune": 0.0,
+                "start": 0.0,
+                "end": 100.0,
+                "loop": 0.0,
+                "loop_start": 0.0,
+                "mode": 1.0,
+                "attack": 1.0,
+                "decay": 600.0,
+                "sustain": 100.0,
+                "release": 50.0,
+                "velocity": 50.0,
+                "volume": 0.0,
+                "filter": 0.0,
+                "cutoff": 2000.0,
+                "resonance": 0.0,
+                "voices": 8.0,
+                "loop_fade": 10.0
+              }
+            }
+          }
+        },
+        {
+          "id": 1,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "sampler",
+              "sample": null,
+              "params": {
+                "root": 60.0,
+                "transpose": 0.0,
+                "detune": 0.0,
+                "start": 0.0,
+                "end": 100.0,
+                "loop": 0.0,
+                "loop_start": 0.0,
+                "mode": 0.0,
+                "attack": 1.0,
+                "decay": 600.0,
+                "sustain": 100.0,
+                "release": 50.0,
+                "velocity": 50.0,
+                "volume": 0.0,
+                "filter": 0.0,
+                "cutoff": 2000.0,
+                "resonance": 0.0,
+                "voices": 32.0,
+                "loop_fade": 10.0
+              }
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Lead",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 3,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "synth",
+              "sample": null,
+              "params": {
+                "osc1_wave": 3.0,
+                "osc1_octave": 0.0,
+                "osc1_level": 100.0,
+                "osc2_wave": 2.0,
+                "osc2_pitch": -24.0,
+                "osc2_detune": 7.0,
+                "osc2_level": 0.0,
+                "noise": 0.0,
+                "filter": 1.0,
+                "cutoff": 2000.0,
+                "resonance": 10.0,
+                "filter_env": -96.0,
+                "key_track": 50.0,
+                "filter_attack": 1.0,
+                "filter_decay": 400.0,
+                "filter_sustain": 30.0,
+                "filter_release": 200.0,
+                "amp_attack": 1.0,
+                "amp_decay": 600.0,
+                "amp_sustain": 80.0,
+                "amp_release": 150.0,
+                "volume": -6.0,
+                "velocity": 50.0,
+                "voices": 8.0,
+                "glide": 0.3333333333333333
+              }
+            }
+          }
+        },
+        {
+          "id": 6,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "delay",
+              "sample": null,
+              "params": {
+                "sync": 1.0,
+                "time": 250.0,
+                "note": 6.0,
+                "feedback": 40.0,
+                "ping_pong": 0.0,
+                "low_cut": 100.0,
+                "high_cut": 8000.0,
+                "mix": 30.0
+              }
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "Vocal",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 4,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "eq",
+              "sample": null,
+              "params": {
+                "band1_on": 1.0,
+                "band1_shape": 1.0,
+                "band1_freq": 10.0,
+                "band1_gain": 0.0,
+                "band1_q": 0.7071067811865476,
+                "band2_on": 1.0,
+                "band2_shape": 3.0,
+                "band2_freq": 100.0,
+                "band2_gain": 0.0,
+                "band2_q": 0.7071067811865476,
+                "band3_on": 1.0,
+                "band3_shape": 4.0,
+                "band3_freq": 250.0,
+                "band3_gain": -24.0,
+                "band3_q": 18.0,
+                "band4_on": 1.0,
+                "band4_shape": 4.0,
+                "band4_freq": 800.0,
+                "band4_gain": 0.0,
+                "band4_q": 0.7071067811865476,
+                "band5_on": 1.0,
+                "band5_shape": 4.0,
+                "band5_freq": 2500.0,
+                "band5_gain": 0.0,
+                "band5_q": 0.7071067811865476,
+                "band6_on": 1.0,
+                "band6_shape": 5.0,
+                "band6_freq": 6000.0,
+                "band6_gain": 0.0,
+                "band6_q": 0.7071067811865476,
+                "band7_on": 1.0,
+                "band7_shape": 6.0,
+                "band7_freq": 10000.0,
+                "band7_gain": 0.0,
+                "band7_q": 0.7071067811865476,
+                "band8_on": 1.0,
+                "band8_shape": 8.0,
+                "band8_freq": 22000.0,
+                "band8_gain": 0.0,
+                "band8_q": 0.7071067811865476,
+                "output": -0.0
+              }
+            }
+          }
+        },
+        {
+          "id": 5,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "compressor",
+              "sample": null,
+              "params": {
+                "threshold": -18.0,
+                "ratio": 4.0,
+                "attack": 10.0,
+                "release": 100.0,
+                "knee": 6.0,
+                "output": 0.0,
+                "mix": 100.0,
+                "detector": 0.0,
+                "sidechain": 0.0,
+                "key_high_pass": 20.0,
+                "key_low_pass": 20000.0,
+                "listen": 0.0
+              }
+            }
+          }
+        },
+        {
+          "id": 7,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "reverb",
+              "sample": null,
+              "params": {
+                "predelay": 10.0,
+                "size": 50.0,
+                "decay": 2.0,
+                "damping": 6000.0,
+                "low_cut": 80.0,
+                "width": 100.0,
+                "mix": 25.0
+              }
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [
+      {
+        "id": 8,
+        "bypassed": false,
+        "active": true,
+        "kind": {
+          "native": {
+            "kind": "utility",
+            "sample": null,
+            "params": {
+              "gain": 15.848931924611133,
+              "pan": -1.0,
+              "width": 100.0,
+              "invert_left": 0.0,
+              "invert_right": 0.0,
+              "mute": 0.0,
+              "dc": 0.0
+            }
+          }
+        }
+      }
+    ],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "wires": [],
+  "workspace": null
+}

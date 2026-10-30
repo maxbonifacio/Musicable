@@ -1414,6 +1414,17 @@ fn examples() -> Vec<Example> {
                     .with("name", other_name(&track.name)),
             )
         }),
+        edits(track::TOGGLE_ALWAYS_LIVE, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(Args::new().with("tracks", vec![track]))
+        }),
+        // Without arguments: the selected tracks.
+        edits(track::TOGGLE_ALWAYS_LIVE, |s| {
+            let tracks: Vec<_> = project(s).tracks.iter().take(2).map(|t| t.id).collect();
+            (!tracks.is_empty()).then_some(())?;
+            s.select_tracks(&tracks);
+            Some(Args::new())
+        }),
         leaves(transport::CAPTURE, bare),
         leaves(transport::GO_TO_START, bare),
         leaves(transport::LOCATE, |_| {

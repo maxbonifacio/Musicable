@@ -559,12 +559,22 @@ not a copy moved since or whose notes changed. `view.toggle_take_lanes`
 | `track.new_group_track` | New Group Track | Adds an empty group track | none | none |
 | `track.delete` | Delete Tracks | Deletes the selected tracks, or the ones its `tracks` argument names | none | Delete, with tracks selected |
 | `track.rename` | Rename Track | Names the track its `track` argument names, `name` | none | none |
+| `track.toggle_always_live` | Always Live | Has the selected tracks, or the track the panels show, or those its `tracks` argument names, render live while the rest of the project renders ahead, or stop | none | none |
 
 A new track is named after its kind and how many of that kind there are,
 such as "Audio 3". Return tracks go at the end of the list, and other tracks
 before the first return track, so the returns stay together, as in Live.
 Return tracks start solo-safe. Live's Ctrl+G groups the selected tracks,
 which needs a selection, so New Group Track has no key yet.
+
+Always Live (`Transaction::set_track_always_live`, `Edit::TrackAlwaysLive`)
+follows the first track, as the header buttons do for a selection: it
+turns them all on if the first is off, and all off if it's on.
+`track::chosen` is the tracks a command for tracks takes without being
+told, as Always Live and Show/Hide Take Lanes do: the selected tracks, or
+else the track the panels show. The track header's menu and the mixer
+strip's run it with the track they were opened on, and tick it as that
+track has it (`toggled_for`).
 
 ### Device
 
@@ -1221,6 +1231,7 @@ stops the transport at the start of the song. Then:
   | Deactivating or activating a device | A new graph |
   | A plugin's parameters and settings | Nothing: the plugin gets them ([plugins.md](plugins.md#plugins-on-tracks)) |
   | Arming a track, its monitoring | Its input's `InputMonitor::ARMED` or `MONITOR` parameter, and a new graph, where a track that can monitor its input renders live ([engine.md](engine.md#rendering-ahead)) |
+  | Always Live | A new graph, where the track renders live ([engine.md](engine.md#rendering-ahead)) |
   | Track and clip names, locators | Nothing yet |
 
   Play, stop and go to start send their `TransportCommand` as they run.

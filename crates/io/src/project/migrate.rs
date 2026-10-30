@@ -42,6 +42,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     notes_after_effects,
     note_wires,
     note_outputs,
+    always_live,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -475,6 +476,19 @@ fn note_outputs(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     }
     let master = file.get_mut("master").and_then(|m| m.get_mut("devices"));
     no_note_output(master, "master.devices")
+}
+
+/// Version 26 added Always Live, which has a track render live while the
+/// rest of the project renders ahead. Version 25 tracks render live only
+/// as they monitor their inputs, so none is Always Live.
+fn always_live(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        if let Some(track) = track.as_object_mut() {
+            add(track, &format!("tracks[{i}]"), "always_live", json!(false))?;
+        }
+    }
+    Ok(())
 }
 
 /// Gives each plugin in `devices`, a list at `path`, no note output.
@@ -1147,6 +1161,23 @@ mod tests {
             run(&STEPS[..24], &mut file, 24).unwrap_err().path,
             "master.devices[0].kind.plugin.note_output",
             "a plugin's note output in a version 24 file"
+        );
+    }
+
+    #[test]
+    fn version_25_tracks_are_not_always_live() {
+        let mut file = json!({"version": 25, "tracks": [{"kind": "audio"}, "not a track"]});
+        run(&STEPS[..25], &mut file, 25).unwrap();
+        assert_eq!(file["tracks"][0]["always_live"], json!(false));
+        assert_eq!(file["tracks"][1], json!("not a track"));
+        assert_eq!(file["version"], json!(26));
+        let mut file = json!({"version": 25, "tracks": [{"always_live": true}]});
+        assert_eq!(
+            run(&STEPS[..25], &mut file, 25),
+            Err(Invalid::new(
+                "tracks[0].always_live",
+                "unknown field for the file's version"
+            ))
         );
     }
 

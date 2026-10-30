@@ -1387,6 +1387,25 @@ and agents read them with `get_performance`
 ([agents.md](agents.md#the-tools)). The window redraws at least four
 times a second, so they keep up.
 
+**Live marks.** `LiveMarks`, beside `Figures`, works out from the loads of
+each graph the session sends (`Session::loads`) which channels render live
+while the rest of the project renders ahead, for the Live marks in the
+tracks' headers. It looks at each node in the live half, and the live
+source that put it there (`NodeLoads::sides`), and maps both to their
+channel as the figures' rows are, through `compile::keys::owner` and
+`Places`. A channel gets a `musicable_ui::Live` naming the track whose
+input, or Always Live, put its nodes there: its own track, if that's one
+of them, or else the source of its first node in the graph's order. It
+works the marks out again only for another graph, which it tells by its
+loads (`Arc::ptr_eq`), and has none while no stream plays or Render Ahead
+is off, as then everything renders live. The `View` carries them as
+`live`. The header's name part draws the mark, LIVE in a small outlined
+box in the theme's `monitor` colour, at the end of the name, where there's
+room, and `Live::reason` says in its tooltip, and to screen readers, what
+has it render live, from the project as it is: "Live: armed, monitoring
+its input", "Live: set to Always Live", or for another track's, "Live: fed
+by the armed track Vocal".
+
 ## How it's built
 
 - `crates/ui` draws the shell with egui. It depends on the model, the

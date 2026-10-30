@@ -1,10 +1,10 @@
-//! The track commands: new audio, MIDI, return and group tracks, and
-//! naming and deleting tracks.
+//! The track commands: new audio, MIDI, return and group tracks, naming
+//! and deleting tracks, and Always Live.
 
-use musicable_model::{TrackId, TrackKind};
+use musicable_model::{Chain, TrackId, TrackKind};
 
 use crate::{
-    Command, CommandId, Context, Document, Param, Registry, Transaction, Type, Value, When,
+    Command, CommandId, Context, Document, Editor, Param, Registry, Transaction, Type, Value, When,
 };
 
 /// Adds an audio track.
@@ -19,6 +19,10 @@ pub const NEW_GROUP_TRACK: CommandId = CommandId::new("track.new_group_track");
 pub const RENAME: CommandId = CommandId::new("track.rename");
 /// Deletes tracks: the selected ones, without arguments.
 pub const DELETE: CommandId = CommandId::new("track.delete");
+/// Has tracks render live while the rest of the project renders ahead, or
+/// stop: the selected tracks, or the track the panels show, without
+/// arguments.
+pub const TOGGLE_ALWAYS_LIVE: CommandId = CommandId::new("track.toggle_always_live");
 
 /// The commands that add tracks, with their titles and the kind of track
 /// each adds.
@@ -73,6 +77,50 @@ pub fn register(registry: &mut Registry) {
             Ok(Value::None)
         },
     );
+    registry.add(
+        Command::new(TOGGLE_ALWAYS_LIVE, "Always Live").with_params(&[Param::optional(
+            "tracks",
+            Type::TRACKS,
+            "The tracks: the selected tracks, or the track the panels show, without it.",
+        )]),
+        |ctx, args| {
+            let tracks = match args.opt("tracks")? {
+                Some(tracks) => tracks,
+                None => chosen(ctx.document.editor()),
+            };
+            toggle_always_live(ctx.document, &tracks);
+            Ok(Value::None)
+        },
+    );
+}
+
+/// The tracks a command for tracks acts on without being told which: the
+/// selected tracks, or else the track the panels show.
+pub fn chosen(editor: &Editor) -> Vec<TrackId> {
+    match editor.selection.tracks.is_empty() {
+        false => editor.selection.tracks.iter().copied().collect(),
+        true => editor
+            .selected_track
+            .and_then(Chain::track)
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Sets the tracks with ids `tracks` to Always Live, or all of them back,
+/// as one transaction: the first decides, as Live's track header buttons
+/// do for a selection.
+fn toggle_always_live(document: &mut Document, tracks: &[TrackId]) {
+    let project = document.project();
+    let Some(first) = tracks.iter().find_map(|&id| project.track(id)) else {
+        return;
+    };
+    let always_live = !first.always_live;
+    document.transact("Always Live", |tx| {
+        for &track in tracks {
+            tx.set_track_always_live(track, always_live);
+        }
+    });
 }
 
 /// Deletes the tracks with ids `tracks`, as one transaction. Tracks feeding
@@ -208,5 +256,38 @@ mod tests {
             setup.committed_names(),
             ["Rename Track", "Delete Tracks", "Delete Track"]
         );
+    }
+
+    #[test]
+    fn always_live_follows_the_first_track() {
+        let mut project = Project::new();
+        let vocal = project.add_track("Vocal", TrackKind::Audio);
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let reverb = project.add_track("Reverb", TrackKind::Return);
+        let mut setup = Setup::new(project);
+        let always_live = |setup: &Setup| -> Vec<bool> {
+            let tracks = &setup.document.project().tracks;
+            tracks.iter().map(|t| t.always_live).collect()
+        };
+        // Without arguments, the selected tracks, which all take the
+        // first's turn.
+        setup.select_tracks(&[keys, reverb]);
+        setup.run(&TOGGLE_ALWAYS_LIVE);
+        assert_eq!(always_live(&setup), [false, true, true]);
+        let args = |tracks: Vec<TrackId>| Args::new().with("tracks", tracks);
+        setup
+            .run_with(&TOGGLE_ALWAYS_LIVE, args(vec![vocal, keys]))
+            .unwrap();
+        assert_eq!(always_live(&setup), [true, true, true]);
+        setup
+            .run_with(&TOGGLE_ALWAYS_LIVE, args(vec![keys, vocal]))
+            .unwrap();
+        assert_eq!(always_live(&setup), [false, false, true]);
+        // Without tracks selected, the track the panels show.
+        setup.select_tracks(&[]);
+        setup.document.editor_mut().selected_track = Some(Chain::Track(reverb));
+        setup.run(&TOGGLE_ALWAYS_LIVE);
+        assert_eq!(always_live(&setup), [false, false, false]);
+        assert_eq!(setup.committed_names(), ["Always Live"; 4]);
     }
 }

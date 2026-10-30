@@ -39,7 +39,7 @@ use egui::{
 };
 use musicable_commands::editor::Editor;
 use musicable_commands::mixer::Change;
-use musicable_commands::{Args, automation, edit};
+use musicable_commands::{Args, automation, edit, track};
 use musicable_model::mixer::Bus;
 use musicable_model::modulation::Output;
 use musicable_model::param::ParamAddress;
@@ -570,6 +570,16 @@ impl Mixer<'_> {
                 .on_hover_text("Soloing other tracks doesn't silence this one.");
             if toggle.changed() {
                 mix(actions, Change::SoloSafe(id, safe));
+            }
+            let mut always_live = track.always_live;
+            let toggle = ui.checkbox(&mut always_live, "Always Live").on_hover_text(
+                "It renders live, as the audio device asks for each buffer, while the rest of \
+                 the project renders ahead, so what you play into it and the knobs you turn on \
+                 it are heard at once.",
+            );
+            if toggle.changed() {
+                let args = Args::new().with("tracks", vec![id]);
+                actions.push(Action::RunWith(track::TOGGLE_ALWAYS_LIVE, args));
             }
             ui.separator();
             if ui.button("Delete Track").clicked() {
@@ -2686,6 +2696,27 @@ mod tests {
         ];
         assert_eq!(mixed(&harness), expected);
         assert!(harness.query_by_label("Lead").is_none());
+    }
+
+    #[test]
+    fn a_strips_menu_sets_its_track_always_live() {
+        let (project, [_, keys, ..]) = project();
+        let mut harness = harness(project);
+        let always_live = |harness: &Harness<'_, State>| {
+            let project = harness.state().document.project();
+            project.track(keys).unwrap().always_live
+        };
+        for on in [true, false] {
+            harness.get_by_label("Keys").click_secondary();
+            harness.run();
+            let item = harness.get_by_label("Always Live");
+            let toggled = if on { Toggled::False } else { Toggled::True };
+            assert_eq!(item.accesskit_node().toggled(), Some(toggled));
+            item.click();
+            harness.run();
+            assert_eq!(always_live(&harness), on);
+        }
+        assert!(harness.state().errors.is_empty());
     }
 
     #[test]

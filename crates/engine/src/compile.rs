@@ -846,6 +846,14 @@ fn build(
         if let Some(head) = head {
             points.insert(Tap::PreFx(track.id), head);
         }
+        // A track set to Always Live renders live from its clips, its input
+        // and its bus on, and so does what they reach.
+        if track.always_live {
+            let heads = [player, monitor, midi_monitor, buses.get(&track.id).copied()];
+            for node in heads.into_iter().flatten() {
+                graph.set_live(node).expect("the nodes were just added");
+            }
+        }
         let mut strip = Strip {
             graph: &mut graph,
             tail: head,
@@ -3885,6 +3893,50 @@ mod tests {
             .unwrap();
         play(&mut engine, 200);
         assert_eq!(drain(&mut kept), [0.0; 200]);
+    }
+
+    #[test]
+    fn a_track_set_always_live_renders_live_with_what_it_plays_into() {
+        let mut p = project();
+        let (drums, bass, reverb) = (p.tracks[0].id, p.tracks[1].id, p.tracks[2].id);
+        let group = p.add_track("Group", TrackKind::Group);
+        let keys = p.add_track("Keys", TrackKind::Midi);
+        let device = p.new_device(DeviceKind::TestGain { gain: 1.0 });
+        let gain = device.id;
+        let send = p.new_send(reverb);
+        let track = p.track_mut(bass).unwrap();
+        track.always_live = true;
+        track.devices.push(device);
+        track.sends.push(send);
+        p.track_mut(keys).unwrap().output = Bus::Group(group);
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        // The bass from its clips on, what it sends to and the master, but
+        // not the drums, which only play into the master too.
+        for key in [
+            keys::track_clips(bass),
+            keys::track_input(bass),
+            keys::device(gain),
+            keys::track_output(bass),
+            keys::track_bus(reverb),
+            keys::master_output(),
+        ] {
+            assert!(graph.renders_live(key), "{key:?}");
+        }
+        for key in [keys::track_clips(drums), keys::track_output(drums)] {
+            assert!(!graph.renders_live(key), "{key:?}");
+        }
+        assert!(!graph.renders_live(keys::track_bus(group)));
+        // A group set Always Live renders live from its bus on, but what
+        // feeds it renders ahead.
+        p.track_mut(bass).unwrap().always_live = false;
+        p.track_mut(group).unwrap().always_live = true;
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        for key in [keys::track_bus(group), keys::track_output(group)] {
+            assert!(graph.renders_live(key), "{key:?}");
+        }
+        for key in [keys::track_clips(keys), keys::track_clips(bass)] {
+            assert!(!graph.renders_live(key), "{key:?}");
+        }
     }
 
     #[test]

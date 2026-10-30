@@ -15,7 +15,9 @@ From the top, a strip has these parts, which can be hidden and moved
   a double-click renames it, and the master's selects the master, for the
   devices panel to show its devices. A selected track's strip is lit, as its
   header is. Hovering the name shows the track's kind and test tone.
-  Right-clicking it has **Solo-Safe** and **Delete Track**.
+  Right-clicking it has **Solo-Safe**, **Always Live**
+  ([Render Ahead](../getting-started/audio.md#render-ahead)) and **Delete
+  Track**.
 - **The input**, on audio and MIDI tracks: what the track records from
   ([Recording and comping](../using/recording.md#inputs)), and on an audio
   track, another track's sound or Resampling, the master, or on a MIDI

@@ -13,7 +13,7 @@ use egui::{
     Ui, WidgetInfo, pos2, vec2,
 };
 use musicable_commands::{Args, device, edit};
-use musicable_model::{Chain, DeviceId, Project, TrackId};
+use musicable_model::{Chain, DeviceId, Monitor, Project, TrackId};
 
 use crate::devices::describe;
 use crate::shell::{Action, View};
@@ -35,8 +35,8 @@ const LONGEST: &str = "Its longest block over the last second, as a share of the
 /// What the Renders column's heading says in its tooltip.
 const RENDERS: &str = "Ahead: rendered ahead of the audio device, on all the cores, as Render \
                        Ahead in Settings > Audio has it. Live: rendered as the device asks for \
-                       each buffer, as a track monitoring its input is, with what it plays \
-                       into, and everything is while Render Ahead is off.";
+                       each buffer, as a track monitoring its input or set to Always Live is, \
+                       with what it plays into, and everything is while Render Ahead is off.";
 
 /// A share of a core over this turns a figure amber.
 pub const BUSY: f32 = 0.25;
@@ -70,6 +70,36 @@ impl Cpu {
         match self.ahead {
             true => "Ahead",
             false => "Live",
+        }
+    }
+}
+
+/// What has a channel render live while the rest of the project renders
+/// ahead, for the Live mark in its track's header: the track that renders
+/// live of itself, as it monitors its input or is set to Always Live, and
+/// whose sound, notes or modulation reach the channel. That's the
+/// channel's own track if it's one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Live {
+    pub track: TrackId,
+}
+
+impl Live {
+    /// What has `chain` render live, as its Live mark says, such as "Live:
+    /// fed by the armed track Vocal".
+    pub(crate) fn reason(&self, project: &Project, chain: Chain) -> String {
+        let Some(source) = project.track(self.track) else {
+            return "Live".to_owned();
+        };
+        let name = &source.name;
+        let own = chain == Chain::Track(source.id);
+        match (own, source.always_live, source.monitor) {
+            (true, true, _) => "Live: set to Always Live".to_owned(),
+            (true, false, Monitor::In) => "Live: monitoring its input".to_owned(),
+            (true, false, _) => "Live: armed, monitoring its input".to_owned(),
+            (false, true, _) => format!("Live: fed by {name}, which is set to Always Live"),
+            (false, false, Monitor::In) => format!("Live: fed by {name}, which monitors its input"),
+            (false, false, _) => format!("Live: fed by the armed track {name}"),
         }
     }
 }

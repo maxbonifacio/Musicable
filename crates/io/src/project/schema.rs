@@ -118,6 +118,7 @@ struct Track {
     #[serde(deserialize_with = "Option::deserialize")]
     input: Option<Input>,
     monitor: Monitor,
+    always_live: bool,
     /// Where the output goes, or `None` for the master.
     // Required like every other field: serde would read a missing `Option`
     // as `None`, but not through `deserialize_with`.
@@ -1504,6 +1505,7 @@ impl From<&model::Track> for Track {
             armed,
             input,
             monitor,
+            always_live,
             output,
             sends,
             tone,
@@ -1536,6 +1538,7 @@ impl From<&model::Track> for Track {
                 model::Monitor::Auto => Monitor::Auto,
                 model::Monitor::Off => Monitor::Off,
             },
+            always_live: *always_live,
             output: match output {
                 Bus::Master => None,
                 Bus::Group(group) => Some(TrackOutput::Group(group.0)),
@@ -1567,6 +1570,7 @@ impl Track {
             armed,
             input,
             monitor,
+            always_live,
             output,
             sends,
             tone,
@@ -1638,6 +1642,7 @@ impl Track {
                 Monitor::Auto => model::Monitor::Auto,
                 Monitor::Off => model::Monitor::Off,
             },
+            always_live: *always_live,
             output: match output {
                 None => Bus::Master,
                 Some(TrackOutput::Group(group)) => Bus::Group(TrackId(*group)),

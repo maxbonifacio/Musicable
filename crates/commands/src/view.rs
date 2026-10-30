@@ -232,17 +232,9 @@ pub fn register(registry: &mut Registry) {
             "The tracks: the selected tracks, or the track the panels show, without it.",
         )]),
         |ctx, args| {
-            let editor = ctx.document.editor();
             let tracks: Vec<TrackId> = match args.opt("tracks")? {
                 Some(tracks) => tracks,
-                None if !editor.selection.tracks.is_empty() => {
-                    editor.selection.tracks.iter().copied().collect()
-                }
-                None => editor
-                    .selected_track
-                    .and_then(Chain::track)
-                    .into_iter()
-                    .collect(),
+                None => crate::track::chosen(ctx.document.editor()),
             };
             let project = ctx.document.project();
             let tracks: Vec<TrackId> = tracks

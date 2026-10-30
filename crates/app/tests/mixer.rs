@@ -7,8 +7,9 @@
 use musicable_app::Session;
 use musicable_app::null_test::{self, Player, Render};
 use musicable_commands::mixer::Change;
-use musicable_commands::{Args, CommandId, Keymap, Value, wire};
-use musicable_engine::{Engine, EngineConfig, ParallelOptions, rt};
+use musicable_commands::{Args, CommandId, Keymap, Value, edit, track, wire};
+use musicable_engine::compile::keys::{self, Owner};
+use musicable_engine::{Engine, EngineConfig, Lead, LoadKey, NodeKey, ParallelOptions, rt};
 use musicable_model::native::{NativeDevice, NativeKind, compressor};
 use musicable_model::{Chain, ClipType, DeviceKind, Project, TestTone, TrackId, TrackKind};
 
@@ -157,6 +158,44 @@ fn the_mixer_drives_the_engine() {
     assert!(level(reverb).rms[1] > 0.5, "{:?}", level(reverb));
     assert!(level(pad).rms[0] < 0.01, "{:?}", level(pad));
     assert!(meters.master().level().peak[1] > 0.9);
+}
+
+#[test]
+fn a_track_set_always_live_renders_live_and_sounds_the_same() {
+    let mut project = Project::new();
+    let lead = tone_track(&mut project, "Lead", 440.0);
+    let pad = tone_track(&mut project, "Pad", 330.0);
+    let mut rig = Rig::new(project);
+    rig.session.set_lead(Lead::Normal);
+    assert!(rig.press("Space"));
+    let ahead = rig.peaks();
+    // What put the node with `key` in the live half of the graph sent
+    // last, if it's there.
+    let source = |session: &Session, key| {
+        let loads = session.loads().expect("a graph was sent");
+        let side = loads.sides().find(|&(k, ..)| k == LoadKey::Node(key));
+        side.expect("the graph has the node").2
+    };
+    let lead_owns = |key: Option<NodeKey>| key.and_then(keys::owner) == Some(Owner::Clips(lead));
+    for always_live in [true, false] {
+        match always_live {
+            true => rig.run(
+                &track::TOGGLE_ALWAYS_LIVE,
+                Args::new().with("tracks", vec![lead]),
+            ),
+            false => rig.run(&edit::UNDO, Args::new()),
+        };
+        let set = rig.session.project().track(lead).unwrap().always_live;
+        assert_eq!(set, always_live);
+        // The lead from its clips on, and the master it plays into, but not
+        // the pad.
+        for key in [keys::track_clips(lead), keys::master_output()] {
+            let source = source(&rig.session, key);
+            assert_eq!(lead_owns(source), always_live, "{key:?}: {source:?}");
+        }
+        assert_eq!(source(&rig.session, keys::track_output(pad)), None);
+        near(rig.peaks(), ahead);
+    }
 }
 
 #[test]

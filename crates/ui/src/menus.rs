@@ -7,7 +7,7 @@ use musicable_commands::{
     locator, notes, options, rewarp, track, transient, transport, view, warp, workspace,
 };
 
-use crate::shell::{Action, View, toggled, with_keys};
+use crate::shell::{Action, View, toggled_for, with_keys};
 
 /// A menu's title, the area of commands it lists, and its commands in order.
 /// `None` is a separator.
@@ -68,6 +68,8 @@ const MENUS: [MenuSpec; 8] = [
             Some(track::NEW_GROUP_TRACK),
             None,
             Some(track::DELETE),
+            None,
+            Some(track::TOGGLE_ALWAYS_LIVE),
         ],
     ),
     (
@@ -333,7 +335,7 @@ pub(crate) fn context_menu(
         let id = &command.id;
         let enabled = !args.is_empty() || command.when.applies(view.project, view.editor);
         let mut button = with_keys(Button::new(command.title.as_str()), view, id);
-        if let Some(on) = toggled(view, id) {
+        if let Some(on) = toggled_for(view, id, args) {
             button = button.selected(on);
         }
         if ui.add_enabled(enabled, button).clicked() {

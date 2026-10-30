@@ -880,8 +880,8 @@ impl Session {
     /// How long each node of the graph last sent to the engine takes, once
     /// one has been sent. They're whole once the engine has installed it
     /// ([`NodeLoads::installed`]).
-    pub fn loads(&self) -> Option<&NodeLoads> {
-        self.engine.loads.as_deref()
+    pub fn loads(&self) -> Option<&Arc<NodeLoads>> {
+        self.engine.loads.as_ref()
     }
 
     /// What went wrong reading the project's audio files and loading its
@@ -1274,6 +1274,9 @@ impl Session {
                         armed_changed = true;
                         recompile = true;
                     }
+                    // A graph built again has the track render live, or as
+                    // the rest of the project does.
+                    Edit::TrackAlwaysLive { .. } => recompile = true,
                     // Recordings are named after their tracks.
                     Edit::TrackName { .. } => armed_changed = true,
                     // Nothing the engine plays, or nothing yet. Takes play

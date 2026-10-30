@@ -209,6 +209,7 @@ fn harness(project: Project, clip: Option<ClipId>) -> Harness<'static, State> {
                         recordings: &[],
                         levels: &state.levels,
                         performance: &crate::Performance::default(),
+                        live: &std::collections::BTreeMap::new(),
                         inputs: &[],
                         midi_inputs: &[],
                         audio: Audio {

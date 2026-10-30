@@ -916,6 +916,18 @@ impl Transaction<'_> {
         }
     }
 
+    /// Has the track render live while the rest of the project renders
+    /// ahead, or stop.
+    pub fn set_track_always_live(&mut self, track: TrackId, always_live: bool) {
+        if let Some(from) = self.replace(track, |t| &mut t.always_live, always_live) {
+            self.edits.push(Edit::TrackAlwaysLive {
+                track,
+                from,
+                to: always_live,
+            });
+        }
+    }
+
     /// Feeds the track's output to `output`, if the track can feed it: see
     /// [`Project::can_feed`]. Otherwise it does nothing. An output that
     /// would close a loop through an input or a wire is refused.
@@ -2255,6 +2267,7 @@ impl Transaction<'_> {
                 let _ = self.set_track_input(*track, to.clone());
             }
             Edit::TrackMonitor { track, to, .. } => self.set_track_monitor(*track, *to),
+            Edit::TrackAlwaysLive { track, to, .. } => self.set_track_always_live(*track, *to),
             Edit::TrackOutput { track, to, .. } => {
                 let _ = self.set_track_output(*track, *to);
             }
@@ -2553,6 +2566,11 @@ pub enum Edit {
         track: TrackId,
         from: Monitor,
         to: Monitor,
+    },
+    TrackAlwaysLive {
+        track: TrackId,
+        from: bool,
+        to: bool,
     },
     TrackOutput {
         track: TrackId,
@@ -2985,6 +3003,11 @@ impl Edit {
                 to: from,
             },
             Edit::TrackMonitor { track, from, to } => Edit::TrackMonitor {
+                track,
+                from: to,
+                to: from,
+            },
+            Edit::TrackAlwaysLive { track, from, to } => Edit::TrackAlwaysLive {
                 track,
                 from: to,
                 to: from,
@@ -3453,6 +3476,14 @@ impl Edit {
                     to: next,
                     ..
                 },
+            )
+            | (
+                Edit::TrackAlwaysLive { track, to, .. },
+                Edit::TrackAlwaysLive {
+                    track: other,
+                    to: next,
+                    ..
+                },
             ) if track == other => *to = *next,
             (
                 Edit::TrackInput { track, to, .. },
@@ -3775,6 +3806,7 @@ impl Edit {
                 | Edit::TrackArmed { .. }
                 | Edit::TrackInput { .. }
                 | Edit::TrackMonitor { .. }
+                | Edit::TrackAlwaysLive { .. }
                 | Edit::TrackOutput { .. }
                 | Edit::TrackClipType { .. }
                 | Edit::AddSend { .. }
@@ -3885,6 +3917,7 @@ impl Edit {
             | Edit::TrackSolo { from, to, .. }
             | Edit::TrackSoloSafe { from, to, .. }
             | Edit::TrackArmed { from, to, .. }
+            | Edit::TrackAlwaysLive { from, to, .. }
             | Edit::SendPreFader { from, to, .. }
             | Edit::DeviceBypass { from, to, .. }
             | Edit::DeviceActive { from, to, .. } => from == to,

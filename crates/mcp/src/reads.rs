@@ -242,6 +242,7 @@ fn track(project: &Project, track: &Track) -> Json {
         "solo_safe": track.solo_safe,
         "armed": track.armed,
         "monitor": monitor,
+        "always_live": track.always_live,
         "output": output,
         "sends": sends,
         "clip_type": clip_type(track.clip_type),
