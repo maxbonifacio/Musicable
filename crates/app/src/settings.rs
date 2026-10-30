@@ -516,14 +516,15 @@ pub struct AudioSettings {
     /// Frames per period, or none for the smallest the device supports.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer_size: Option<u32>,
-    /// How far ahead of the device the engine renders while no track plays
+    /// How far ahead of the device the engine renders what doesn't play
     /// live.
     pub render_ahead: RenderAhead,
 }
 
-/// How far ahead of the audio device the engine renders the project while
-/// no track plays live, as a track monitoring its input does: `off`,
-/// `short` (about 20 ms), `normal` (about 50 ms) or `long` (about 200 ms).
+/// How far ahead of the audio device the engine renders the project, all
+/// but what plays live, as a track monitoring its input does with what it
+/// reaches: `off`, `short` (about 20 ms), `normal` (about 50 ms) or `long`
+/// (about 200 ms).
 /// See [`EngineHandle::set_lead`](musicable_engine::EngineHandle::set_lead).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

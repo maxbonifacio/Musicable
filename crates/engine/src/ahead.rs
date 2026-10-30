@@ -23,8 +23,23 @@
 //!
 //! When the live side needs frames the ahead side hasn't rendered, it takes
 //! the token and renders them itself, as the device asks, with the device
-//! inputs and the MIDI messages for them. While anything in the graph is
-//! live ([`Node::live`](crate::Node::live)), it does that for every block.
+//! inputs and the MIDI messages for them. While anything the ahead side
+//! renders is live ([`Node::live`](crate::Node::live)), it does that for
+//! every block.
+//!
+//! A graph with live sources comes in two halves
+//! ([`Graph::prepare`](crate::Graph::prepare)): the ahead side renders the
+//! half that renders ahead, and the live side renders the live half itself,
+//! block by block as the device asks, after the ahead side has rendered
+//! those frames, reading what passes between the halves from their queues.
+//! The ahead side tells the live side what it needs in a queue of its own,
+//! in order of time ([`ToLive`]): each graph's live half, for the live side
+//! to install at the frame the ahead side installed the rest; each tempo
+//! map, from its frame; and the events for nodes in the live half. Both
+//! halves of a graph take over at the same engine time, the furthest frame
+//! the ahead side had rendered. If something that rendered live renders
+//! ahead in the new graph, as when a track is disarmed, the ahead side waits
+//! there for the live side, which hands it over when it gets there.
 
 use std::cell::UnsafeCell;
 use std::fmt;
@@ -35,16 +50,18 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::time::Duration;
 
+use musicable_model::time::{BeatRange, TempoMap};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::buffer::source_channel;
 use crate::engine::{CoreGarbage, CoreMessage, Counters, EVENT_CAPACITY, MAX_WRITERS};
+use crate::graph::take_over;
 use crate::parallel::{CachePadded, Failure};
 use crate::timeline::{Segment, TimelineWriter};
 use crate::transport::Transport;
 use crate::{
     AheadWaker, AudioMut, AudioRef, Block, EngineConfig, Event, MidiMessage, NodeEvent,
-    NodeEventKind, NodeKey, Notes, PreparedGraph, Renderer, rt,
+    NodeEventKind, NodeKey, Notes, PreparedGraph, Renderer, TransportState, rt,
 };
 
 #[cfg(test)]
@@ -113,6 +130,16 @@ pub(crate) const COURSE_CAPACITY: usize = 1024;
 /// while each writer's queue has room for the most a block can record
 /// ([`Notes::CAPACITY`]), so it never drops one.
 const WRITER_NOTES: usize = EVENT_CAPACITY;
+
+/// What the ahead side can queue for the live side: the events a block
+/// can send it, as many as the engine holds, twice over, and the graphs
+/// and tempo maps between.
+pub(crate) const TO_LIVE_CAPACITY: usize = 2 * EVENT_CAPACITY + 2 * LIVE_DEBT;
+
+/// The most graphs and tempo maps the ahead side hands the live side before
+/// the live side has handed back what they replace: as many as it can
+/// keep while its garbage queue is full.
+pub(crate) const LIVE_DEBT: usize = 8;
 
 /// How many frames each ring holds: the longest lead, and a block beyond
 /// it, which the ahead side can start just short of the lead.
@@ -214,10 +241,15 @@ impl Ring {
 /// rendered it, with how many channels the output and the cue output had:
 /// what the live side needs to play the rings, and to say where the song
 /// is.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct Course {
     pub segment: Segment,
-    /// The output's channels, none without a graph.
+    /// The loop region, while looping is on, and how many times the
+    /// playhead has jumped: the rest of the transport the live half sees.
+    pub looping: Option<BeatRange>,
+    pub jumps: u64,
+    /// The output's channels, none without a graph or with the output in
+    /// the live half.
     pub output: u8,
     /// The cue output's, none without one.
     pub cue: u8,
@@ -225,8 +257,42 @@ pub(crate) struct Course {
 
 impl Course {
     fn runs_on_to(&self, next: &Course) -> bool {
-        self.segment.runs_on_to(&next.segment) && (self.output, self.cue) == (next.output, next.cue)
+        self.segment.runs_on_to(&next.segment)
+            && (self.output, self.cue) == (next.output, next.cue)
+            && (self.looping, self.jumps) == (next.looping, next.jumps)
     }
+
+    /// The transport as a block from engine time `time` on, in the course,
+    /// has it.
+    pub(crate) fn transport_at(&self, time: u64) -> TransportState {
+        let segment = self.segment;
+        TransportState {
+            playing: segment.playing,
+            position: segment.position_at(time),
+            looping: self.looping,
+            record: segment.record,
+            recording: segment.recording,
+            jumps: self.jumps,
+        }
+    }
+}
+
+/// What the ahead side sends the live side, in order of engine time.
+pub(crate) enum ToLive {
+    /// A graph the ahead side installed at `at`, for the live side to
+    /// install there too: the graph's live half, if it has one, and whether
+    /// the ahead side waits there for the live side to hand over the nodes
+    /// that rendered live and render ahead from then on.
+    Graph {
+        at: u64,
+        live: Option<Box<PreparedGraph>>,
+        drain: bool,
+    },
+    /// A tempo map, for the live half from `at` on.
+    Tempo { at: u64, tempo: Box<TempoMap> },
+    /// An event for a node in the live half: for its time, or, without
+    /// one, for when the live side takes it.
+    Event { time: Option<u64>, event: Event },
 }
 
 /// What the ahead side rendered of a writer's record taps, for the live
@@ -284,22 +350,21 @@ impl LiveQueue {
     /// plays: as many as its queue holds.
     pub(crate) const NOTES: usize = WRITER_NOTES;
 
-    /// Hands `writer` what the ahead side rendered of its taps for
+    /// Hands `writer` what the ahead side rendered of its record tap for
     /// `frames` frames from engine time `time`, with silence where it
-    /// didn't write them, using `tap` and `notes` for room: two channels
-    /// and at least as many frames, and [`NOTES`](Self::NOTES) notes.
+    /// didn't write it, using `tap` for room: two channels and at least as
+    /// many frames.
     ///
     /// # Safety
     ///
     /// The ahead side has rendered these frames, and the live side hasn't
     /// played them.
-    pub(crate) unsafe fn play(
+    pub(crate) unsafe fn play_sound(
         &mut self,
         writer: &mut dyn crate::TapWriter,
         time: u64,
         frames: usize,
         tap: &mut crate::AudioBuffer,
-        notes: &mut Vec<NodeEvent>,
     ) {
         let end = time + frames as u64;
         let from = self.ring.from.load(Acquire).clamp(time, end);
@@ -318,6 +383,19 @@ impl LiveQueue {
         } else {
             writer.write(time, AudioRef::empty(frames));
         }
+    }
+
+    /// Hands `writer` the notes the ahead side's note record played in the
+    /// same frames, after [`play_sound`](Self::play_sound), using `notes`
+    /// for room: [`NOTES`](Self::NOTES) of them.
+    pub(crate) fn play_notes(
+        &mut self,
+        writer: &mut dyn crate::TapWriter,
+        time: u64,
+        frames: usize,
+        notes: &mut Vec<NodeEvent>,
+    ) {
+        let end = time + frames as u64;
         notes.clear();
         while let Ok(&(at, kind)) = self.notes.peek()
             && at < end
@@ -357,6 +435,9 @@ pub(crate) struct Shared {
     pub(crate) period: AtomicUsize,
     pub(crate) output: Ring,
     pub(crate) cue: Ring,
+    /// The graphs and tempo maps the core has handed the live side whose
+    /// predecessors the live side hasn't handed back yet ([`LIVE_DEBT`]).
+    pub(crate) live_debt: AtomicUsize,
     /// A panic on a thread rendering ahead, for the audio thread to raise.
     pub(crate) failure: Failure,
     core: UnsafeCell<Core>,
@@ -381,6 +462,7 @@ impl Shared {
             period: AtomicUsize::new(core.config.max_block),
             output: Ring::new(2, frames),
             cue: Ring::new(2, frames),
+            live_debt: AtomicUsize::new(0),
             failure: Failure::default(),
             core: UnsafeCell::new(core),
         }
@@ -552,33 +634,23 @@ pub(crate) enum Drive<'a, 'm> {
 /// An event waiting for its time.
 #[derive(Clone, Copy)]
 pub(crate) struct Pending {
-    time: u64,
-    event: Event,
+    pub(crate) time: u64,
+    pub(crate) event: Event,
 }
 
-/// What the core applied, and when, for a test to apply the same to
-/// another engine at the same times.
+/// What one side of the engine applied, for a test to apply the same to
+/// another engine at the same engine times: each with the time it applied
+/// on.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Applied {
-    Event {
-        time: Option<u64>,
-        event: Event,
-    },
-    Resend {
-        time: Option<u64>,
-        event: Event,
-    },
+    /// An event: a node's, applied to it on its frame, or to none if the
+    /// graph hasn't it, or a transport command.
+    Event(Event),
     Swap,
     Tempo,
-    /// It rendered a block this long, as the device asked or ahead.
-    Block {
-        frames: usize,
-        live: bool,
-    },
-    /// It took what was sent and applied the transport changes due, but
-    /// rendered nothing.
-    Held,
+    /// The playhead jumped back to the loop start, at the loop end.
+    Wrap,
 }
 
 /// The engine's ahead side: what renders its blocks.
@@ -600,6 +672,12 @@ pub(crate) struct Core {
     pub(crate) last: Course,
     /// The writers' ends of their queues, for the blocks it renders ahead.
     writers: Vec<CoreWriter>,
+    /// What the live side needs from it: see [`ToLive`].
+    to_live: Producer<ToLive>,
+    /// Whether it waits, at its time, for the live side to hand over the
+    /// nodes that rendered live up to there and render ahead from there:
+    /// it neither takes in what's sent nor renders until then.
+    draining: bool,
     /// What it applied, and at what time, once a test asks for it
     /// ([`Core::keep_log`]).
     #[cfg(test)]
@@ -607,6 +685,7 @@ pub(crate) struct Core {
 }
 
 impl Core {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: EngineConfig,
         renderer: Box<dyn Renderer>,
@@ -615,6 +694,7 @@ impl Core {
         counters: Arc<Counters>,
         timeline: TimelineWriter,
         course: Producer<Course>,
+        to_live: Producer<ToLive>,
     ) -> Self {
         Self {
             config,
@@ -630,6 +710,8 @@ impl Core {
             course,
             last: Course::default(),
             writers: Vec::with_capacity(MAX_WRITERS),
+            to_live,
+            draining: false,
             #[cfg(test)]
             applied: None,
         }
@@ -668,28 +750,16 @@ impl Core {
     /// length: `None` if it can't render it ahead now. It takes everything
     /// the control thread has sent first.
     pub(crate) fn render(&mut self, shared: &Shared, drive: Drive<'_, '_>) -> Option<usize> {
-        #[cfg(test)]
-        let (start, live) = (self.time, matches!(drive, Drive::Live { .. }));
         // Like the nodes, on any thread, so the notes they play and the
         // modulation they send come out the same on every one.
-        let rendered = rt::flush_denormals(|| self.render_block(shared, drive));
-        #[cfg(test)]
-        self.log(
-            start,
-            rendered.map_or(Applied::Held, |frames| Applied::Block { frames, live }),
-        );
-        rendered
+        rt::flush_denormals(|| self.render_block(shared, drive))
     }
 
     /// Takes what the control thread has sent and applies the transport
     /// changes due, as the next block would first, without rendering it:
     /// for a device callback of no frames.
     pub(crate) fn take_in(&mut self, shared: &Shared) {
-        #[cfg(test)]
-        let start = self.time;
         rt::flush_denormals(|| self.begin_block(shared, true));
-        #[cfg(test)]
-        self.log(start, Applied::Held);
     }
 
     /// What every block starts with: it takes what was sent, if `receive`,
@@ -697,10 +767,16 @@ impl Core {
     /// what lead to aim for now. Returns that lead.
     fn begin_block(&mut self, shared: &Shared, receive: bool) -> u64 {
         if receive {
-            self.receive();
+            self.receive(shared);
         }
         self.apply_transport(self.time);
+        #[cfg(test)]
+        let jumps = self.transport.state().jumps;
         self.transport.wrap();
+        #[cfg(test)]
+        if self.transport.state().jumps != jumps {
+            log(&mut self.applied, self.time, Applied::Wrap);
+        }
         self.aim(shared)
     }
 
@@ -727,6 +803,8 @@ impl Core {
                 recording: state.recording,
                 latency: graph.map_or(0, |graph| graph.latency() as u64),
             },
+            looping: state.looping,
+            jumps: state.jumps,
             output: graph.map_or(0, |graph| graph.output_channels() as u8),
             cue: graph.map_or(0, |graph| graph.cue_channels() as u8),
         }
@@ -739,12 +817,16 @@ impl Core {
         // transport state.
         let receive = !matches!(drive, Drive::Live { receive: false, .. });
         let target = self.begin_block(shared, receive);
+        // It renders nothing until the live side has handed over what
+        // renders ahead from here on.
+        if self.draining {
+            return None;
+        }
         let most = match &drive {
             Drive::Live { max, .. } => *max,
             Drive::Ahead => {
                 let lead = start.saturating_sub(shared.played.load(Acquire));
-                if target == 0 || lead >= target || self.course.is_full() || !self.room_for_notes()
-                {
+                if target == 0 || lead >= target || self.course.is_full() || !self.room_ahead() {
                     return None;
                 }
                 self.ahead_block(lead, shared.period.load(Relaxed))
@@ -791,11 +873,8 @@ impl Core {
 
         let due = self.pending.partition_point(|p| p.time < end);
         let mut graph = self.graph.as_deref_mut();
-        let mut unmatched = 0;
+        let (mut late, mut unmatched, mut dropped) = (0, 0, 0);
         for p in self.pending.drain(..due) {
-            if p.time < start {
-                self.counters.events_late.fetch_add(1, Relaxed);
-            }
             let (node, kind) = match p.event {
                 Event::Param { node, param, value } => {
                     (node, NodeEventKind::Param { param, value })
@@ -804,23 +883,49 @@ impl Core {
                 // Those due now were applied, and the next ends the block.
                 Event::Transport(_) => continue,
             };
+            // The live side applies it on its frame, if it hasn't played
+            // that yet, and counts it late if it has. It takes it once it
+            // has installed this graph's live half, as the queue to it is in
+            // order of time.
+            if let Some(graph) = graph.as_deref()
+                && graph.find(node).is_none()
+                && graph.renders_live(node)
+            {
+                let sent = ToLive::Event {
+                    time: Some(p.time),
+                    event: p.event,
+                };
+                if self.to_live.push(sent).is_err() {
+                    dropped += 1;
+                }
+                continue;
+            }
+            if p.time < start {
+                late += 1;
+            }
+            let time = p.time.max(start);
+            #[cfg(test)]
+            log(&mut self.applied, time, Applied::Event(p.event));
             let event = NodeEvent {
-                offset: (p.time.max(start) - start) as usize,
+                offset: (time - start) as usize,
                 kind,
             };
-            match graph.as_deref_mut() {
-                Some(graph) => match graph.find(node) {
-                    Some(node) => {
-                        let routed = graph.route(node, event);
-                        debug_assert!(routed, "a graph has room for the events the engine holds");
-                    }
-                    None => unmatched += 1,
-                },
+            match (graph.as_deref_mut()).and_then(|graph| Some((graph.find(node)?, graph))) {
+                Some((node, graph)) => {
+                    let routed = graph.route(node, event);
+                    debug_assert!(routed, "a graph has room for the events the engine holds");
+                }
                 None => unmatched += 1,
             }
         }
+        if late > 0 {
+            self.counters.events_late.fetch_add(late, Relaxed);
+        }
         if unmatched > 0 {
             self.counters.events_unmatched.fetch_add(unmatched, Relaxed);
+        }
+        if dropped > 0 {
+            self.counters.events_dropped.fetch_add(dropped, Relaxed);
         }
 
         let frames = (end - start) as usize;
@@ -893,9 +998,16 @@ impl Core {
         }
     }
 
-    /// Whether each writer's notes queue can take a block's notes.
-    fn room_for_notes(&self) -> bool {
+    /// Whether every queue a block rendered ahead fills can take a block's
+    /// worth: each writer's notes queue, the graph's queues into its live
+    /// half, and the queue to the live side.
+    fn room_ahead(&self) -> bool {
         (self.writers.iter()).all(|writer| writer.notes.slots() >= Notes::CAPACITY)
+            && self
+                .graph
+                .as_deref()
+                .is_none_or(PreparedGraph::queues_have_room)
+            && self.to_live.slots() >= EVENT_CAPACITY + LIVE_DEBT
     }
 
     /// The length of the next block to render ahead, with `lead` frames
@@ -920,6 +1032,8 @@ impl Core {
                     if p.time < start {
                         self.counters.events_late.fetch_add(1, Relaxed);
                     }
+                    #[cfg(test)]
+                    log(&mut self.applied, start, Applied::Event(p.event));
                     self.transport.apply(command);
                 }
                 _ => {
@@ -931,14 +1045,26 @@ impl Core {
         self.pending.drain(kept..due);
     }
 
-    /// Takes everything the control thread has sent.
-    fn receive(&mut self) {
-        loop {
+    /// Takes everything the control thread has sent, unless it waits for
+    /// the live side to hand over what renders ahead from here on.
+    fn receive(&mut self, shared: &Shared) {
+        while !self.draining {
+            // What it can't take yet waits, with all that comes after it.
             match self.messages.peek() {
                 // Hold a swap until there is room to hand back what it replaces.
                 Ok(CoreMessage::Swap(_)) if self.graph.is_some() && self.garbage.is_full() => break,
-                Ok(CoreMessage::Tempo(_) | CoreMessage::Writer(..)) if self.garbage.is_full() => {
+                Ok(CoreMessage::Tempo(..) | CoreMessage::Writer(..)) if self.garbage.is_full() => {
                     break;
+                }
+                // And a graph or a tempo map until the live side has room for
+                // what it hands the live side.
+                Ok(CoreMessage::Swap(_) | CoreMessage::Tempo(..)) if !self.room_to_live(shared) => {
+                    break;
+                }
+                Ok(CoreMessage::Event { time: None, event }) if self.to_live.is_full() => {
+                    if self.forwards(event) {
+                        break;
+                    }
                 }
                 Ok(_) => {}
                 Err(_) => break,
@@ -946,25 +1072,31 @@ impl Core {
             match self.messages.pop() {
                 Ok(CoreMessage::Swap(graph)) => {
                     #[cfg(test)]
-                    self.log(self.time, Applied::Swap);
-                    self.install(graph);
+                    log(&mut self.applied, self.time, Applied::Swap);
+                    self.install(shared, graph);
                 }
-                Ok(CoreMessage::Tempo(tempo)) => {
+                Ok(CoreMessage::Tempo(tempo, live)) => {
                     #[cfg(test)]
-                    self.log(self.time, Applied::Tempo);
+                    log(&mut self.applied, self.time, Applied::Tempo);
                     let old = self.transport.set_tempo(tempo);
                     // `receive` checked there is room.
                     let returned = self.garbage.push(CoreGarbage::Tempo(old));
                     debug_assert!(returned.is_ok(), "the garbage queue has room");
+                    let at = self.time;
+                    self.hand_live(shared, ToLive::Tempo { at, tempo: live });
+                }
+                // For a node that renders live, as soon as the live side
+                // takes it, which is now for it.
+                Ok(CoreMessage::Event { time: None, event }) if self.forwards(&event) => {
+                    let sent = ToLive::Event { time: None, event };
+                    // `receive` checked there is room.
+                    let pushed = self.to_live.push(sent);
+                    debug_assert!(pushed.is_ok(), "the queue to the live side has room");
                 }
                 Ok(CoreMessage::Event { time, event }) => {
-                    #[cfg(test)]
-                    self.log(self.time, Applied::Event { time, event });
                     self.schedule(time.unwrap_or(self.time), event);
                 }
                 Ok(CoreMessage::Resend { time, event }) => {
-                    #[cfg(test)]
-                    self.log(self.time, Applied::Resend { time, event });
                     self.schedule(time.map_or(self.time, |t| t.max(self.time)), event);
                 }
                 Ok(CoreMessage::Writer(key, writer)) => self.take_writer(key, writer),
@@ -973,22 +1105,43 @@ impl Core {
         }
     }
 
+    /// Takes everything the control thread has sent, as the next block
+    /// would, for the live side to have the events for the live half's
+    /// nodes without waiting for the ahead side's next block.
+    pub(crate) fn receive_now(&mut self, shared: &Shared) {
+        rt::flush_denormals(|| self.receive(shared));
+    }
+
+    /// Whether `event` is for a node in the live half of the graph, which
+    /// the live side applies.
+    fn forwards(&self, event: &Event) -> bool {
+        let graph = self.graph.as_deref();
+        match *event {
+            Event::Param { node, .. } | Event::Note { node, .. } => {
+                graph.is_some_and(|graph| graph.find(node).is_none() && graph.renders_live(node))
+            }
+            Event::Transport(_) => false,
+        }
+    }
+
+    /// Whether the live side has room for another graph or tempo map, and
+    /// what comes with it.
+    fn room_to_live(&self, shared: &Shared) -> bool {
+        self.to_live.slots() > LIVE_DEBT && shared.live_debt.load(Acquire) < LIVE_DEBT
+    }
+
+    /// Hands the live side a graph or a tempo map, which `room_to_live`
+    /// said it has room for.
+    fn hand_live(&mut self, shared: &Shared, sent: ToLive) {
+        shared.live_debt.fetch_add(1, Relaxed);
+        let pushed = self.to_live.push(sent);
+        debug_assert!(pushed.is_ok(), "the queue to the live side has room");
+    }
+
     /// Starts keeping a record of what it applies, for a test.
     #[cfg(test)]
     pub(crate) fn keep_log(&mut self) {
-        self.applied = Some(Vec::with_capacity(1 << 15));
-    }
-
-    /// Records what it applied at engine time `time`, if it keeps a log.
-    #[cfg(test)]
-    fn log(&mut self, time: u64, applied: Applied) {
-        if let Some(log) = &mut self.applied {
-            assert!(
-                log.len() < log.capacity(),
-                "a test applies no more than this"
-            );
-            log.push((time, applied));
-        }
+        self.applied = Some(Vec::with_capacity(LOG_CAPACITY));
     }
 
     /// Writes the taps with `key` into `writer`'s queues from now on, in
@@ -1016,18 +1169,61 @@ impl Core {
         }
     }
 
-    fn install(&mut self, mut graph: Box<PreparedGraph>) {
-        if let Some(old) = self.graph.as_deref_mut() {
-            graph.adopt_from(old);
+    /// Installs `graph` at its time: its nodes take over from the old
+    /// graph's that rendered ahead, the live half's among them, and the
+    /// live half goes to the live side, which installs it at the same time,
+    /// once the old live half has played up to there. If anything that
+    /// rendered live renders ahead in `graph`, it waits there for the live
+    /// side to hand it over ([`ToLive::Graph`]).
+    fn install(&mut self, shared: &Shared, mut graph: Box<PreparedGraph>) {
+        let mut live = graph.live_half.take();
+        let mut old = self.graph.take();
+        let drain = old.as_deref().is_some_and(|old| old.turns_ahead(&graph));
+        let halves = live.is_some() || old.as_deref().is_some_and(|old| !old.live_ids.is_empty());
+        if let Some(old) = old.as_deref_mut() {
+            take_over(&mut graph, live.as_deref_mut(), old);
         }
-        // Its loads have all carried on, for the control thread to read.
-        graph.loads.set_installed();
-        if let Some(old) = self.graph.replace(graph) {
+        // Its loads have all carried on, for the control thread to read,
+        // unless the live side has some to carry on still.
+        if live.is_none() && !drain {
+            graph.loads.set_installed();
+        }
+        self.graph = Some(graph);
+        if let Some(old) = old {
             // `receive` checked there is room.
             let returned = self.garbage.push(CoreGarbage::Graph(old));
             debug_assert!(returned.is_ok(), "the garbage queue has room");
         }
+        if halves {
+            let at = self.time;
+            self.hand_live(shared, ToLive::Graph { at, live, drain });
+            self.draining = drain;
+        }
         self.counters.swaps.fetch_add(1, Relaxed);
+    }
+
+    /// Has the nodes that rendered live up to now in `old`, the live half
+    /// of the graph it replaced, take over in its graph and in `live`, the
+    /// new live half, if it has one, and goes on from here: for the live
+    /// side, at the time it waited at.
+    pub(crate) fn hand_over_live(
+        &mut self,
+        live: Option<&mut PreparedGraph>,
+        old: Option<&mut PreparedGraph>,
+    ) {
+        if let Some(graph) = self.graph.as_deref_mut() {
+            if let Some(old) = old {
+                take_over(graph, live, old);
+            }
+            graph.loads.set_installed();
+        }
+        self.draining = false;
+    }
+
+    /// Takes back `event`, for engine time `time`, from the live side,
+    /// which held it for a node that isn't in the live half from then on.
+    pub(crate) fn take_back(&mut self, time: u64, event: Event) {
+        self.schedule(time, event);
     }
 
     fn schedule(&mut self, time: u64, event: Event) {
@@ -1037,6 +1233,23 @@ impl Core {
         }
         let at = self.pending.partition_point(|p| p.time <= time);
         self.pending.insert(at, Pending { time, event });
+    }
+}
+
+/// How much a test's log of what a side of the engine applied can hold.
+#[cfg(test)]
+pub(crate) const LOG_CAPACITY: usize = 1 << 15;
+
+/// Records in `log`, if a test keeps one, that a side of the engine applied
+/// `applied` on engine time `time`.
+#[cfg(test)]
+pub(crate) fn log(log: &mut Option<Vec<(u64, Applied)>>, time: u64, applied: Applied) {
+    if let Some(log) = log {
+        assert!(
+            log.len() < log.capacity(),
+            "a test applies no more than this"
+        );
+        log.push((time, applied));
     }
 }
 
@@ -1063,20 +1276,20 @@ fn keep(
     // played these places, and it doesn't know the frames are rendered
     // until `rendered` says so. This thread holds the core.
     unsafe {
-        shared
-            .output
-            .write(start, frames, Some(graph.output(frames)));
-        if let Some(cue) = graph.cue(frames) {
+        if let Some(output) = graph.own_output(frames) {
+            shared.output.write(start, frames, Some(output));
+        }
+        if let Some(cue) = graph.own_cue(frames) {
             shared.cue.write(start, frames, Some(cue));
         }
         for writer in writers.iter() {
-            let tapped = graph.record(writer.key, frames);
+            let tapped = graph.own_record(writer.key, frames);
             writer.ring.sound.write(start, frames, tapped);
         }
     }
     let mut dropped = 0;
     for writer in writers {
-        for note in graph.record_notes(writer.key).unwrap_or_default() {
+        for note in graph.own_record_notes(writer.key).unwrap_or_default() {
             let at = start + note.offset as u64;
             if writer.notes.push((at, note.kind)).is_err() {
                 dropped += 1;

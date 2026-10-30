@@ -851,6 +851,14 @@ fn build(
             tail: head,
         };
         let taps = strip.channel(Channel::Track(track), devices, media, &mut stages, cut);
+        // The cut follows the monitor's arming a block on, so the two
+        // render on the same side of the engine, live or ahead, and so
+        // does everything between.
+        if let (true, Some(monitor)) = (resamples, monitor) {
+            let cut = strip.graph.find(keys::track_cut(track.id));
+            let cut = cut.expect("a track resampling the master has its cut");
+            (strip.graph.render_together(monitor, cut)).expect("the nodes were just added");
+        }
         taps.record(
             Chain::Track(track.id),
             &mut points,
@@ -1731,7 +1739,7 @@ mod tests {
                 (k, node.type_id(), inputs)
             })
             .collect();
-        (nodes, key(graph.output), graph.cue.map(key))
+        (nodes, graph.output.map(key).unwrap(), graph.cue.map(key))
     }
 
     fn no_stages(_: Channel<'_>, _: Slot) -> Option<Box<dyn Node>> {
@@ -3877,6 +3885,24 @@ mod tests {
             .unwrap();
         play(&mut engine, 200);
         assert_eq!(drain(&mut kept), [0.0; 200]);
+    }
+
+    #[test]
+    fn a_track_resampling_the_master_renders_on_one_side_of_the_engine() {
+        let mut p = printed(|_, _| Input::RESAMPLING.tap().unwrap());
+        let print = p.tracks[1].id;
+        let device = p.new_device(DeviceKind::TestGain { gain: 1.0 });
+        let id = device.id;
+        p.track_mut(print).unwrap().devices.push(device);
+        // A device after the monitor that renders live, as a plugin that
+        // has to: the monitor renders live too, and the cut after it.
+        let mut graph = compile(&p);
+        let switch = graph.find(keys::device(id)).unwrap();
+        graph.set_live(switch).unwrap();
+        let graph = graph.prepare(&CONFIG).unwrap();
+        for key in [keys::track_input(print), keys::track_cut(print)] {
+            assert!(graph.renders_live(key), "{key:?}");
+        }
     }
 
     #[test]

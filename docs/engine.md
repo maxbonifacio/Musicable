@@ -62,7 +62,8 @@ or frees.
 A call for no frames does step 1 alone, so `Stats` says what the next
 frame plays with: an export calls one first, to learn the latency to skip.
 With a lead set, steps 2 and 3 happen before the callback asks, on the
-workers, and the callback copies what they rendered (see
+workers, for all but the graph's live half, and the callback copies what
+they rendered and renders the live half (see
 [Rendering ahead](#rendering-ahead)).
 
 ## Time and events
@@ -76,7 +77,8 @@ plays, and jumps on `Locate` and at the loop end. `Stats::position` and
 
 - `EngineHandle::send` applies an event as soon as possible: at the start of
   the engine's next `process` call, or while the engine renders ahead, at
-  the furthest frame it has rendered ([Rendering ahead](#rendering-ahead)).
+  the furthest frame it has rendered, unless it's for a node in the live
+  half ([Rendering ahead](#rendering-ahead)).
 - `EngineHandle::send_at(time, ..)` applies it at that engine time, exactly on
   its frame. An event for a time already past applies at the start of the next
   `process` call and counts in `Stats::events_late`.
@@ -1801,14 +1803,35 @@ ahead of the device between callbacks: a second kind of work, which a
 worker takes on when the engine asks and puts down when the audio thread
 needs the engine ([Rendering ahead](#rendering-ahead)).
 
+**Two boards.** The pool has two boards, each with a block of its own, so
+a graph's live half renders on the audio thread while workers render the
+rest ahead: the main board for what the engine's ahead side renders, and
+the live board for the live half, which the renderer's
+`Renderer::live_renderer` renders on the same workers. Each board has its
+own queues, counters and failure, and a thread works on one at a time.
+While the graph has a live half, a block rendered ahead leaves out the
+last two workers, `KEPT`, which never take on rendering ahead either, so
+the live half has the audio thread and them however much the rest takes:
+all workers but two render ahead, as the [hybrid buffering
+design](#rendering-ahead) has it. With three workers or fewer it leaves
+out one fewer, so a worker still renders ahead. The live board's wake-up
+tree starts from the last worker and goes down, so it wakes those two
+first. A worker with nothing to do on the main board works on the live
+board's block meanwhile, as the device waits for that, and a thread helps
+only with the tasks of nodes on its own board. A block rendered ahead of
+a graph without a live half, or one the audio thread renders as the device
+asks, has every worker.
+
 ## Rendering ahead
 
 With a lead (`EngineHandle::set_lead`), the engine renders the graph ahead
-of the audio device while nothing in it is played live, and each device
-callback plays what was rendered. The device waits on a copy, whatever the
-mix costs, while the workers render it between callbacks in longer blocks,
-with the lead to spare. So a mix too heavy for a 64-frame period can still
-play at one.
+of the audio device, all but its live half: the live sources, such as an
+armed track, and everything they reach, which render as the device asks
+(below). Each device callback plays what was rendered ahead, and renders
+the live half on top of it. The device waits on a copy and the live half,
+whatever the rest of the mix costs, while the workers render the rest
+between callbacks in longer blocks, with the lead to spare. So a mix too
+heavy for a 64-frame period can still play at one, with a track armed.
 
 ```rust
 handle.set_lead(Lead::Normal); // Off, the default, Short, Normal or Long
@@ -1820,37 +1843,76 @@ the engine renders up to the lead ahead. While it stands still, it keeps
 512 frames ahead, so Play starts within about 12 ms. It renders each block
 as the device asks for it instead while the lead is off, before the first
 graph, while the output or the cue output has more than two channels,
-which is all its rings hold, and while anything in the graph is live
-(below). `Stats::lead` is how far ahead it was at the end of the last
-callback, and `Stats::lead_target` how far ahead it aims to be.
+which is all its rings hold, and while anything in the half that renders
+ahead is live (below). `Stats::lead` is how far ahead it was at the end of
+the last callback, and `Stats::lead_target` how far ahead it aims to be.
 `Stats::rendered` is how far it had rendered when the stats were read,
 which the threads rendering ahead keep up to date between callbacks.
 
 **Two sides.** `ahead.rs` splits the engine in two. The ahead side holds the
-graph, the renderer, the transport and the events not yet due, and renders
-blocks as the engine always has. One thread holds it at a time: a worker
-rendering ahead, or the audio thread when it renders a block itself. The
-live side is the audio thread's own: the previews, the record taps'
-writers, and what it plays from. Blocks rendered ahead go into rings for
-the live side to play: the output and the cue output, each writer's record
-tap and notes, and the transport's course, an entry wherever it doesn't
-run on, from which the live side reports `Stats::position`, `playing` and
-`latency` for what it plays. Each ring holds the longest lead and a block,
-so the ahead side never writes where the live side reads.
+half of the graph that renders ahead, the renderer, the transport and the
+events not yet due, and renders blocks as the engine always has. One
+thread holds it at a time: a worker rendering ahead, or the audio thread
+when it renders a block itself. The live side is the audio thread's own:
+the graph's live half, the previews, the record taps' writers, and what it
+plays from. Blocks rendered ahead go into rings for the live side to play:
+the output and the cue output, each writer's record tap and notes, and the
+transport's course, an entry wherever it doesn't run on, from which the
+live side reports `Stats::position`, `playing` and `latency` for what it
+plays, and gives the live half its transport. Each ring holds the longest
+lead and a block, so the ahead side never writes where the live side
+reads.
+
+**Two halves.** `Graph::prepare` splits a graph in two: the live half, each
+live source (`Node::live`) and each node set live (`Graph::set_live`: a
+track set to Always Live, or a plugin that has to render in real time),
+with everything they reach through their outputs, their notes, the notes
+they make and their modulation, and the half that renders ahead, the rest.
+Nodes that share state outside the graph stay on one side
+(`Graph::render_together`): a track resampling the master keeps its
+monitor and the cut after its devices together, since the cut follows the
+monitor's arming a block on. A delay that delay compensation put on a
+node's input renders on the node's side, and the whole graph is lined up
+before it's split, so both halves have its latency. What crosses from the
+half rendering ahead to the live half, sound, notes and modulation, goes
+through a queue (`queue.rs`): the ahead side keeps it at its engine time,
+and the live half reads it at the same time, so it comes in on the frame
+it would have with the graph whole, with no latency added. The events a
+node gets on a frame come in the same order too: the graph numbers each
+node that plays notes, makes them or sends modulation, in the order they'd
+run in the whole graph, and each event carries its sender's number. The
+ahead side renders a block only while each queue has room for a block's
+notes and modulation. A graph without live sources is one half, which
+renders ahead.
+
+**The live half** renders on the audio thread, stretch by stretch as each
+callback plays, with the renderer `Renderer::live_renderer` gives: the
+parallel renderer's shares it with the workers, on a board of its own
+([Parallel rendering](#parallel-rendering)), and the others give a
+`ReferenceRenderer`.
+It renders frames the ahead side has rendered, from the rings, or, when
+the lead runs out, right after the ahead side renders them as the device
+asks. The ahead side tells the live side what it needs in a queue of its
+own (`ToLive`), in order of engine time: each graph's live half, to install
+on the frame the ahead side installed the rest, each tempo map from its
+frame, and the events for the live half's nodes. The live side takes them
+before each stretch, as far as the ahead side has rendered.
 
 **Who renders ahead.** At the end of each callback, if the lead is short,
 the engine asks the renderer's workers for more (`Renderer::render_ahead`).
 One worker takes it on, starts each block from its own lane as the audio
 thread does from lane 0, and the others help as they would with any block,
-until the lead is whole. Every worker can help, since nothing renders live
-at the same time. A renderer without workers, such as
+until the lead is whole. While the graph has a live half, the last two
+workers stay out of it, for the live half's blocks. A renderer without
+workers, such as
 `ReferenceRenderer`, has the audio thread render ahead at the end of each
 callback instead. When a callback needs frames that aren't rendered yet,
 the audio thread takes the ahead side and renders the next block itself,
-as the device asks. If a worker is in a block then, the audio thread works
-on that block until it ends, and plays it first. `Stats::short_blocks`
-counts the blocks the audio thread rendered because the lead ran out,
-which is what a callback that drops out has been doing.
+as the device asks, and then the live half's. If a worker is in a block
+then, the audio thread works on that block until it ends, and plays it
+first. `Stats::short_blocks` counts the blocks the audio thread rendered
+because the lead ran out, which is what a callback that drops out has
+been doing.
 
 **Block lengths.** Ahead, the engine renders in blocks of `AHEAD_BLOCK`,
 1024 frames, where `EngineConfig::max_block` allows it and the lead is at
@@ -1872,45 +1934,70 @@ with `send`. They're heard up to the lead, and a block, later than with the
 lead off. An event sent for a time (`send_at`) lands on its frame, unless
 that frame is rendered already: then it applies at the furthest frame, and
 counts in `Stats::events_late`. The parameters a swap sends again apply at
-the furthest frame too, or at their own time if that's later.
+the furthest frame too, or at their own time if that's later. Events for
+a node in the live half apply as with the lead off: one sent with `send`
+on the next frame the live side plays, as the ahead side hands it over as
+it takes it in, at the start of each callback, and one sent for a time on
+its frame, unless the live side has played it, as the ahead side hands it
+over in the block its frame is in.
+
+**Swaps.** Both halves of a graph take over on the same frame, the furthest
+the ahead side has rendered: the ahead side installs the half it renders
+there, and the live side installs the live half once it has played up to
+there. Each node takes over from the node with its key, whichever half that
+was in. Each player hands over what it had sounding wherever its notes go
+now, in either half ([Notes](#notes)), and as the old graph's halves hand
+over one after the other, what one lets go of goes before what's queued
+already: a pedal one half lets go of comes up before a pedal the other
+holds on goes down, so that one holds. If something that rendered live
+renders ahead in the new graph, as when a track is disarmed, the ahead side
+waits on that frame until the live side has played up to it and handed it
+over, so the lead runs out once, and fills again. Events the live side
+still holds for nodes the new live half hasn't go back to the ahead side.
 
 **Live sources.** A node says whether it's a live source now with
 `Node::live`: whether it plays what comes in from outside the graph as it
 comes, which a block rendered ahead hasn't got. An `InputMonitor` is one
 while it can monitor the device inputs, whether the transport lets it now
 or not, and until it has faded them out, and a `MidiMonitor` while it can
-monitor a MIDI input. The graph asks the nodes that can be live before and
-after each block. The ahead side renders no event for one of them, such as
-arming a track: a block ahead ends before it, and the audio thread renders
-the block it's due in, with the device inputs, so the track arms as it does
-with the lead off: an audio track on the frame the event was sent for, a
-MIDI track from the next block ([Monitoring inputs](#recording)). From then
-on the audio thread renders every block as the device asks, until nothing
-is live, and the lead fills again from the end of the callback where that
-happens. Blocks rendered ahead have no device inputs, and the MIDI messages
-for frames played from them go nowhere, even when the callback renders the
-rest of its frames itself, since no node plays them while nothing is live.
-A `MidiMonitor` that isn't monitoring misses them too, so it doesn't know
-what the input held meanwhile.
+monitor a MIDI input. A live source renders in the live half. An app that
+arms a track sends the event, then builds the graph again with the track
+armed, and until that graph comes, the track renders ahead. The graph asks
+the nodes that can be live before and after each block. The ahead side
+renders no event for one of them in its half, such as arming that track: a
+block ahead ends before it, and the audio thread renders the block it's
+due in, with the device inputs, so the track arms as it does with the lead
+off: an audio track on the frame the event was sent for, a MIDI track from
+the next block ([Monitoring inputs](#recording)). From then on the audio
+thread renders every block as the device asks, until nothing in the half
+rendering ahead is live, as once the new graph has the track in its live
+half, and the lead fills again from the end of the callback where that
+happens. Blocks rendered ahead have no device inputs or MIDI messages: the
+live half gets the messages for every frame it plays, and the half
+rendering ahead only in the blocks the audio thread renders itself. A
+`MidiMonitor` that renders ahead, which isn't monitoring, misses the rest,
+so it doesn't know what the input held meanwhile.
 
 **What the app reads.** A block rendered ahead says so in
 `ProcessContext::ahead`, and a meter or a reading keeps the engine time
 each value is for ([Built-in devices](#built-in-devices)), so the app's
 meters and modulation dots show what the device plays, not what was
 rendered last. The app builds the engine with a `max_block` of at least
-`AHEAD_BLOCK` ([app.md](app.md#audio)).
+`AHEAD_BLOCK` ([app.md](app.md#audio)). `NodeLoads::sides` says which nodes
+render live.
 
 **Previews and writers.** Previews play on the live side, from the next
 callback whatever the lead, on top of what was rendered. A record tap's
 writer gets each frame as it plays, in order: straight from the graph in a
-block the audio thread rendered, and from its ring in one rendered ahead.
-A writer added while the engine is ahead gets silence for the frames
-rendered before it came, and one that replaces a writer with the same key
-carries on where that one left off. Notes go through a queue for each
-writer, and the ahead side renders a block only while each queue has room
-for a block's notes (`Notes::CAPACITY`), so a dense part shortens the lead
-rather than lose notes. `Engine::process_with_taps` gets its taps only in
-blocks it renders itself, so an offline render leaves the lead off.
+block the audio thread rendered, or from the live half for a tap there,
+and from its ring in one rendered ahead. A writer added while the engine
+is ahead gets silence for the frames rendered before it came, and one
+that replaces a writer with the same key carries on where that one left
+off. Notes go through a queue for each writer, and the ahead side renders
+a block only while each queue has room for a block's notes
+(`Notes::CAPACITY`), so a dense part shortens the lead rather than lose
+notes. `Engine::process_with_taps` gets its taps only in blocks it renders
+itself, so an offline render leaves the lead off.
 
 **Short loops.** The course queue holds 1,024 entries, a few for each lead,
 unless a loop shorter than a block plays, which makes one at each jump.
@@ -1925,12 +2012,19 @@ for any worker rendering ahead to stop.
 
 **Tests.** `ahead/tests.rs` checks each of these, and a proptest checks the
 whole: random graphs of probes, delays, monitored audio tracks and MIDI
-tracks, with random callback lengths, leads, events, jumps, swaps and tempo
-maps, and MIDI input, rendered ahead, on workers and on the audio thread,
-against an engine with the lead off that replays what the first applied,
-block for block, with the MIDI input for the blocks the first rendered as
-the device asked. The two play the same, bit for bit: the output, the
-writers' frames and notes, the timeline and the counters.
+tracks, some set live, with random callback lengths, leads, events, jumps,
+swaps, tracks armed and disarmed as an app does it, tempo maps and MIDI
+input, rendered ahead, on workers and on the audio thread, with their live
+halves on the audio thread, against an engine with the lead off that
+renders each graph whole and replays what both sides of the first applied,
+on the frames they applied it (`Applied`), starting a block on a frame as
+many times as the first did. Its probes play the same whatever blocks they
+come in, as the two engines render different ones, and its MIDI tracks
+are given the messages they got the first time. The two play the same, bit
+for bit: the output, the writers' frames and notes, the timeline, the swaps
+and the events for nodes a graph hasn't got. `graph.rs` checks which nodes
+render on which side, and that a graph split in two renders what it
+renders whole.
 
 ## Node timing
 

@@ -10,11 +10,11 @@ plugin to swap, freeze or take out.
 
 ## What the figures say
 
-- **Renders** is **Ahead** while Musicable renders the project ahead of
-  the audio device, as [Render
-  Ahead](../getting-started/audio.md#render-ahead) has it, and **Live**
-  while it renders each buffer as the device asks for it, as it does while
-  a track monitors an input, or Render Ahead is off.
+- **Renders** is **Ahead** for what Musicable renders ahead of the audio
+  device, as [Render Ahead](../getting-started/audio.md#render-ahead) has
+  it, and **Live** for what it renders as the device asks for each buffer:
+  a track that can monitor an input, and what it plays into, such as the
+  master, or everything while Render Ahead is off.
 - **Average** is the share of one core the device needs to keep up: 12% is
   an eighth of a core, and 100% a whole one. Shares add up: a track's is
   its devices' and the rest of its strip's, and the **Total** row's is the

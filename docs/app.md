@@ -1311,10 +1311,10 @@ engine that takes over.
   `output.rs`, which the view carries as a `musicable_ui::LeadGauge`. It's
   amber under half while the engine renders ahead, and red over a quarter
   of a second in which `Stats::short_blocks` rose: the audio thread had to
-  render blocks itself. While a track monitors an input, nothing renders
-  ahead and it's empty, whatever rendered ahead earlier in the quarter of a
-  second, and another setting starts the quarter again, so the gauge and
-  the tooltip show nothing from the setting before. The CPU meter's
+  render blocks itself. While nothing renders ahead, as for a moment when
+  a track arms, it's empty, whatever rendered ahead earlier in the quarter
+  of a second, and another setting starts the quarter again, so the gauge
+  and the tooltip show nothing from the setting before. The CPU meter's
   tooltip, which the gauge shares, says how far ahead the engine was, of
   how far it aims, and the short blocks since the stream started
   (`Output::short_blocks`).
@@ -1365,9 +1365,12 @@ running graph's loads (`Session::loads`) each frame, after the levels:
   track armed don't make Longest read up to 16 times too high for the
   second after.
 - **A row renders ahead** if the engine rendered ahead at the newest
-  reading (`Stats::lead_target` above zero). In this milestone the whole
-  graph renders ahead or live, so every row says the same, and
-  `Performance::ahead` adds up the rows that render ahead.
+  reading (`Stats::lead_target` above zero) and none of its nodes is in
+  the graph's live half (`NodeLoads::sides`,
+  [engine.md](engine.md#rendering-ahead)): a track that can monitor its
+  input renders live, with what it reaches, such as the master, and the
+  rest of the project renders ahead. `Performance::ahead` adds up the rows
+  that render ahead.
 - While no stream plays there are no figures, so the views show none, and
   a graph the engine hasn't installed yet waits until it has
   (`NodeLoads::installed`): until then its loads read nothing, or only

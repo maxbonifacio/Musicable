@@ -308,14 +308,18 @@ where a part has started, what's built.
   compiler leaves those clips out of the track's clip player.
 - **Hybrid buffering, CPU meters per plugin, and multithreaded export.**
   Both renderers time every node, and each device shows what it takes
-  ([engine.md](engine.md#node-timing)). Hybrid buffering has started: while
-  nothing in the graph is played live, the whole graph renders ahead of the
-  device on the parallel scheduler's workers, and the callback plays it
-  ([engine.md](engine.md#rendering-ahead)), as far ahead as the Audio
-  settings' Render Ahead says, with a gauge under the CPU meter
-  ([app.md](app.md#meters)). Next, the tracks nobody hears live render
-  ahead while the rest renders as the device asks. Exports render on the
-  workers already, in the app engine's block size (`export::Job`).
+  ([engine.md](engine.md#node-timing)). Hybrid buffering renders all of
+  the graph that no live source reaches ahead of the device on the
+  parallel scheduler's workers, and the callback plays it, while the live
+  sources, such as an armed track, and everything they reach render as the
+  device asks ([engine.md](engine.md#rendering-ahead)), as far ahead as the
+  Audio settings' Render Ahead says, with a gauge under the CPU meter
+  ([app.md](app.md#meters)). Arming a track builds the graph again with
+  the track live, and the live half renders on the same workers as the
+  rest, on a board of its own, with two workers that blocks rendered ahead
+  leave it ([engine.md](engine.md#parallel-rendering)). Next, the app
+  marks tracks Always Live. Exports render on the workers already, in the
+  app engine's block size (`export::Job`).
 - **Plugin sandboxing.** Scanning loads each new library in a process of
   its own already (`plugins::scan`). Hosting a plugin in another process is
   another kind of `Instance`, which drives the plugin in a process that

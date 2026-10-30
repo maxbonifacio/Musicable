@@ -151,11 +151,16 @@ impl LoadKey {
 }
 
 /// The loads of a prepared graph's nodes, for the control thread to read
-/// while the graph runs.
+/// while the graph runs: those of both its halves, if it renders some nodes
+/// live and others ahead ([`Graph::prepare`](crate::Graph::prepare)).
 #[derive(Debug)]
 pub struct NodeLoads {
-    /// Whose each load is, by node.
-    keys: Vec<LoadKey>,
+    /// Whose each load is, by node: no one's for the queues between the
+    /// halves, which aren't listed.
+    keys: Vec<Option<LoadKey>>,
+    /// Where the live half's loads start: after the last for a graph that
+    /// renders whole.
+    live_from: usize,
     /// By node.
     pub(crate) loads: Vec<Load>,
     /// Whether the engine has installed the graph, each load having carried
@@ -164,13 +169,15 @@ pub struct NodeLoads {
 }
 
 impl NodeLoads {
-    /// Loads for the nodes `keys` say, in order.
-    pub(crate) fn new(keys: Vec<LoadKey>) -> Self {
+    /// Loads for the nodes `keys` say, in order, the live half's from
+    /// `live_from` on.
+    pub(crate) fn new(keys: Vec<Option<LoadKey>>, live_from: usize) -> Self {
         // Off the audio thread, so the clock is ready before it's read there.
         ticks_per_second();
         let loads = keys.iter().map(|_| Load::new()).collect();
         Self {
             keys,
+            live_from,
             loads,
             installed: AtomicBool::new(false),
         }
@@ -195,14 +202,25 @@ impl NodeLoads {
     /// delay can take over from one at the same joint after another node,
     /// such as the delay after a tap when the taps change. Real-time safe.
     pub(crate) fn carry_on(&self, n: usize, old: &NodeLoads, old_n: usize) {
-        if self.keys[n] == old.keys[old_n] {
+        if self.keys[n].is_some() && self.keys[n] == old.keys[old_n] {
             self.loads[n].carry_on(&old.loads[old_n]);
         }
     }
 
     /// Each node's load, with whose it is.
     pub fn iter(&self) -> impl Iterator<Item = (LoadKey, &Load)> {
-        self.keys.iter().copied().zip(&self.loads)
+        (self.keys.iter().zip(&self.loads)).filter_map(|(key, load)| Some(((*key)?, load)))
+    }
+
+    /// Each node's load, with whose it is and whether the node renders
+    /// live, as the device asks, rather than ahead of it: see
+    /// [`Graph::prepare`](crate::Graph::prepare). In a graph with nothing
+    /// live, every node renders ahead of the device while the engine has a
+    /// lead ([`EngineHandle::set_lead`](crate::EngineHandle::set_lead)).
+    pub fn sides(&self) -> impl Iterator<Item = (LoadKey, &Load, bool)> {
+        let live = (0..self.keys.len()).map(|n| n >= self.live_from);
+        (self.keys.iter().zip(&self.loads).zip(live))
+            .filter_map(|((key, load), live)| Some(((*key)?, load, live)))
     }
 
     /// The load of the node with `key`, if the graph has one.
@@ -212,12 +230,13 @@ impl NodeLoads {
             .map(|(_, load)| load)
     }
 
+    /// How many nodes have loads, the queues between the halves left out.
     pub fn len(&self) -> usize {
-        self.loads.len()
+        self.keys.iter().flatten().count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.loads.is_empty()
+        self.len() == 0
     }
 }
 

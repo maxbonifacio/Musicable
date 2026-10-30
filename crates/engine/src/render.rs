@@ -70,6 +70,15 @@ pub trait Renderer: Send {
         let _ = work;
         None
     }
+
+    /// What renders the live half of a graph that has one, on the audio
+    /// thread, while this renders the rest, ahead of the device when it can
+    /// ([`Graph::prepare`](crate::Graph::prepare)). The engine calls it
+    /// once, as it takes the renderer. A [`ReferenceRenderer`], the
+    /// default.
+    fn live_renderer(&mut self) -> Box<dyn Renderer> {
+        Box::new(ReferenceRenderer)
+    }
 }
 
 /// Processes one node at a time in topological order, on the calling thread.
@@ -97,6 +106,7 @@ fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
         events,
         event_ranges,
         loads,
+        load_base,
         ..
     } = graph;
     // Each node's time runs from the end of the one before, so the clock is
@@ -114,7 +124,8 @@ fn render_in_order(graph: &mut PreparedGraph, block: &Block<'_>) {
         buffers[node.0] = output;
         let now = load::now();
         // Its tasks ran here, if it had any.
-        loads.loads[node.0].add(now.wrapping_sub(last), 0, block.frames, block.ahead);
+        let load = &loads.loads[*load_base + node.0];
+        load.add(now.wrapping_sub(last), 0, block.frames, block.ahead);
         last = now;
     }
 }

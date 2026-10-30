@@ -35,7 +35,8 @@ const LONGEST: &str = "Its longest block over the last second, as a share of the
 /// What the Renders column's heading says in its tooltip.
 const RENDERS: &str = "Ahead: rendered ahead of the audio device, on all the cores, as Render \
                        Ahead in Settings > Audio has it. Live: rendered as the device asks for \
-                       each buffer, as everything is while a track monitors its input.";
+                       each buffer, as a track monitoring its input is, with what it plays \
+                       into, and everything is while Render Ahead is off.";
 
 /// A share of a core over this turns a figure amber.
 pub const BUSY: f32 = 0.25;

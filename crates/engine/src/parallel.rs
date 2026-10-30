@@ -35,6 +35,19 @@
 //! worker that takes it starts each block from its own lane, as the audio
 //! thread does from lane 0: see [`AheadWaker`].
 //!
+//! The pool has two boards, each with a block of its own, so a graph's live
+//! half and the rest can render at once ([`Graph::prepare`]): the main board
+//! for what the engine's ahead side renders, ahead or as the device asks,
+//! and the live board for the live half, which the audio thread renders
+//! with the renderer [`Renderer::live_renderer`] gives. A block rendered
+//! ahead of a graph with a live half leaves two workers out, the last two,
+//! which never render ahead either, so the live half has the audio thread
+//! and them. The live board wakes them first. A lane with nothing to do on
+//! the main board helps with the live board's block, and a lane helps only
+//! with the tasks of nodes on its own board.
+//!
+//! [`Graph::prepare`]: crate::Graph::prepare
+//!
 //! A node can split its own work into tasks ([`tasks::run`](crate::tasks)),
 //! as a plugin using CLAP's thread pool does. Its lane puts them in its
 //! [`Tasks`], wakes up to two sleeping workers, and takes tasks itself until
@@ -55,7 +68,7 @@ use std::cell::{Cell, UnsafeCell};
 use std::hint::spin_loop;
 use std::ops::Deref;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+use std::sync::atomic::Ordering::{self, AcqRel, Acquire, Relaxed, Release, SeqCst};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle, Thread};
@@ -118,10 +131,14 @@ impl Default for ParallelOptions {
 /// [`Engine::with_renderer`](crate::Engine::with_renderer).
 pub struct ParallelRenderer {
     shared: Arc<Shared>,
+    /// The workers, which only the renderer that started them has: not the
+    /// one for the live half it gives ([`Renderer::live_renderer`]).
     workers: Vec<JoinHandle<()>>,
+    /// The board it renders on: [`MAIN`], or [`LIVE`] for the live half.
+    board: usize,
     inline_below: Option<Duration>,
     max_nodes: usize,
-    /// Parallel blocks rendered.
+    /// Parallel blocks rendered on its board.
     epoch: u64,
     /// Whether the last block ran on the audio thread alone, for each of
     /// the first [`STAGES`] stages of a graph, the last for the rest.
@@ -150,7 +167,7 @@ impl ParallelRenderer {
     pub fn new(options: ParallelOptions) -> Self {
         let lanes = (0..=options.threads)
             .map(|_| Lane {
-                deque: Deque::new(options.max_nodes),
+                deques: [MAIN, LIVE].map(|_| Deque::new(options.max_nodes)),
                 sleeping: CachePadded(AtomicBool::new(false)),
                 thread: OnceLock::new(),
                 tasks: Tasks::default(),
@@ -158,13 +175,8 @@ impl ParallelRenderer {
             .collect();
         let shared = Arc::new(Shared {
             lanes,
-            epoch: CachePadded(AtomicU64::new(0)),
-            sources: CachePadded(AtomicU64::new(0)),
-            remaining: CachePadded(AtomicUsize::new(0)),
-            job: AtomicPtr::new(std::ptr::null_mut()),
-            wanted: AtomicUsize::new(0),
-            tasks_asked: AtomicBool::new(false),
-            failure: Failure::default(),
+            boards: [MAIN, LIVE].map(|_| Board::default()),
+            kept: KEPT.min(options.threads.saturating_sub(1)),
             shutdown: AtomicBool::new(false),
             spin: options.spin,
             counters: Counters::default(),
@@ -188,6 +200,7 @@ impl ParallelRenderer {
         Self {
             shared,
             workers,
+            board: MAIN,
             inline_below: options.inline_below,
             max_nodes: options.max_nodes,
             epoch: 0,
@@ -199,7 +212,7 @@ impl ParallelRenderer {
 
     /// Worker threads, not counting the audio thread.
     pub fn threads(&self) -> usize {
-        self.workers.len()
+        self.shared.lanes.len() - 1
     }
 
     /// A handle for reading the renderer's counters from another thread, such
@@ -210,8 +223,10 @@ impl ParallelRenderer {
 
     /// Whether to share this block between threads.
     fn share(&mut self, graph: &PreparedGraph) -> bool {
-        let tasks = self.shared.tasks_asked.swap(false, Relaxed);
-        if self.workers.is_empty() || graph.len() > self.max_nodes {
+        let tasks = self.shared.boards[self.board]
+            .tasks_asked
+            .swap(false, Relaxed);
+        if self.shared.lanes.len() == 1 || graph.len() > self.max_nodes {
             return false;
         }
         let address = graph as *const PreparedGraph as usize;
@@ -236,7 +251,7 @@ impl ParallelRenderer {
         let started = Instant::now();
         // Nodes that ask to run tasks run them here, and get the next block
         // shared.
-        let _lane = WorkingFor::enter(&self.shared, INLINE);
+        let _lane = WorkingFor::enter(&self.shared, INLINE, self.board);
         ReferenceRenderer.render(graph, block);
         let stage = graph.stage.min(STAGES - 1);
         self.last_work[stage] = started.elapsed();
@@ -244,8 +259,11 @@ impl ParallelRenderer {
         self.shared.counters.inline_blocks.fetch_add(1, Relaxed);
     }
 
-    fn render_shared(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
+    /// Shares the block between the lanes, all but the last
+    /// [`Shared::kept`] if `capped`.
+    fn render_shared(&mut self, graph: &mut PreparedGraph, block: &Block<'_>, capped: bool) {
         let shared = &*self.shared;
+        let board = &shared.boards[self.board];
         // The audio thread's lane, or the worker's that renders ahead.
         let lane = DRIVER.get();
         graph.schedule.point_at(&mut graph.buffers);
@@ -259,39 +277,42 @@ impl ParallelRenderer {
             stage: graph.stage,
             block: (block as *const Block<'_>).cast(),
             sample_rate: graph.config.sample_rate,
-            loads: graph.loads.loads.as_ptr(),
+            loads: graph.loads.loads[graph.load_base..].as_ptr(),
         };
         let started = Instant::now();
         self.epoch += 1;
         // Nothing reads these until it takes a node of the new block, which
         // the store to `sources` makes possible.
-        debug_assert!(shared.job.load(Relaxed).is_null(), "one block at a time");
-        shared.job.store((&job as *const Job).cast_mut(), Relaxed);
-        shared.remaining.store(graph.stage_nodes().len(), Relaxed);
+        debug_assert!(board.job.load(Relaxed).is_null(), "one block at a time");
+        board.job.store((&job as *const Job).cast_mut(), Relaxed);
+        board.remaining.store(graph.stage_nodes().len(), Relaxed);
+        let lanes = shared.lanes.len();
+        let open = if capped { lanes - shared.kept } else { lanes };
+        board.open.store(open, Relaxed);
         // A worker starting the block works in place of lane 0, which is
         // the audio thread's and idle unless it comes to help: one lane
         // more keeps as many threads busy.
         let width = graph.schedule.width(graph.stage);
         let wanted = width + usize::from(lane != 0 && lane < width);
-        shared.wanted.store(wanted.min(shared.lanes.len()), Relaxed);
+        board.wanted.store(wanted.min(open), Relaxed);
         let sources = graph.schedule.sources(graph.stage).len() as u64;
-        shared.sources.store(tag(self.epoch) | sources, Release);
+        board.sources.store(tag(self.epoch) | sources, Release);
         // Wake the workers. SeqCst pairs with the check sleeping workers make
         // before they park: either they see the new epoch, or we see them
         // asleep.
-        shared.epoch.store(self.epoch, SeqCst);
+        board.epoch.store(self.epoch, SeqCst);
         // The tree starts at lane 0. A worker starting the block wakes the
         // lanes it would have woken too.
-        shared.wake_children(0);
+        shared.wake_children(self.board, 0);
         if lane != 0 {
-            shared.wake_children(lane);
+            shared.wake_children(self.board, lane);
         }
-        shared.work(lane, self.epoch);
+        shared.work(self.board, lane, self.epoch);
         // Every node has run, and every thread is done with the graph and the
         // job.
         let wall = started.elapsed();
-        let busy = Duration::from_nanos(shared.counters.block_busy.swap(0, Relaxed));
-        shared.job.store(std::ptr::null_mut(), Relaxed);
+        let busy = Duration::from_nanos(board.block_busy.swap(0, Relaxed));
+        board.job.store(std::ptr::null_mut(), Relaxed);
         let stage = graph.stage.min(STAGES - 1);
         self.last_work[stage] = busy;
         self.inline[stage] = false;
@@ -299,7 +320,7 @@ impl ParallelRenderer {
         counters.parallel_blocks.fetch_add(1, Relaxed);
         counters.busy.fetch_add(nanos(busy), Relaxed);
         counters.wall.fetch_add(nanos(wall), Relaxed);
-        if let Some(payload) = shared.failure.take() {
+        if let Some(payload) = board.failure.take() {
             panic::resume_unwind(payload);
         }
     }
@@ -313,10 +334,13 @@ impl Default for ParallelRenderer {
 
 impl Renderer for ParallelRenderer {
     fn render(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
+        // A block rendered ahead leaves the live half its workers, while
+        // there's one.
+        let capped = self.board == MAIN && block.ahead && graph.has_live_half();
         // The workers flush denormals for as long as they run.
         rt::flush_denormals(|| {
             if self.share(graph) {
-                self.render_shared(graph, block);
+                self.render_shared(graph, block, capped);
             } else {
                 self.render_inline(graph, block);
             }
@@ -324,15 +348,35 @@ impl Renderer for ParallelRenderer {
     }
 
     fn render_ahead(&mut self, work: AheadWork) -> Option<AheadWaker> {
-        if self.workers.is_empty() || self.shared.ahead.set(work).is_err() {
+        if self.board != MAIN || self.workers.is_empty() || self.shared.ahead.set(work).is_err() {
             return None;
         }
         Some(AheadWaker(self.shared.clone()))
+    }
+
+    /// A renderer on the same threads, on a board of its own, so the live
+    /// half renders while the workers render the rest ahead.
+    fn live_renderer(&mut self) -> Box<dyn Renderer> {
+        Box::new(Self {
+            shared: self.shared.clone(),
+            workers: Vec::new(),
+            board: LIVE,
+            inline_below: self.inline_below,
+            max_nodes: self.max_nodes,
+            epoch: 0,
+            inline: [false; STAGES],
+            last_work: [Duration::MAX; STAGES],
+            last_graph: 0,
+        })
     }
 }
 
 impl Drop for ParallelRenderer {
     fn drop(&mut self) {
+        // The workers are the renderer's that started them.
+        if self.board != MAIN {
+            return;
+        }
         // The same handshake as a new block: either a worker sees the flag
         // before it sleeps, or we see it asleep and wake it.
         self.shared.shutdown.store(true, SeqCst);
@@ -349,7 +393,8 @@ impl Drop for ParallelRenderer {
 impl std::fmt::Debug for ParallelRenderer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParallelRenderer")
-            .field("threads", &self.workers.len())
+            .field("threads", &self.threads())
+            .field("board", &self.board)
             .field("inline_below", &self.inline_below)
             .field("max_nodes", &self.max_nodes)
             .finish_non_exhaustive()
@@ -409,28 +454,26 @@ impl ParallelStats {
     }
 }
 
+/// The board for what the engine's ahead side renders, ahead of the device
+/// or as it asks.
+const MAIN: usize = 0;
+/// The board for a graph's live half.
+const LIVE: usize = 1;
+
+/// How many workers a block rendered ahead leaves for the live half, while
+/// there's one: the last ones, which never render ahead.
+const KEPT: usize = 2;
+
 /// What the audio thread and the workers share.
 struct Shared {
     /// Lane 0 is the audio thread's.
     lanes: Box<[Lane]>,
-    /// Shared blocks started. Workers wait for it to change.
-    epoch: CachePadded<AtomicU64>,
-    /// How many of the current block's sources are left to take, with the
-    /// block's epoch in the high 32 bits: lanes only take sources of the
-    /// block they are working on.
-    sources: CachePadded<AtomicU64>,
-    /// Nodes of the current block not yet finished and counted.
-    remaining: CachePadded<AtomicUsize>,
-    /// The current block. Only dereferenced by a thread that has taken one of
-    /// its nodes, as the block can't end before that node is counted.
-    job: AtomicPtr<Job>,
-    /// How many lanes the current block can keep busy. Sleeping workers
-    /// beyond that aren't woken, unless a node has tasks for them.
-    wanted: AtomicUsize,
-    /// Set when a node asks to run tasks, so the next block is shared even
-    /// when nothing in it can run alongside anything else.
-    tasks_asked: AtomicBool,
-    failure: Failure,
+    /// The main board and the live board.
+    boards: [Board; 2],
+    /// How many of the last lanes a block rendered ahead leaves out while
+    /// the graph has a live half: [`KEPT`], or fewer, so a worker renders
+    /// ahead.
+    kept: usize,
     shutdown: AtomicBool,
     spin: Duration,
     counters: Counters,
@@ -445,10 +488,39 @@ struct Shared {
     ahead_closed: AtomicBool,
 }
 
+/// One block at a time, as the lanes working on it see it.
+#[derive(Default)]
+struct Board {
+    /// Shared blocks started. Workers wait for it to change.
+    epoch: CachePadded<AtomicU64>,
+    /// How many of the current block's sources are left to take, with the
+    /// block's epoch in the high 32 bits: lanes only take sources of the
+    /// block they are working on.
+    sources: CachePadded<AtomicU64>,
+    /// Nodes of the current block not yet finished and counted.
+    remaining: CachePadded<AtomicUsize>,
+    /// The current block. Only dereferenced by a thread that has taken one of
+    /// its nodes, as the block can't end before that node is counted.
+    job: AtomicPtr<Job>,
+    /// How many lanes the current block can keep busy. Sleeping workers
+    /// beyond that aren't woken, unless a node has tasks for them.
+    wanted: AtomicUsize,
+    /// The lanes below this one may work on the current block: all but the
+    /// ones a block rendered ahead leaves the live half.
+    open: AtomicUsize,
+    /// Set when a node asks to run tasks, so the next block is shared even
+    /// when nothing in it can run alongside anything else.
+    tasks_asked: AtomicBool,
+    /// Nanoseconds spent running nodes in the current block, summed over
+    /// lanes.
+    block_busy: AtomicU64,
+    failure: Failure,
+}
+
 /// What wakes a waiting worker.
 enum Wake {
-    /// A block to work on: its epoch.
-    Block(u64),
+    /// A block to work on: its board and epoch.
+    Block(usize, u64),
     /// The engine's ahead side to render.
     Ahead,
     Shutdown,
@@ -456,8 +528,8 @@ enum Wake {
 
 /// One thread's place in the pool.
 struct Lane {
-    /// Nodes this lane made ready and hasn't run yet.
-    deque: Deque,
+    /// Nodes this lane made ready and hasn't run yet, on each board.
+    deques: [Deque; 2],
     /// Set while the worker sleeps, or is about to.
     sleeping: CachePadded<AtomicBool>,
     /// The worker, to wake it. Set when it starts; lane 0 never has one.
@@ -501,9 +573,6 @@ struct Job {
 struct Counters {
     parallel_blocks: AtomicU64,
     inline_blocks: AtomicU64,
-    /// Nanoseconds spent running nodes in the current block, summed over
-    /// lanes.
-    block_busy: AtomicU64,
     busy: AtomicU64,
     wall: AtomicU64,
     awake: AtomicU64,
@@ -514,18 +583,19 @@ impl Shared {
     fn worker(&self, lane: usize, realtime: bool) {
         let _priority = realtime.then(priority::raise);
         let _ = self.lanes[lane].thread.set(thread::current());
-        let mut seen = 0;
+        let mut seen = [0; 2];
         let mut awake = Awake::new(&self.counters.awake);
         loop {
             match self.wait(lane, seen, &mut awake) {
                 // The block may be over: the last it started rendering
                 // ahead, or one it slept through. Then there's nothing in
                 // it for this lane, or for the lanes it would wake.
-                Wake::Block(epoch) => {
-                    seen = epoch;
-                    if self.remaining.load(Acquire) > 0 {
-                        self.wake_children(lane);
-                        self.work(lane, epoch);
+                Wake::Block(board, epoch) => {
+                    seen[board] = epoch;
+                    let b = &self.boards[board];
+                    if b.remaining.load(Acquire) > 0 && lane < b.open.load(Relaxed) {
+                        self.wake_children(board, lane);
+                        self.work(board, lane, epoch);
                     }
                 }
                 Wake::Ahead => self.render_ahead(lane),
@@ -550,26 +620,43 @@ impl Shared {
         self.ahead_inside.fetch_sub(1, Release);
     }
 
-    /// Takes the engine's request to render ahead, if it made one.
-    fn ahead_asked(&self) -> bool {
-        self.ahead_wanted.load(Relaxed) && self.ahead_wanted.swap(false, AcqRel)
+    /// Whether `lane` may render the engine's ahead side: all but the last
+    /// lanes, which a block rendered ahead may leave the live half.
+    fn drives(&self, lane: usize) -> bool {
+        lane < self.lanes.len() - self.kept
     }
 
-    /// Waits for a block other than `seen` to start, or for the engine to
-    /// ask for its ahead side to be rendered: spins for a while, then
-    /// sleeps.
-    fn wait(&self, lane: usize, seen: u64, awake: &mut Awake<'_>) -> Wake {
+    /// Takes the engine's request to render ahead, if it made one and
+    /// `lane` may take it on.
+    fn ahead_asked(&self, lane: usize) -> bool {
+        self.drives(lane)
+            && self.ahead_wanted.load(Relaxed)
+            && self.ahead_wanted.swap(false, AcqRel)
+    }
+
+    /// The board on which a block other than the one in `seen` has
+    /// started, live first, and its epoch.
+    fn started(&self, seen: [u64; 2], order: Ordering) -> Option<(usize, u64)> {
+        [LIVE, MAIN].into_iter().find_map(|board| {
+            let epoch = self.boards[board].epoch.load(order);
+            (epoch != seen[board]).then_some((board, epoch))
+        })
+    }
+
+    /// Waits for a block other than those in `seen`, by board, to start,
+    /// or for the engine to ask for its ahead side to be rendered: spins
+    /// for a while, then sleeps.
+    fn wait(&self, lane: usize, seen: [u64; 2], awake: &mut Awake<'_>) -> Wake {
         let started = Instant::now();
         let mut spins = 0u32;
         while !self.spin.is_zero() {
             if self.shutdown.load(Acquire) {
                 return Wake::Shutdown;
             }
-            let epoch = self.epoch.load(Acquire);
-            if epoch != seen {
-                return Wake::Block(epoch);
+            if let Some((board, epoch)) = self.started(seen, Acquire) {
+                return Wake::Block(board, epoch);
             }
-            if self.ahead_asked() {
+            if self.ahead_asked(lane) {
                 return Wake::Ahead;
             }
             spins = spins.wrapping_add(1);
@@ -582,18 +669,19 @@ impl Shared {
             }
             spin_loop();
         }
+        let drives = self.drives(lane);
         let lane = &self.lanes[lane];
         loop {
             lane.sleeping.store(true, SeqCst);
             // Pairs with the epoch store in `render_shared` and the request
             // in `AheadWaker::wake`: either we see the new epoch or the
             // request, or the thread making it sees us asleep and wakes us.
-            let epoch = self.epoch.load(SeqCst);
+            let block = self.started(seen, SeqCst);
             let wake = if self.shutdown.load(SeqCst) {
                 Some(Wake::Shutdown)
-            } else if epoch != seen {
-                Some(Wake::Block(epoch))
-            } else if self.ahead_wanted.swap(false, SeqCst) {
+            } else if let Some((board, epoch)) = block {
+                Some(Wake::Block(board, epoch))
+            } else if drives && self.ahead_wanted.swap(false, SeqCst) {
                 Some(Wake::Ahead)
             } else {
                 None
@@ -608,44 +696,75 @@ impl Shared {
         }
     }
 
-    /// Wakes the two lanes after `lane` in the wake-up tree, if the block can
-    /// use them and they sleep.
-    fn wake_children(&self, lane: usize) {
-        let wanted = self.wanted.load(Relaxed);
-        for child in [2 * lane + 1, 2 * lane + 2] {
+    /// Wakes the two lanes after `lane` in `board`'s wake-up tree, if the
+    /// block can use them and they sleep. The main board's tree starts from
+    /// lane 0 and goes up. The live board's goes down from the last lane,
+    /// so it wakes the lanes a block rendered ahead leaves it first.
+    fn wake_children(&self, board: usize, lane: usize) {
+        let wanted = self.boards[board].wanted.load(Relaxed);
+        let lanes = self.lanes.len();
+        // Where a lane is in the tree, and the lane in a place: the same
+        // either way.
+        let turn = |n: usize| match (board, n) {
+            (LIVE, 1..) => lanes - n,
+            _ => n,
+        };
+        let place = turn(lane);
+        for child in [2 * place + 1, 2 * place + 2] {
             if child < wanted {
-                self.lanes[child].wake();
+                self.lanes[turn(child)].wake();
             }
         }
     }
 
-    /// Runs nodes of block `epoch` until all of them have run, or until the
-    /// next block starts, and helps with other lanes' tasks when there's no
-    /// node to run. A worker only starts on a block through
-    /// [`Shared::wait`], so it never misses waking the lanes below it.
-    fn work(&self, lane: usize, epoch: u64) {
-        let _lane = WorkingFor::enter(self, lane);
+    /// Runs nodes of `board`'s block `epoch` until all of them have run, or
+    /// until the next block starts, and helps with the tasks of other
+    /// lanes on the board when there's no node to run. On the main board,
+    /// it helps with the live board's block first, which the device waits
+    /// for. A worker only starts on a block through [`Shared::wait`], so it
+    /// never misses waking the lanes below it.
+    fn work(&self, board: usize, lane: usize, epoch: u64) {
+        let _lane = WorkingFor::enter(self, lane, board);
+        let b = &self.boards[board];
         let mut backoff = Backoff::default();
         loop {
-            match self.take_source(epoch).or_else(|| self.steal(lane)) {
+            // A block that's started since, rendered ahead, may leave this
+            // lane out: then it takes none of its nodes or tasks.
+            let open = lane < b.open.load(Relaxed);
+            let stolen = || open.then(|| self.steal(board, lane)).flatten();
+            match self.take_source(board, epoch).or_else(stolen) {
                 Some(first) => {
                     backoff = Backoff::default();
-                    self.session(lane, first);
+                    self.session(board, lane, first);
                 }
-                None if self.remaining.load(Acquire) == 0 => return,
-                None if self.epoch.load(Acquire) != epoch => return,
-                None if self.help(lane) => backoff = Backoff::default(),
+                None if b.remaining.load(Acquire) == 0 => return,
+                None if b.epoch.load(Acquire) != epoch => return,
+                None if board == MAIN && self.help_live(lane) => backoff = Backoff::default(),
+                None if open && self.help(board, lane) => backoff = Backoff::default(),
                 None => backoff.snooze(),
             }
         }
     }
 
-    /// Runs `task` for each of `0..tasks`, for the node `lane` is running,
-    /// with whichever lanes can help, and returns once every task is done.
-    /// Every task runs, even after one panics; the first panic here comes
-    /// out once they're done, and one on another lane at the end of the
-    /// block.
-    fn run_tasks(&self, lane: usize, tasks: u32, task: &(dyn Fn(u32) + Sync)) {
+    /// Works on the live board's block, if one is running, for `lane`,
+    /// which holds no node on the main board. Says whether there was one.
+    fn help_live(&self, lane: usize) -> bool {
+        let live = &self.boards[LIVE];
+        // The audio thread starts the live board's blocks, and is never on
+        // both boards.
+        if lane == 0 || live.remaining.load(Acquire) == 0 {
+            return false;
+        }
+        self.work(LIVE, lane, live.epoch.load(Acquire));
+        true
+    }
+
+    /// Runs `task` for each of `0..tasks`, for the node `lane` is running
+    /// on `board`, with whichever lanes on the board can help, and returns
+    /// once every task is done. Every task runs, even after one panics; the
+    /// first panic here comes out once they're done, and one on another
+    /// lane at the end of the block.
+    fn run_tasks(&self, board: usize, lane: usize, tasks: u32, task: &(dyn Fn(u32) + Sync)) {
         let slot = &self.lanes[lane].tasks;
         // Only this lane gives out the slot's jobs.
         let job = ((slot.left.load(Relaxed) >> 32) as u32).wrapping_add(1);
@@ -654,10 +773,11 @@ impl Shared {
         // job to finish, so the task outlives every use.
         unsafe { *slot.task.get() = Some(erase(task)) };
         slot.done.store(0, Relaxed);
+        slot.board.store(board, Relaxed);
         // Publishes the task: a lane reads it only after taking a task.
         slot.left
             .store(u64::from(job) << 32 | u64::from(tasks), Release);
-        self.wake_helpers(tasks.saturating_sub(1));
+        self.wake_helpers(board, tasks.saturating_sub(1));
         let mut failure = None;
         while let Some(index) = slot.take(job) {
             if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| task(index))) {
@@ -683,13 +803,15 @@ impl Shared {
         }
     }
 
-    /// Wakes up to two sleeping workers, if `left` tasks are still to take.
-    /// Each helper wakes up to two more as it takes a task, so the wake-up
-    /// calls spread out over the threads, as they do when a block starts.
-    /// Workers already awake help when they have no node to run.
-    fn wake_helpers(&self, left: u32) {
+    /// Wakes up to two sleeping workers that may work on `board`'s block,
+    /// if `left` tasks are still to take. Each helper wakes up to two more
+    /// as it takes a task, so the wake-up calls spread out over the
+    /// threads, as they do when a block starts. Workers already awake help
+    /// when they have no node to run.
+    fn wake_helpers(&self, board: usize, left: u32) {
         let mut wanted = left.min(2);
-        for lane in &self.lanes[1..] {
+        let open = self.boards[board].open.load(Relaxed);
+        for lane in self.lanes.iter().take(open).skip(1) {
             if wanted == 0 {
                 return;
             }
@@ -699,20 +821,21 @@ impl Shared {
         }
     }
 
-    /// Runs a task of a node another lane is running, if there's one to
-    /// take. Says whether it ran one.
-    fn help(&self, lane: usize) -> bool {
+    /// Runs a task of a node another lane is running on `board`, if
+    /// there's one to take. Says whether it ran one.
+    fn help(&self, board: usize, lane: usize) -> bool {
         let lanes = self.lanes.len();
         for offset in 1..lanes {
             let slot = &self.lanes[(lane + offset) % lanes].tasks;
             let word = slot.left.load(Acquire);
-            if word as u32 == 0 {
+            // The board is the job's, which `left` published.
+            if word as u32 == 0 || slot.board.load(Relaxed) != board {
                 continue;
             }
             let Some(index) = slot.take((word >> 32) as u32) else {
                 continue;
             };
-            self.wake_helpers(index);
+            self.wake_helpers(board, index);
             let started = Instant::now();
             // SAFETY: taking a task keeps its job from ending until the task
             // is counted done, so the task is set, and alive, and so is the
@@ -728,34 +851,31 @@ impl Shared {
                 panic::catch_unwind(AssertUnwindSafe(|| rt::scope(|| task(index))))
             };
             load.add_task(load::now().wrapping_sub(ticks));
+            let b = &self.boards[board];
             if let Err(payload) = ran {
-                self.failure.record(payload);
+                b.failure.record(payload);
             }
-            self.counters
-                .block_busy
-                .fetch_add(nanos(started.elapsed()), Relaxed);
+            b.block_busy.fetch_add(nanos(started.elapsed()), Relaxed);
             slot.done.fetch_add(1, Release);
             return true;
         }
         false
     }
 
-    /// Takes one of block `epoch`'s sources.
-    fn take_source(&self, epoch: u64) -> Option<u32> {
-        let mut word = self.sources.load(Acquire);
+    /// Takes one of the sources of `board`'s block `epoch`.
+    fn take_source(&self, board: usize, epoch: u64) -> Option<u32> {
+        let b = &self.boards[board];
+        let mut word = b.sources.load(Acquire);
         loop {
             let left = word as u32;
             if left == 0 || word & !u64::from(u32::MAX) != tag(epoch) {
                 return None;
             }
-            match self
-                .sources
-                .compare_exchange_weak(word, word - 1, AcqRel, Acquire)
-            {
+            match (b.sources).compare_exchange_weak(word, word - 1, AcqRel, Acquire) {
                 Ok(_) => {
                     // SAFETY: we took a source of the running block, which
                     // can't end before we count it, so its job is valid.
-                    let job = unsafe { &*self.job.load(Acquire) };
+                    let job = unsafe { &*b.job.load(Acquire) };
                     let schedule = unsafe { &*job.schedule };
                     return Some(schedule.sources(job.stage)[left as usize - 1]);
                 }
@@ -764,13 +884,13 @@ impl Shared {
         }
     }
 
-    /// Steals a node from another lane's deque.
-    fn steal(&self, thief: usize) -> Option<u32> {
+    /// Steals a node from another lane's deque on `board`.
+    fn steal(&self, board: usize, thief: usize) -> Option<u32> {
         let lanes = self.lanes.len();
         loop {
             let mut contended = false;
             for offset in 1..lanes {
-                match self.lanes[(thief + offset) % lanes].deque.steal() {
+                match self.lanes[(thief + offset) % lanes].deques[board].steal() {
                     Steal::Item(node) => return Some(node),
                     Steal::Retry => contended = true,
                     Steal::Empty => {}
@@ -782,40 +902,43 @@ impl Shared {
         }
     }
 
-    /// Runs `first`, which this lane has taken, and then whatever the lane can
-    /// keep going with. Then counts the nodes it ran as finished.
-    fn session(&self, lane: usize, first: u32) {
+    /// Runs `first`, which this lane has taken on `board`, and then whatever
+    /// the lane can keep going with. Then counts the nodes it ran as
+    /// finished.
+    fn session(&self, board: usize, lane: usize, first: u32) {
+        let b = &self.boards[board];
         let started = Instant::now();
         let mut finished = 0;
         // Workers check their own real-time safety here. On the audio thread
         // the engine's check covers this one.
         let checked = panic::catch_unwind(AssertUnwindSafe(|| {
-            // SAFETY: this lane took `first` in the running block.
-            rt::scope(|| unsafe { self.run(lane, first, &mut finished) })
+            // SAFETY: this lane took `first` in the board's running block.
+            rt::scope(|| unsafe { self.run(board, lane, first, &mut finished) })
         }));
         if let Err(payload) = checked {
-            self.failure.record(payload);
+            b.failure.record(payload);
         }
-        self.counters
-            .block_busy
-            .fetch_add(nanos(started.elapsed()), Relaxed);
+        b.block_busy.fetch_add(nanos(started.elapsed()), Relaxed);
         // Only now that this lane is done with the graph may the block end.
-        self.remaining.fetch_sub(finished, AcqRel);
+        b.remaining.fetch_sub(finished, AcqRel);
     }
 
     /// Runs `first`, then each node this lane makes ready that it doesn't
-    /// push, then whatever is on its own deque. Counts each in `finished`.
+    /// push, then whatever is on its own deque on `board`. Counts each in
+    /// `finished`.
     ///
     /// # Safety
     ///
-    /// This lane has taken `first` in the running block.
-    unsafe fn run(&self, lane: usize, first: u32, finished: &mut usize) {
+    /// This lane has taken `first` in `board`'s running block.
+    unsafe fn run(&self, board: usize, lane: usize, first: u32, finished: &mut usize) {
+        let b = &self.boards[board];
         // SAFETY: the block can't end while this lane holds nodes it hasn't
         // counted, so the job and everything it points to stay valid.
-        let job = unsafe { &*self.job.load(Acquire) };
+        let job = unsafe { &*b.job.load(Acquire) };
         let schedule = unsafe { &*job.schedule };
         let (frames, ahead) = unsafe { ((*job.block).frames, (*job.block).ahead) };
-        let Lane { deque, tasks, .. } = &self.lanes[lane];
+        let Lane { deques, tasks, .. } = &self.lanes[lane];
+        let deque = &deques[board];
         let mut next = Some(first);
         // Each node's time runs from the end of the one before, so the clock
         // is read once a node.
@@ -829,7 +952,7 @@ impl Shared {
                 .store(std::ptr::from_ref(load).cast_mut(), Relaxed);
             // SAFETY: this lane took `node`, from the counter, a deque or by
             // making it ready, so no other thread runs it this block.
-            unsafe { self.run_node(job, node) };
+            unsafe { self.run_node(b, job, node) };
             let now = load::now();
             load.add(now.wrapping_sub(last), tasks.take_waited(), frames, ahead);
             last = now;
@@ -838,14 +961,14 @@ impl Shared {
         }
     }
 
-    /// Processes `node`. A panic is caught and recorded, so the block still
-    /// ends; the audio thread raises it again then.
+    /// Processes `node`. A panic is caught and recorded on `board`, so the
+    /// block still ends; the thread that started it raises it again then.
     ///
     /// # Safety
     ///
     /// This lane has taken `node` in the block `job` describes, which is
     /// running, and all of the node's inputs have run.
-    unsafe fn run_node(&self, job: &Job, node: u32) {
+    unsafe fn run_node(&self, board: &Board, job: &Job, node: u32) {
         let n = node as usize;
         // SAFETY: the job's pointers are valid while its block runs. This
         // lane is the only one using node `n` and its output buffer; its
@@ -870,7 +993,7 @@ impl Shared {
                 node.process(&ctx, inputs, &mut output);
             }));
             if let Err(payload) = ran {
-                self.failure.record(payload);
+                board.failure.record(payload);
             }
         }
     }
@@ -897,6 +1020,9 @@ struct Tasks {
     /// the tasks of the node it runs, since the node started. Only that lane
     /// uses it.
     waited: AtomicU64,
+    /// The board of the node the slot's lane is running, whose lanes help
+    /// with its tasks. Set before `left` gives out a new job.
+    board: AtomicUsize,
 }
 
 // SAFETY: `task` is written by the slot's own lane before it publishes a
@@ -948,9 +1074,10 @@ fn erase<'a>(task: &'a (dyn Fn(u32) + Sync + 'a)) -> *const (dyn Fn(u32) + Sync)
 }
 
 thread_local! {
-    /// The renderer and lane this thread is working for while it renders a
-    /// block: where the tasks of the nodes it runs go.
-    static LANE: Cell<(*const Shared, usize)> = const { Cell::new((std::ptr::null(), 0)) };
+    /// The renderer, lane and board this thread is working for while it
+    /// renders a block: where the tasks of the nodes it runs go.
+    static LANE: Cell<(*const Shared, usize, usize)> =
+        const { Cell::new((std::ptr::null(), 0, MAIN)) };
     /// The lane this thread starts blocks from: 0 on the audio thread, and
     /// a worker's own while it renders the engine's ahead side.
     static DRIVER: Cell<usize> = const { Cell::new(0) };
@@ -978,13 +1105,15 @@ pub struct AheadWaker(Arc<Shared>);
 
 impl AheadWaker {
     /// Asks a worker to render ahead: one that's awake takes it on when it
-    /// next looks for work, or else this wakes one. Real-time safe.
+    /// next looks for work, or else this wakes one. Only the workers a
+    /// block rendered ahead may use take it on. Real-time safe.
     pub(crate) fn wake(&self) {
         let shared = &*self.0;
         shared.ahead_wanted.store(true, SeqCst);
         // Pairs with the check in `Shared::wait`: a worker we see awake
-        // sees the request before it sleeps.
-        let workers = &shared.lanes[1..];
+        // sees the request before it sleeps. Of the workers that may take
+        // it on, there's at least one, as there's a waker only with workers.
+        let workers = &shared.lanes[1..shared.lanes.len() - shared.kept];
         if workers.iter().all(|lane| lane.sleeping.load(SeqCst)) {
             workers[0].wake();
         }
@@ -996,13 +1125,14 @@ impl AheadWaker {
     /// there was a block to work on. Real-time safe.
     pub(crate) fn help(&self) -> bool {
         let shared = &*self.0;
-        if shared.remaining.load(Acquire) == 0 {
+        let main = &shared.boards[MAIN];
+        if main.remaining.load(Acquire) == 0 {
             return false;
         }
         // A block that ends meanwhile gives nothing more to take: its
         // sources carry its epoch, and steals see only the running one's
         // nodes.
-        shared.work(0, shared.epoch.load(Acquire));
+        shared.work(MAIN, 0, main.epoch.load(Acquire));
         true
     }
 
@@ -1031,18 +1161,18 @@ const INLINE: usize = usize::MAX;
 /// one, and the stages beyond these share the last's judgement.
 const STAGES: usize = 4;
 
-/// Marks this thread as working for a lane of a renderer, or for none, until
-/// dropped.
-struct WorkingFor((*const Shared, usize));
+/// Marks this thread as working for a lane of a renderer on a board, or for
+/// none, until dropped.
+struct WorkingFor((*const Shared, usize, usize));
 
 impl WorkingFor {
-    fn enter(shared: &Shared, lane: usize) -> Self {
-        Self(LANE.replace((shared, lane)))
+    fn enter(shared: &Shared, lane: usize, board: usize) -> Self {
+        Self(LANE.replace((shared, lane, board)))
     }
 
     /// For none, while this thread runs a task: tasks it asks for run here.
     fn none() -> Self {
-        Self(LANE.replace((std::ptr::null(), 0)))
+        Self(LANE.replace((std::ptr::null(), 0, MAIN)))
     }
 }
 
@@ -1056,19 +1186,19 @@ impl Drop for WorkingFor {
 /// shared block this thread is working on, and says whether it did: false,
 /// having run nothing, in any other block or task.
 pub(crate) fn run_tasks(tasks: u32, task: &(dyn Fn(u32) + Sync)) -> bool {
-    let (shared, lane) = LANE.get();
+    let (shared, lane, board) = LANE.get();
     if shared.is_null() {
         return false;
     }
     // SAFETY: set only while this thread renders a block for the renderer,
     // which keeps `Shared` alive meanwhile.
     let shared = unsafe { &*shared };
-    shared.tasks_asked.store(true, Relaxed);
+    shared.boards[board].tasks_asked.store(true, Relaxed);
     if lane == INLINE {
         return false;
     }
     let _tasks = WorkingFor::none();
-    shared.run_tasks(lane, tasks, task);
+    shared.run_tasks(board, lane, tasks, task);
     true
 }
 
