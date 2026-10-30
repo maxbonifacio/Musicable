@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use musicable_engine::nodes::Sum;
 use musicable_engine::switch::Switch;
-use musicable_engine::{AudioMut, Engine, Graph, Node, NodeKey, NoteEvent, NoteId, TransportState};
+use musicable_engine::{
+    AudioMut, Engine, Graph, Node, NodeEvent, NodeKey, NoteEvent, NoteId, TransportState,
+};
 use musicable_model::PluginFormat;
 use musicable_model::clip::{Controller, Dimension};
 use musicable_model::plugin::{PluginInput, PluginKind};
@@ -35,8 +37,8 @@ use super::preset::{self, Preset};
 use crate::scan::{self, Outcome};
 use crate::tests::{
     Block, CONFIG, Impulse, arpeggiate, assert_arpeggiated, assert_close, bypass,
-    bypassed_at_256_and_back_at_1280, controller, ducked, note, param, play, play_blocks,
-    play_keyed, ramp, scaled, scan_path, sine, temp_dir,
+    bypassed_at_256_and_back_at_1280, controller, controller_on, ducked, let_go, note, on_channel,
+    param, play, play_blocks, play_keyed, ramp, scaled, scan_path, sine, temp_dir,
 };
 use crate::{Buses, ParentWindow, PluginEvent, PluginInfo, Waker};
 
@@ -774,6 +776,7 @@ fn the_synth_plays_notes_with_their_expression() {
             note: a,
             key: 69,
             velocity: 1.0,
+            channel: None,
         },
     )];
     let block = |events| Block {
@@ -818,6 +821,7 @@ fn the_synth_plays_notes_with_their_expression() {
                 note: b,
                 key: 69,
                 velocity: 0.5,
+                channel: None,
             },
         ),
         note(
@@ -860,6 +864,7 @@ fn controllers_move_the_parameters_the_plugins_midi_mapping_says() {
                 note: NoteId(1),
                 key: 69,
                 velocity: 1.0,
+                channel: None,
             },
         ),
     ];
@@ -873,6 +878,45 @@ fn controllers_move_the_parameters_the_plugins_midi_mapping_says() {
     // The controller hears of it, as of automation, and it's no edit.
     assert_eq!(instance.poll(), []);
     assert_eq!(instance.param_value(LEVEL), Some(0.25));
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_multi_timbral_synth_plays_each_channels_notes_and_controllers_in_its_part() {
+    let plugins = TestPlugins::new("parts synth");
+    let mut instance = plugins.synth();
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let silence = vec![0.0; 128];
+    fn block(events: &[NodeEvent]) -> Block<'_> {
+        Block {
+            events,
+            ..Block::default()
+        }
+    }
+    // A, 220 Hz, on the second channel: an octave up.
+    let [left, _] = play(
+        &mut node,
+        &silence,
+        &block(&[on_channel(0, 1, 57, Some(1))]),
+    );
+    let (second, _) = sine(440.0, 0.5, 0.0, 128);
+    assert_close(&left, &second);
+    let [left, _] = play(&mut node, &silence, &block(&[let_go(0, NoteId(1))]));
+    assert_eq!(left, silence);
+    // Its level is its first part's, which the second channel's volume
+    // doesn't move, and the first's does.
+    let events = [controller_on(0, Controller::VOLUME, 0.25, Some(1))];
+    play(&mut node, &silence, &block(&events));
+    assert_eq!(plugins.processor_value(&instance, LEVEL), Some(0.5));
+    let events = [
+        controller_on(0, Controller::VOLUME, 0.25, Some(0)),
+        on_channel(0, 2, 57, None),
+    ];
+    let [left, _] = play(&mut node, &silence, &block(&events));
+    assert_close(&left, &sine(220.0, 0.25, 0.0, 128).0);
+    assert_eq!(plugins.processor_value(&instance, LEVEL), Some(0.25));
     drop((node, instance));
     plugins.assert_alright();
 }

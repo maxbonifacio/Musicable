@@ -842,15 +842,19 @@ struct Player {
 /// switches it holds on there, such as the sustain pedal.
 struct Sounding {
     notes: Vec<NoteId>,
-    /// A bit for each switch held on, the sustain pedal's lowest.
-    switches: u8,
+    switches: Switches,
 }
+
+/// The switches held on, a bit for each, the sustain pedal's lowest: for
+/// the notes on no channel of their own, then for those on each MIDI
+/// channel.
+type Switches = [u8; 17];
 
 impl Sounding {
     fn new() -> Self {
         Self {
             notes: Vec::with_capacity(Notes::CAPACITY),
-            switches: 0,
+            switches: [0; 17],
         }
     }
 
@@ -869,11 +873,16 @@ impl Sounding {
                     self.notes.swap_remove(at);
                 }
             }
-            NodeEventKind::Controller { controller, value } if controller.is_switch() => {
+            NodeEventKind::Controller {
+                controller,
+                value,
+                channel,
+            } if controller.is_switch() => {
+                let held = &mut self.switches[channel_lane(channel)];
                 let bit = switch_bit(controller);
                 match Controller::is_on(value) {
-                    true => self.switches |= bit,
-                    false => self.switches &= !bit,
+                    true => *held |= bit,
+                    false => *held &= !bit,
                 }
             }
             _ => {}
@@ -881,16 +890,26 @@ impl Sounding {
     }
 }
 
-/// A switch's bit among `switches` ([`Sounding::switches`]).
+/// The place of what's on `channel` among 17 places: for no channel of
+/// its own, then for each MIDI channel, as among [`Switches`].
+pub(crate) fn channel_lane(channel: Option<u8>) -> usize {
+    channel.map_or(0, |c| usize::from(c.min(15)) + 1)
+}
+
+/// A switch's bit among [`Switches`].
 fn switch_bit(controller: Controller) -> u8 {
     1 << (controller.number() - Controller::SUSTAIN.number())
 }
 
-/// The switches held on among `switches` ([`Sounding::switches`]), in
-/// order.
-fn switches_on(switches: u8) -> impl Iterator<Item = Controller> {
-    let switch = Controller::all().filter(|c| c.is_switch());
-    switch.filter(move |&c| switches & switch_bit(c) != 0)
+/// The switches held on among `switches`, with their channels, in order.
+fn switches_on(switches: Switches) -> impl Iterator<Item = (Controller, Option<u8>)> {
+    let channels = (0..17).map(|lane| (lane as u8).checked_sub(1));
+    channels.zip(switches).flat_map(|(channel, held)| {
+        let switch = Controller::all().filter(|c| c.is_switch());
+        switch
+            .filter(move |&c| held & switch_bit(c) != 0)
+            .map(move |c| (c, channel))
+    })
 }
 
 /// The notes `node` played in the current block, for the writers that
@@ -965,10 +984,30 @@ impl Notes<'_> {
     }
 
     /// Sends a controller's move to where this node's notes go, `offset`
-    /// frames into the block, in order with its notes. It takes room as a
-    /// note does, and returns whether there was some.
+    /// frames into the block, in order with its notes, for every note, on
+    /// no channel of its own. It takes room as a note does, and returns
+    /// whether there was some.
     pub fn send_controller(&mut self, offset: usize, controller: Controller, value: f32) -> bool {
-        self.send_kind(offset, NodeEventKind::Controller { controller, value })
+        self.send_controller_on(offset, controller, value, None)
+    }
+
+    /// Sends a controller's move as [`send_controller`](Self::send_controller)
+    /// does, for the notes on `channel`, from 0 to 15, or with `None`, on
+    /// none: to pass one on as it came, or as a note wire with a channel
+    /// plays it.
+    pub fn send_controller_on(
+        &mut self,
+        offset: usize,
+        controller: Controller,
+        value: f32,
+        channel: Option<u8>,
+    ) -> bool {
+        let kind = NodeEventKind::Controller {
+            controller,
+            value,
+            channel,
+        };
+        self.send_kind(offset, kind)
     }
 
     /// Ends every note the node has sounding where its notes go, `offset`
@@ -988,8 +1027,8 @@ impl Notes<'_> {
                 NodeEventKind::Note(NoteEvent::Off { note, velocity }),
             );
         }
-        for controller in switches_on(std::mem::take(&mut sounding.switches)) {
-            self.send_controller(offset, controller, 0.0);
+        for (controller, channel) in switches_on(std::mem::take(&mut sounding.switches)) {
+            self.send_controller_on(offset, controller, 0.0, channel);
         }
         self.sounding = Some(sounding);
     }
@@ -1257,10 +1296,11 @@ impl PreparedGraph {
                     let velocity = Note::RELEASE_VELOCITY;
                     NodeEventKind::Note(NoteEvent::Off { note, velocity })
                 });
-                let let_go = switches_on(gone.sounding.switches).map(|controller| {
+                let let_go = switches_on(gone.sounding.switches).map(|(controller, channel)| {
                     NodeEventKind::Controller {
                         controller,
                         value: 0.0,
+                        channel,
                     }
                 });
                 for kind in ends.chain(let_go) {
@@ -1280,10 +1320,11 @@ impl PreparedGraph {
                     continue;
                 }
                 let (to, side) = self.players[p].targets[t];
-                for controller in switches_on(gone.sounding.switches) {
+                for (controller, channel) in switches_on(gone.sounding.switches) {
                     let kind = NodeEventKind::Controller {
                         controller,
                         value: 1.0,
+                        channel,
                     };
                     let kind = on_side(kind, side);
                     self.route(to, NodeEvent { offset: 0, kind });
@@ -1608,6 +1649,7 @@ mod tests {
                     note,
                     key: 60,
                     velocity: 1.0,
+                    channel: None,
                 },
             );
             notes.send(
@@ -1693,6 +1735,7 @@ mod tests {
                     note: NoteId(1000 + position),
                     key,
                     velocity: 1.0,
+                    channel: None,
                 }),
             };
             if position == 64 {
@@ -1715,6 +1758,7 @@ mod tests {
             note: NoteId(note),
             key,
             velocity: 1.0,
+            channel: None,
         };
         let off = |note| NoteEvent::Off {
             note: NoteId(note),
@@ -1793,6 +1837,7 @@ mod tests {
             note: NoteId(0),
             key: 60,
             velocity: 1.0,
+            channel: None,
         };
         let off = NoteEvent::Off {
             note: NoteId(0),
@@ -1865,7 +1910,8 @@ mod tests {
                     NoteEvent::On {
                         note,
                         key: 60,
-                        velocity: 1.0
+                        velocity: 1.0,
+                        channel: None,
                     }
                 ));
             }
@@ -1912,6 +1958,7 @@ mod tests {
             note: NoteId(1),
             key: 64,
             velocity: 1.0,
+            channel: None,
         });
         assert!(graph.route(
             holds,
@@ -1962,6 +2009,7 @@ mod tests {
             note: NoteId(7),
             key: 60,
             velocity: 1.0,
+            channel: None,
         };
         let recorded = [NodeEvent {
             offset: 0,
@@ -1991,6 +2039,7 @@ mod tests {
             note: NoteId(7),
             key: 60,
             velocity: 1.0,
+            channel: None,
         });
         assert_eq!(node::<KeepAll>(&mut first, a).0, [(0, on)]);
         let off = NodeEventKind::Note(NoteEvent::Off {
@@ -2023,8 +2072,8 @@ mod tests {
         assert_eq!(got, [vec![], vec![]]);
     }
 
-    /// Holds the sustain pedal down and starts note 7 on the first block it
-    /// plays.
+    /// Holds the sustain pedal down, on no channel and on channel 2, and
+    /// starts note 7 on the first block it plays.
     #[derive(Default)]
     struct Pedal {
         started: bool,
@@ -2038,13 +2087,15 @@ mod tests {
         fn play_notes(&mut self, _: &ProcessContext<'_>, notes: &mut Notes<'_>) {
             if !std::mem::replace(&mut self.started, true) {
                 assert!(notes.send_controller(0, Controller::SUSTAIN, 1.0));
+                assert!(notes.send_controller_on(0, Controller::SUSTAIN, 1.0, Some(2)));
                 let note = NoteId(7);
                 assert!(notes.send(
                     0,
                     NoteEvent::On {
                         note,
                         key: 60,
-                        velocity: 1.0
+                        velocity: 1.0,
+                        channel: None,
                     }
                 ));
             }
@@ -2078,24 +2129,28 @@ mod tests {
         };
         let (mut first, _) = build(&[1]);
         render_block(&mut first, 0);
-        let pedal = |value| NodeEventKind::Controller {
-            controller: Controller::SUSTAIN,
-            value,
+        let pedal = |value, channel| {
+            let kind = NodeEventKind::Controller {
+                controller: Controller::SUSTAIN,
+                value,
+                channel,
+            };
+            (0, kind)
         };
         // Where the way goes, the note ends, and the pedal, which would
-        // hold it on, comes up. Where it goes now, the pedal goes down.
+        // hold it on, comes up, on each channel. Where it goes now, the
+        // pedal goes down.
         let off = NodeEventKind::Note(NoteEvent::Off {
             note: NoteId(7),
             velocity: Note::RELEASE_VELOCITY,
         });
         let (mut second, got) = swap(&mut first, &[2], 64);
-        assert_eq!(
-            got,
-            [vec![(0, off), (0, pedal(0.0))], vec![(0, pedal(1.0))]]
-        );
+        let up = [(0, off), pedal(0.0, None), pedal(0.0, Some(2))];
+        let down = [pedal(1.0, None), pedal(1.0, Some(2))];
+        assert_eq!(got, [up.to_vec(), down.to_vec()]);
         // Where the way stays, it holds on as it is.
         let (_, got) = swap(&mut second, &[1, 2], 128);
-        assert_eq!(got, [vec![(0, pedal(1.0))], vec![]]);
+        assert_eq!(got, [down.to_vec(), vec![]]);
     }
 
     /// Sends the modulation it gets plus one, or one if it gets none,

@@ -1332,7 +1332,8 @@ impl Session {
                     | Edit::DeviceActive { .. }
                     | Edit::AddWire { .. }
                     | Edit::RemoveWire { .. }
-                    | Edit::WireFrom { .. } => recompile = true,
+                    | Edit::WireFrom { .. }
+                    | Edit::WireChannel { .. } => recompile = true,
                     // Which side inputs a plugin has says which wires into
                     // it play. With none, the graph stays as it is, so a
                     // plugin listing its inputs as it loads doesn't rebuild
@@ -1574,8 +1575,9 @@ impl EngineLink {
         self.push(Message::Event(punch_event(project)));
     }
 
-    /// Sets the engine's mute gates, the output stages' and the sends', to
-    /// what mute and solo say now, sending only the ones that changed. With
+    /// Sets the engine's mute gates, the output stages', the sends' and the
+    /// note wires', to what mute and solo say now, sending only the ones
+    /// that changed. With
     /// `compiled`, a graph built from `project` is on its way, with every
     /// gate already set, so only gates the engine might send an old value of
     /// again need sending.
@@ -1590,8 +1592,11 @@ impl EngineLink {
             .iter()
             .flat_map(|t| &t.sends)
             .map(|s| (keys::send(s.id), silenced.send(s.id)));
+        let wires = (project.wires.iter())
+            .filter(|w| w.takes_notes())
+            .map(|w| (keys::wire(w.id), silenced.wire(w.id)));
         let mut changed = Vec::new();
-        for (node, muted) in outputs.chain(sends) {
+        for (node, muted) in outputs.chain(sends).chain(wires) {
             match self.gates.insert(node, muted) {
                 Some(was) if was == muted => {}
                 None if compiled => {}

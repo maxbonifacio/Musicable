@@ -934,6 +934,49 @@ fn a_plugins_side_inputs_are_its_ports_by_its_ids_for_them() {
 }
 
 #[test]
+fn reads_give_note_wires_with_their_channels_and_each_instrument_s_note_input() {
+    let mut rig = Rig::new(Project::new());
+    rig.call(
+        "run_commands",
+        json!({"name": "Set Up", "commands": [
+            {"id": "track.new_midi_track"},
+            {"id": "track.rename", "args": {"track": 0, "name": "Keys"}},
+            {"id": "track.new_midi_track"},
+            {"id": "track.rename", "args": {"track": 1, "name": "Strings"}},
+            {"id": "device.add", "args": {"kind": "synth", "track": 1}},
+            {"id": "mixer.set_midi_to", "args": {"track": 0, "device": 0, "channel": 2}},
+        ]}),
+    )
+    .unwrap();
+
+    let project = rig.call("get_project", json!({})).unwrap();
+    let keys = json!({"track": 0, "tap": "post_fx", "name": "Keys Post FX"});
+    let to = json!({"device": 0, "port": "notes", "notes": true, "name": "Synth on Strings"});
+    assert_eq!(
+        project["wires"],
+        json!([{"id": 0, "from": keys, "to": to, "channel": 2}])
+    );
+    let synth = rig.call("get_device", json!({"device": 0})).unwrap();
+    assert_eq!(
+        synth["ports"],
+        json!([{"port": "notes", "notes": true, "name": "Notes", "wires": [
+            {"id": 0, "from": keys, "channel": 2},
+        ]}])
+    );
+    // Without a channel, it has none to list.
+    let unset = json!({"id": "wire.set_channel", "args": {"wire": 0}});
+    rig.call("run_command", unset).unwrap();
+    let project = rig.call("get_project", json!({})).unwrap();
+    assert_eq!(project["wires"], json!([{"id": 0, "from": keys, "to": to}]));
+    // The Strings play their own synth already.
+    let itself = json!({"id": "mixer.set_midi_to", "args": {"track": 1, "device": 0}});
+    assert_eq!(
+        rig.call("run_command", itself),
+        Err("Synth is on Strings itself, which plays it already.".into())
+    );
+}
+
+#[test]
 fn an_audio_clip_gives_its_warp_with_each_mode_s_settings() {
     let mut project = Project::new();
     let track = project.add_track("Voice", TrackKind::Audio);

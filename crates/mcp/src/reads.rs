@@ -343,12 +343,12 @@ fn wire_entry(project: &Project, wire: &Wire) -> Json {
     let mut to = port_entry(wire.to);
     to["device"] = wire.to.device().0.into();
     to["name"] = project.port_name(wire.to).into();
-    json!({
+    let entry = json!({
         "id": wire.id.0,
         "from": tap_entry(project, wire.from),
         "to": to,
-        "gain": short(wire.gain),
-    })
+    });
+    carried(wire, entry)
 }
 
 /// A tap as wire.connect's arguments name it, with its name:
@@ -391,13 +391,27 @@ fn input_entry(project: &Project, tap: Tap) -> Json {
 }
 
 /// A port as get_device lists it: `{"port": "sidechain"}` for a
-/// Compressor's or a Gate's, or `{"port": "input", "input": 2}` for the
-/// side input a plugin calls 2, as wire.connect takes it.
+/// Compressor's or a Gate's, `{"port": "input", "input": 2}` for the
+/// side input a plugin calls 2, or `{"port": "notes", "notes": true}` for an
+/// instrument's or a MIDI effect's note input, as wire.connect takes it.
 fn port_entry(port: Port) -> Json {
     match port {
         Port::Sidechain(_) => json!({ "port": "sidechain" }),
         Port::PluginInput(_, input) => json!({ "port": "input", "input": input }),
+        Port::Notes(_) => json!({ "port": "notes", "notes": true }),
     }
+}
+
+/// What a wire carries beside its tap and port: an audio wire's gain, or a
+/// note wire's channel, from 0 to 15, if it has one, as wire.connect takes
+/// them.
+fn carried(wire: &Wire, mut entry: Json) -> Json {
+    match (wire.takes_notes(), wire.channel) {
+        (false, _) => entry["gain"] = short(wire.gain),
+        (true, Some(channel)) => entry["channel"] = channel.into(),
+        (true, None) => {}
+    }
+    entry
 }
 
 /// A device as the project lists it: its id, name and kind, and whether
@@ -601,7 +615,8 @@ fn points(curve: &[Point]) -> Json {
 }
 
 /// One device: what it is, each of its parameters' number, name, range,
-/// unit and value, and its ports with the wires into each.
+/// unit and value, and its ports with the wires into each, its note input
+/// last.
 pub(crate) fn device(window: &impl Window, id: DeviceId) -> Result<Json, String> {
     let project = window.project();
     let Some((chain, index, device)) = project.find_device(id) else {
@@ -656,14 +671,15 @@ pub(crate) fn device(window: &impl Window, id: DeviceId) -> Result<Json, String>
         DeviceKind::TestInstrument { level } => entry["level"] = short(*level),
     }
     let ports: Vec<Json> = (project.ports(id).into_iter())
+        .chain(project.note_input(id))
         .map(|port| {
             let wires: Vec<Json> = (project.wires_into(port))
                 .map(|wire| {
-                    json!({
+                    let entry = json!({
                         "id": wire.id.0,
                         "from": tap_entry(project, wire.from),
-                        "gain": short(wire.gain),
-                    })
+                    });
+                    carried(wire, entry)
                 })
                 .collect();
             let mut entry = port_entry(port);

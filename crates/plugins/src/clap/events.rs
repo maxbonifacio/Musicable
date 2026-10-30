@@ -50,6 +50,7 @@ impl Event {
         time: u32,
         note_id: i32,
         port: i16,
+        channel: i16,
         key: i16,
         velocity: f64,
     ) -> Self {
@@ -58,7 +59,7 @@ impl Event {
                 header: header::<clap_event_note>(type_, time),
                 note_id,
                 port_index: port,
-                channel: 0,
+                channel,
                 key,
                 velocity,
             },
@@ -70,6 +71,7 @@ impl Event {
         expression: clap_note_expression,
         note_id: i32,
         port: i16,
+        channel: i16,
         key: i16,
         value: f64,
     ) -> Self {
@@ -79,7 +81,7 @@ impl Event {
                 expression_id: expression,
                 note_id,
                 port_index: port,
-                channel: 0,
+                channel,
                 key,
                 value,
             },
@@ -439,8 +441,8 @@ mod tests {
             header: header::<clap_event_param_gesture>(CLAP_EVENT_PARAM_GESTURE_BEGIN, 0),
             param_id: 3,
         };
-        let end = Event::note(CLAP_EVENT_NOTE_END, 0, 1, 0, 60, 0.0);
-        let played = Event::note(CLAP_EVENT_NOTE_ON, 0, 9, 0, 64, 1.0);
+        let end = Event::note(CLAP_EVENT_NOTE_END, 0, 1, 0, 0, 60, 0.0);
+        let played = Event::note(CLAP_EVENT_NOTE_ON, 0, 9, 0, 0, 64, 1.0);
         let value = Event::param(0, 3, 0.25);
         let push = list.try_push.unwrap();
         // SAFETY: the list was just made, and the output stays put.

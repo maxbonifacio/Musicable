@@ -24,7 +24,10 @@ From the top, a strip has these parts, which can be hidden and moved
   ([Recording and comping](../using/recording.md#monitoring)).
 - **The output**: the master, a group track the track can feed, or **Sends
   Only**, nothing but its sends ([Routing](../using/routing.md#sends-only)).
-  Return tracks feed the master or Sends Only.
+  Return tracks feed the master or Sends Only. A MIDI track without an
+  instrument has **MIDI To** here instead: an instrument on another track
+  that it plays its notes on, on a MIDI channel if you pick one
+  ([Routing](../using/routing.md#playing-another-tracks-instrument)).
 - **A send to each return track**, from silence to 0 dB, with **Pre** to
   take the signal before the fader instead of after it. Dragging a send that
   isn't there yet adds it, and right-clicking one has **Remove Send**.

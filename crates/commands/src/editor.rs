@@ -483,8 +483,8 @@ pub struct TakenDevice {
     pub device: Device,
     /// The lanes that automated it: its parameters' and its Bypass's.
     pub lanes: Vec<automation::Lane>,
-    /// The wires into it, which its copies keep, each with the lane that
-    /// automated its gain, if one did.
+    /// The wires into its side inputs, which its copies keep, each with the
+    /// lane that automated its gain, if one did.
     pub wires: Vec<(Wire, Option<automation::Lane>)>,
 }
 

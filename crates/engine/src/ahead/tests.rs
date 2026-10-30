@@ -127,6 +127,7 @@ impl Node for Ticks {
                         note,
                         key: (time % 128) as u8,
                         velocity: 1.0,
+                        channel: None,
                     },
                 ),
                 1 => notes.send(
@@ -635,6 +636,7 @@ fn record_taps_reach_their_writers_as_they_play() {
         note: NoteId(1),
         key: 100,
         velocity: 1.0,
+        channel: None,
     };
     assert_eq!(notes[2], (100, NodeEventKind::Note(on)));
 }
@@ -664,6 +666,7 @@ fn notes_too_many_for_a_writers_queue_hold_the_lead_back_rather_than_drop() {
             note,
             key: (at % 128) as u8,
             velocity: 1.0,
+            channel: None,
         };
         let off = NoteEvent::Off {
             note,
@@ -1035,6 +1038,7 @@ fn weight(note: NoteEvent) -> f32 {
             note,
             key,
             velocity,
+            ..
         } => (note.0 % 8) as f32 * 0.5 + f32::from(key) * 1e-2 + velocity,
         NoteEvent::Expression { value, .. } => 0.5 * value,
         NoteEvent::Off { velocity, .. } => -velocity,

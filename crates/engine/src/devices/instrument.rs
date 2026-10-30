@@ -605,6 +605,7 @@ pub(crate) mod tests {
                 note: NoteId(note),
                 key,
                 velocity,
+                channel: None,
             }),
         }
     }
@@ -636,7 +637,11 @@ pub(crate) mod tests {
     pub(crate) fn controller(at: usize, controller: Controller, value: f32) -> NodeEvent {
         NodeEvent {
             offset: at,
-            kind: NodeEventKind::Controller { controller, value },
+            kind: NodeEventKind::Controller {
+                controller,
+                value,
+                channel: None,
+            },
         }
     }
 

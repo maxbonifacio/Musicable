@@ -22,7 +22,7 @@ controls:
   opens to the points before the device on its own track, such as a vocal
   as it was before a saturator, to key a de-esser. **No Input** takes the
   source away. A MIDI track's Pre FX is notes, and so is the point after
-  each MIDI effect in front of its instrument, which no wire takes yet.
+  each MIDI effect in front of its instrument, which a key can't take.
 - **Gain**, under each source: how loud its key is, from silence to
   +24 dB. Right-click it to type a value, as with any bar.
 - **On**: the detector follows the key, not the device's own input. Picking

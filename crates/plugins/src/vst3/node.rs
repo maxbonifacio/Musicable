@@ -47,7 +47,7 @@ pub(crate) struct Audio {
     pub(crate) outputs: Buses,
     /// Whether the plugin takes notes: it has an event input.
     pub(crate) takes_notes: bool,
-    /// The parameter each MIDI controller moves, if any.
+    /// The parameter each MIDI controller moves on each channel, if any.
     pub(crate) controllers: Controllers,
     pub(crate) changes: InputChanges,
     pub(crate) out_changes: OutputChanges,
@@ -77,7 +77,7 @@ impl Audio {
             inputs: Buses::default(),
             outputs: Buses::default(),
             takes_notes: false,
-            controllers: [None; CONTROLLERS],
+            controllers: Box::new([[None; CONTROLLERS]; 16]),
             changes: InputChanges::new(),
             out_changes: OutputChanges::new(),
             events: Events::new(EVENT_CAPACITY, false),
@@ -120,8 +120,8 @@ impl Audio {
 /// How many MIDI controllers there are.
 pub(crate) const CONTROLLERS: usize = Controller::MAX as usize + 1;
 
-/// The parameter each MIDI controller moves, by number.
-pub(crate) type Controllers = [Option<u32>; CONTROLLERS];
+/// The parameter each MIDI controller moves, by channel and number.
+pub(crate) type Controllers = Box<[[Option<u32>; CONTROLLERS]; 16]>;
 
 /// A plugin's audio buses on one side: their channel counts and names,
 /// which is the main one, and which are on.
@@ -631,9 +631,14 @@ fn events_for_block(ctx: &ProcessContext<'_>, audio: &mut Audio) {
                 }
             }
             NodeEventKind::Note(note) => note_events(audio, offset, note),
-            // A controller moves the parameter the plugin maps it to.
-            NodeEventKind::Controller { controller, value } => {
-                if let Some(id) = audio.controllers[usize::from(controller.number())] {
+            // A controller moves the parameter the plugin maps it to, on
+            // its channel.
+            NodeEventKind::Controller {
+                controller,
+                value,
+                channel,
+            } => {
+                if let Some(id) = mapped(&audio.controllers, controller, channel) {
                     audio.changes.push(id, offset, value.into(), true);
                 }
             }
@@ -664,8 +669,12 @@ fn param_changes(ctx: &ProcessContext<'_>, audio: &mut Audio) {
             }
             // A controller's parameter, such as the sustain pedal's, comes
             // back where it was left.
-            NodeEventKind::Controller { controller, value } => {
-                if let Some(id) = audio.controllers[usize::from(controller.number())] {
+            NodeEventKind::Controller {
+                controller,
+                value,
+                channel,
+            } => {
+                if let Some(id) = mapped(&audio.controllers, controller, channel) {
                     audio.changes.push(id, 0, value.into(), true);
                 }
             }
@@ -674,7 +683,15 @@ fn param_changes(ctx: &ProcessContext<'_>, audio: &mut Audio) {
     }
 }
 
-/// The events that play `note` on the plugin.
+/// The parameter the plugin maps `controller` to on `channel`, or with
+/// `None`, on the first.
+fn mapped(controllers: &Controllers, controller: Controller, channel: Option<u8>) -> Option<u32> {
+    let channel = channel.map_or(0, |c| c.min(15));
+    controllers[usize::from(channel)][usize::from(controller.number())]
+}
+
+/// The events that play `note` on the plugin, on the first channel, or the
+/// one a note wire gives it.
 fn note_events(audio: &mut Audio, offset: i32, note: NoteEvent) {
     if !audio.takes_notes {
         return;
@@ -692,7 +709,7 @@ fn note_events(audio: &mut Audio, offset: i32, note: NoteEvent) {
             kNoteOffEvent as uint16,
             Event__type0 {
                 noteOff: NoteOffEvent {
-                    channel: 0,
+                    channel: sounding.channel,
                     pitch: sounding.key,
                     velocity,
                     noteId: sounding.id,
@@ -718,18 +735,20 @@ fn note_events(audio: &mut Audio, offset: i32, note: NoteEvent) {
             note,
             key,
             velocity,
+            channel,
         } => {
             if let Some(old) = audio.sounding.end(note) {
                 audio.events.push(off(old, 0.0));
             }
-            let Some(sounding) = audio.sounding.start(note, key.min(127)) else {
+            let channel = channel.map_or(0, |c| c.min(15));
+            let Some(sounding) = audio.sounding.start(note, key.min(127), channel) else {
                 return;
             };
             event(
                 kNoteOnEvent as uint16,
                 Event__type0 {
                     noteOn: NoteOnEvent {
-                        channel: 0,
+                        channel: sounding.channel,
                         pitch: sounding.key,
                         tuning: 0.0,
                         velocity,
@@ -756,7 +775,7 @@ fn note_events(audio: &mut Audio, offset: i32, note: NoteEvent) {
                     kPolyPressureEvent as uint16,
                     Event__type0 {
                         polyPressure: PolyPressureEvent {
-                            channel: 0,
+                            channel: sounding.channel,
                             pitch: sounding.key,
                             pressure: value.clamp(0.0, 1.0) as f32,
                             noteId: sounding.id,

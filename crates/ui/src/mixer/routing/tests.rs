@@ -540,6 +540,66 @@ fn a_second_wire_into_a_side_input_is_numbered() {
 }
 
 #[test]
+fn a_note_wire_plays_its_notes_on_the_channel_picked() {
+    let (mut project, ids) = project();
+    let strings = project.add_track("Strings", TrackKind::Midi);
+    let synth = project.new_device(DeviceKind::TestInstrument { level: 0.5 });
+    let port = Port::Notes(synth.id);
+    project.track_mut(strings).unwrap().devices.push(synth);
+    let wire = project.new_wire(Tap::PostFx(Chain::Track(ids.lead)), port);
+    let id = wire.id;
+    project.wires.push(wire);
+    let mut harness = harness(project);
+    // Under a heading of its own, after the keys: where its notes come
+    // from, the instrument they play, and its channel.
+    let source = "Strings Device Notes Source";
+    let channel = "Strings Device Notes Channel";
+    assert_eq!(value(&harness, source).as_deref(), Some("Lead, Post FX"));
+    assert_eq!(value(&harness, channel).as_deref(), Some("Any Channel"));
+    end(&harness, "Strings, Device", source);
+    let key = "Bass Compressor Sidechain Source";
+    let rows = ["Keys", key, "Notes", source];
+    let tops: Vec<f32> = rows.iter().map(|label| top(&harness, label)).collect();
+    assert!(tops.is_sorted_by(|a, b| a < b), "{tops:?}");
+    // It has no gain.
+    assert!(
+        harness
+            .query_by_label("Strings Device Notes Gain")
+            .is_none()
+    );
+
+    // Picking a channel plays them on it.
+    open(&mut harness, channel);
+    pick(&mut harness, "Channel 3");
+    assert_eq!(harness.state().project().wire(id).unwrap().channel, Some(2));
+    assert_eq!(value(&harness, channel).as_deref(), Some("Channel 3"));
+    open(&mut harness, channel);
+    pick(&mut harness, "Any Channel");
+    assert_eq!(harness.state().project().wire(id).unwrap().channel, None);
+
+    // Its source menu has the points that carry notes: Double's, a MIDI
+    // track's, but none of an audio track's.
+    open(&mut harness, source);
+    harness
+        .get_by_role_and_label(Role::Button, "Double")
+        .hover();
+    harness.run();
+    for point in ["Pre FX", "Post FX"] {
+        assert!(harness.query_by_label(point).is_some(), "{point}");
+    }
+    assert!(harness.query_by_label("Post Fader").is_none());
+    harness.get_by_label("Pre FX").click();
+    harness.run();
+    let from = harness.state().project().wire(id).unwrap().from;
+    assert_eq!(from, Tap::PreFx(ids.double));
+    assert!(
+        harness.state().errors.is_empty(),
+        "{:?}",
+        harness.state().errors
+    );
+}
+
+#[test]
 fn the_routing_panel_docks_beside_the_mixer_and_brings_devices_into_sight() {
     use crate::panels::{DEVICES, MIXER, PIANO_ROLL, ROUTING};
 

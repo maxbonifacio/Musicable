@@ -40,6 +40,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     tracks_from_tracks,
     plugin_kinds,
     notes_after_effects,
+    note_wires,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -445,6 +446,20 @@ fn notes_after_effects(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
     tracks.into_iter().flatten().for_each(unroute);
     file.get_mut("master").map(unroute);
+    Ok(())
+}
+
+/// Version 24 added note wires, which take a MIDI track's notes into an
+/// instrument's or a MIDI effect's note input, on a MIDI channel or on the
+/// notes' own, and a channel for every wire. Version 23 wires are all audio
+/// wires, which have none.
+fn note_wires(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let wires = file.get_mut("wires").and_then(Value::as_array_mut);
+    for (i, wire) in wires.into_iter().flatten().enumerate() {
+        if let Some(wire) = wire.as_object_mut() {
+            add(wire, &format!("wires[{i}]"), "channel", Value::Null)?;
+        }
+    }
     Ok(())
 }
 
@@ -1061,6 +1076,23 @@ mod tests {
         assert_eq!(file["tracks"][1]["modulation"], routings(&[1]));
         assert_eq!(file["master"]["modulation"], routings(&[]));
         assert_eq!(file["version"], json!(23));
+    }
+
+    #[test]
+    fn version_23_wires_are_audio_wires_without_channels() {
+        let mut file = json!({"version": 23, "wires": [{"id": 0}, {"id": 1}]});
+        run(&STEPS[..23], &mut file, 23).unwrap();
+        let wires = json!([{"id": 0, "channel": null}, {"id": 1, "channel": null}]);
+        assert_eq!(file["wires"], wires);
+        assert_eq!(file["version"], json!(24));
+        let mut file = json!({"version": 23, "wires": [{"id": 0, "channel": 2}]});
+        assert_eq!(
+            run(&STEPS[..23], &mut file, 23),
+            Err(Invalid::new(
+                "wires[0].channel",
+                "unknown field for the file's version"
+            ))
+        );
     }
 
     #[test]

@@ -599,21 +599,26 @@ impl Instance {
         buses
     }
 
-    /// The parameter each MIDI controller moves, by number, as the
-    /// plugin's MIDI mapping says, for MIDI's first channel on its first
-    /// event input: VST3 has plugins take controllers as parameters.
+    /// The parameter each MIDI controller moves, by channel and number, as
+    /// the plugin's MIDI mapping says, on its first event input: VST3 has
+    /// plugins take controllers as parameters, and a multi-timbral one maps
+    /// each channel's to its part's.
     fn midi_mapping(&self) -> Controllers {
-        let mut mapping = [None; node::CONTROLLERS];
+        let mut mapping = Box::new([[None; node::CONTROLLERS]; 16]);
         let Some(midi) = (self.parts.controller.as_ref()).and_then(|c| c.cast::<IMidiMapping>())
         else {
             return mapping;
         };
-        for (number, slot) in mapping.iter_mut().enumerate() {
-            let mut id: ParamID = 0;
-            // SAFETY: on the main thread, with somewhere to write.
-            let mapped = unsafe { midi.getMidiControllerAssignment(0, 0, number as i16, &mut id) };
-            if mapped == kResultTrue {
-                *slot = Some(id);
+        for (channel, slots) in mapping.iter_mut().enumerate() {
+            for (number, slot) in slots.iter_mut().enumerate() {
+                let mut id: ParamID = 0;
+                let (channel, number) = (channel as i16, number as i16);
+                // SAFETY: on the main thread, with somewhere to write.
+                let mapped =
+                    unsafe { midi.getMidiControllerAssignment(0, channel, number, &mut id) };
+                if mapped == kResultTrue {
+                    *slot = Some(id);
+                }
             }
         }
         mapping

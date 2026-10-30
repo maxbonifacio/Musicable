@@ -28,6 +28,7 @@
 mod routing;
 
 use std::collections::BTreeMap;
+use std::iter;
 use std::ops::RangeInclusive;
 
 use egui::accesskit::{Action as Request, ActionData};
@@ -42,10 +43,11 @@ use musicable_commands::{Args, automation, edit};
 use musicable_model::mixer::Bus;
 use musicable_model::modulation::Output;
 use musicable_model::param::ParamAddress;
-use musicable_model::routing::{InputError, Tap};
+use musicable_model::routing::{InputError, Tap, Wire};
 use musicable_model::time::Beats;
 use musicable_model::{
-    AudioInput, Chain, ClipType, Input, MidiInput, Monitor, Project, Track, TrackId, TrackKind,
+    AudioInput, Chain, ClipType, DeviceId, Input, MidiInput, Monitor, Project, Track, TrackId,
+    TrackKind,
 };
 
 use crate::browser::{self, Destination};
@@ -275,9 +277,14 @@ pub(crate) fn register(registry: &mut Registry) {
         one,
         |ui, mixer, channel, actions| {
             mixer.row(ui, |ui| {
-                if let Channel::Track(track, _) = channel
-                    && let Some(bus) = mixer.output(ui, track)
-                {
+                let Channel::Track(track, _) = channel else {
+                    return;
+                };
+                // A MIDI track without an instrument plays others'.
+                let instrument = track.devices.iter().any(|d| d.kind.is_instrument());
+                if track.kind == TrackKind::Midi && !instrument {
+                    mixer.midi_to(ui, track, actions);
+                } else if let Some(bus) = mixer.output(ui, track) {
                     mix(actions, Change::Output(track.id, bus));
                 }
             });
@@ -696,6 +703,98 @@ impl Mixer<'_> {
             }
         }
         picked
+    }
+
+    /// Where a MIDI track without an instrument plays its notes, its MIDI
+    /// To: a menu of No Output, then the instruments on other tracks it can
+    /// play, each opening to the MIDI channel to play it on, or none. Asks
+    /// for the instrument and the channel the user picked.
+    fn midi_to(&self, ui: &mut Ui, track: &Track, actions: &mut Vec<Action>) {
+        let project = self.project;
+        let playing: Vec<&Wire> = project.midi_to(track.id).collect();
+        let text = match playing[..] {
+            [] => "No Output".to_owned(),
+            [wire] => self.midi_to_name(wire.to.device(), wire.channel),
+            _ => format!("{} Instruments", playing.len()),
+        };
+        let mut picked = None;
+        let menu = ComboBox::from_id_salt(("midi to", track.id))
+            .width(self.sizes().inner())
+            .truncate()
+            .selected_text(&text)
+            .show_ui(ui, |ui| {
+                let none = playing.is_empty();
+                if ui.selectable_label(none, "No Output").clicked() && !none {
+                    picked = Some((None, None));
+                }
+                let instruments = project.midi_to_instruments(track.id);
+                if !instruments.is_empty() {
+                    ui.separator();
+                }
+                for device in instruments {
+                    let wire = playing.iter().find(|w| w.to.device() == device);
+                    let name = self.instrument_name(device);
+                    let item = ui.menu_button(name, |ui| {
+                        for channel in iter::once(None).chain((0..Wire::CHANNELS).map(Some)) {
+                            let on = wire.is_some_and(|w| w.channel == channel);
+                            if ui
+                                .selectable_label(on, midi_channel_name(channel))
+                                .clicked()
+                            {
+                                if !on {
+                                    picked = Some((Some(device), channel));
+                                }
+                                ui.close();
+                            }
+                        }
+                    });
+                    item.response.on_hover_text(
+                        "Plays it on the MIDI channel you pick, as a part of a multi-timbral \
+                         instrument plays, or with Any Channel, each note on its own",
+                    );
+                }
+            });
+        name_menu(&menu.response, format!("{} MIDI To", track.name), &text);
+        menu.response.on_hover_text(match playing[..] {
+            [] => "Where the track plays its notes: an instrument on another track".to_owned(),
+            [wire] => format!(
+                "The track plays {}",
+                self.midi_to_name(wire.to.device(), wire.channel)
+            ),
+            _ => "The track plays its notes on these instruments".to_owned(),
+        });
+        if let Some((to, channel)) = picked {
+            let track = track.id;
+            mix(actions, Change::MidiTo { track, to, channel });
+        }
+    }
+
+    /// What the MIDI To menu calls `device` on another track: its track, or
+    /// its track and its name, where the track has another instrument.
+    fn instrument_name(&self, device: DeviceId) -> String {
+        let project = self.project;
+        let Some((chain, _, found)) = project.find_device(device) else {
+            return "?".to_owned();
+        };
+        let devices = project.devices(chain).unwrap_or_default();
+        let track = match chain {
+            Chain::Track(track) => project.track(track).map_or("?", |t| t.name.as_str()),
+            Chain::Master => "Master",
+        };
+        match devices.iter().filter(|d| d.kind.is_instrument()).count() {
+            0 | 1 => track.to_owned(),
+            _ => format!("{track}, {}", found.kind.name()),
+        }
+    }
+
+    /// What the MIDI To menu shows for playing `device` on `channel`: the
+    /// instrument, and the channel's number, from 1, if it has one.
+    fn midi_to_name(&self, device: DeviceId, channel: Option<u8>) -> String {
+        let name = self.instrument_name(device);
+        match channel {
+            Some(channel) => format!("{name} {}", channel + 1),
+            None => name,
+        }
     }
 
     fn bus_name(&self, bus: Bus) -> &str {
@@ -2011,6 +2110,16 @@ pub(crate) fn slider_info(
     .map(|value| value.clamp(*range.start(), *range.end()))
 }
 
+/// What a menu calls a note wire's MIDI channel: "Channel 1" to "Channel
+/// 16", or "Any Channel" for none of its own, which plays each note as the
+/// instrument's own track's play.
+pub(crate) fn midi_channel_name(channel: Option<u8>) -> String {
+    match channel {
+        Some(channel) => format!("Channel {}", channel + 1),
+        None => "Any Channel".to_owned(),
+    }
+}
+
 /// Names the combo box `response` for screen readers, showing `value`.
 pub(crate) fn name_menu(response: &Response, label: String, value: &str) {
     response.widget_info(|| WidgetInfo {
@@ -2116,6 +2225,7 @@ mod tests {
     use musicable_model::modulation::ModulatorKind;
     use musicable_model::param::Scale;
     use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
+    use musicable_model::routing::Port;
     use musicable_model::{DeviceKind, PluginFormat};
 
     use super::*;
@@ -2285,7 +2395,8 @@ mod tests {
             assert_eq!(harness.query_by_label(&label).is_some(), armable, "{name}");
         }
         assert!(harness.query_by_label("Arm Reverb").is_none());
-        // Every track chooses where its output goes.
+        // Every track chooses where its output goes, and a MIDI track
+        // without an instrument where it plays its notes.
         let output = |name: &str| {
             let label = format!("{name} Output");
             harness
@@ -2293,8 +2404,10 @@ mod tests {
                 .value()
         };
         assert_eq!(output("Lead").as_deref(), Some("Master"));
-        assert_eq!(output("Keys").as_deref(), Some("Drums"));
         assert_eq!(output("Reverb").as_deref(), Some("Master"));
+        assert!(harness.query_by_label("Keys Output").is_none());
+        let midi_to = harness.get_by_role_and_label(Role::ComboBox, "Keys MIDI To");
+        assert_eq!(midi_to.value().as_deref(), Some("No Output"));
         assert!(harness.query_by_label_contains("No tracks yet").is_none());
     }
 
@@ -2981,6 +3094,58 @@ mod tests {
         assert_eq!(project.track(keys).unwrap().monitor, Monitor::In);
         let notes = Input::Tap(Tap::Device(arp_id));
         assert_eq!(mixed(&harness), [Change::Input(keys, Some(notes))]);
+    }
+
+    #[test]
+    fn a_midi_track_without_an_instrument_plays_anothers_on_a_channel() {
+        let (mut project, [_, keys, ..]) = project();
+        let strings = project.add_track("Strings", TrackKind::Midi);
+        let synth = project.new_device(DeviceKind::TestInstrument { level: 0.5 });
+        let synth_id = synth.id;
+        project.track_mut(strings).unwrap().devices.push(synth);
+        let mut harness = harness(project);
+        let midi_to = |harness: &Harness<'_, State>| {
+            harness
+                .get_by_role_and_label(Role::ComboBox, "Keys MIDI To")
+                .value()
+        };
+        assert_eq!(midi_to(&harness).as_deref(), Some("No Output"));
+        // Strings has an instrument, so it plays its sound out.
+        harness.get_by_role_and_label(Role::ComboBox, "Strings Output");
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Keys MIDI To")
+            .click();
+        harness.run();
+        // The instruments on other tracks, each opening to the channels.
+        harness
+            .get_by_role_and_label(Role::Button, "Strings")
+            .hover();
+        harness.run();
+        harness.get_by_label("Any Channel");
+        harness.get_by_label("Channel 16");
+        harness.get_by_label("Channel 3").click();
+        harness.run();
+        let to = Some(synth_id);
+        let three = Change::MidiTo {
+            track: keys,
+            to,
+            channel: Some(2),
+        };
+        assert_eq!(mixed(&harness), [three]);
+        assert_eq!(midi_to(&harness).as_deref(), Some("Strings 3"));
+        let project = harness.state().document.project();
+        let wires: Vec<_> = project.midi_to(keys).map(|w| (w.to, w.channel)).collect();
+        assert_eq!(wires, [(Port::Notes(synth_id), Some(2))]);
+
+        // No Output plays it nowhere.
+        harness
+            .get_by_role_and_label(Role::ComboBox, "Keys MIDI To")
+            .click();
+        harness.run();
+        harness.get_by_label("No Output").click();
+        harness.run();
+        assert_eq!(midi_to(&harness).as_deref(), Some("No Output"));
+        assert_eq!(harness.state().document.project().midi_to(keys).count(), 0);
     }
 
     #[test]

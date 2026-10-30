@@ -13,7 +13,7 @@ use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{
     PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
 };
-use musicable_model::routing::{Port, Tap};
+use musicable_model::routing::{Port, Tap, Wire};
 use musicable_model::time::{BeatRange, Beats, TimeSignature};
 use musicable_model::warp::{
     GranularSettings, Origin, Preserve, SliceSettings, SpectralSettings, TransientLoop, Warp,
@@ -2914,6 +2914,83 @@ fn wires_join_taps_and_ports_the_project_has_without_loops() {
     let mut project = wired();
     project.wires[1].gain = f32::NAN;
     refused_saving(&project, "wires[1].gain", "must be a finite number");
+}
+
+/// Lead, a MIDI track, playing the synth on Keys, after the arpeggiator
+/// there, on channel 4 from its Post FX and on the notes' own from its Pre
+/// FX, and a compressor after the synth.
+fn noted() -> Project {
+    let mut project = Project::new();
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let lead = project.add_track("Lead", TrackKind::Midi);
+    project.add_track("Kick", TrackKind::Audio);
+    let arp = project.new_device(plugin("org.example.arp", PluginKind::MidiEffect));
+    let synth = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Synth)));
+    let squash = project.new_device(DeviceKind::Native(NativeDevice::new(
+        NativeKind::Compressor,
+    )));
+    let synth_id = synth.id;
+    project.track_mut(keys).unwrap().devices = vec![arp, synth, squash];
+    let notes = Port::Notes(synth_id);
+    let post = project.new_wire(Tap::PostFx(Chain::Track(lead)), notes);
+    let post = Wire {
+        channel: Some(3),
+        ..post
+    };
+    let pre = project.new_wire(Tap::PreFx(lead), notes);
+    project.wires = vec![post, pre];
+    project
+}
+
+#[test]
+fn note_wires_take_notes_into_note_inputs_on_a_channel() {
+    assert_eq!(load(&edited_from(&noted(), |_| ())).unwrap(), noted());
+    let edited = |edit: fn(&mut Value)| edited_from(&noted(), |f| edit(&mut f["wires"]));
+    refused(
+        &edited(|wires| wires[0]["channel"] = json!(16)),
+        "wires[0].channel",
+        "must be from 0 to 15, or null for the notes' own",
+    );
+    refused(
+        &edited(|wires| wires[1]["gain"] = json!(0.5)),
+        "wires[1].gain",
+        "must be 1.0: a note wire plays its notes as they come",
+    );
+    refused(
+        &edited(|wires| wires[0]["from"] = json!({"post_fx": {"track": 2}})),
+        "wires[0].from",
+        "is track 2's Post FX, which is sound: a note wire takes a MIDI track's Pre FX or \
+         Post FX, or the point after one of its MIDI effects",
+    );
+    refused(
+        &edited(|wires| wires[0]["from"] = json!({"post_fader": {"track": 1}})),
+        "wires[0].from",
+        "is track 1's Post Fader, which is sound",
+    );
+    refused(
+        &edited(|wires| wires[0]["to"] = json!({"notes": 2})),
+        "wires[0].to",
+        "device 2 has no note input: only an instrument and a MIDI effect have one",
+    );
+    // Into the arpeggiator too, which plays them on to the synth.
+    let file = edited(|wires| wires[1]["to"] = json!({"notes": 0}));
+    assert_eq!(load(&file).unwrap().wires[1].to, Port::Notes(DeviceId(0)));
+    // But not from a track that takes what the arpeggiator plays.
+    let file = edited_from(&noted(), |f| {
+        f["tracks"][1]["input"] = json!({"tap": {"post_fx": {"track": 0}}});
+        f["wires"][1]["to"] = json!({"notes": 0});
+    });
+    refused(
+        &file,
+        "wires[1]",
+        "makes a loop: what comes out of the device it feeds reaches its tap",
+    );
+    // An audio wire has no channel.
+    refused(
+        &edited_from(&wired(), |f| f["wires"][0]["channel"] = json!(0)),
+        "wires[0].channel",
+        "must be null: an audio wire has no channel",
+    );
 }
 
 #[test]

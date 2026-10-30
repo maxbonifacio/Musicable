@@ -661,8 +661,10 @@ A wire (`musicable_model::routing::Wire`) takes the signal at a point on a
 channel, a tap, into a device's side input, a port, such as the
 compressor's and the gate's Sidechain ([Built-in
 devices](#built-in-devices)) or a plugin's side inputs
-([plugins.md](plugins.md#side-inputs)). `compile()` adds the wires once
-every strip is built, so a wire can join any two:
+([plugins.md](plugins.md#side-inputs)). A note wire takes a MIDI track's
+notes into an instrument's or a MIDI effect's note input instead
+([Notes](#notes)). `compile()` adds the wires once every strip is built, so
+a wire can join any two:
 
 - **Taps.** As it builds each strip, the compiler notes where each tap's
   signal is. A track's Pre FX is the head of its strip, its source. A
@@ -673,7 +675,7 @@ every strip is built, so a wire can join any two:
   before the output stage, where mute and solo cut, so a muted track's
   wires carry on: a muted ghost kick still ducks the bass. A MIDI track's
   Pre FX is notes, and so is the point after each MIDI effect in front of
-  its instrument (`Project::carries_sound`), which no wire takes yet.
+  its instrument (`Project::carries_sound`), which only a note wire takes.
 - **The wire** (`keys::wire`) is a `Gain` at the wire's gain, fed by its
   tap, and feeding its device's switch on a side input: 0 for the
   Compressor's or the Gate's Sidechain, and for a plugin's side input
@@ -703,11 +705,11 @@ every strip is built, so a wire can join any two:
   so the wires into it have nothing to feed, and the compiler leaves them
   out.
 - **Which wires play.** `Project::live_wires` gives the wires the engine
-  plays: each whose ends the project has and whose tap carries sound,
-  unless it would close a loop with the outputs, the sends and the wires
-  before it. In a project the commands edit, that's all of them, since
-  they refuse a wire that would make a loop, but even a hand-edited file
-  compiles.
+  plays: each whose ends the project has and whose tap carries what its
+  port takes, sound or notes, unless it would close a loop with the
+  outputs, the sends and the wires before it. In a project the commands
+  edit, that's all of them, since they refuse a wire that would make a
+  loop, but even a hand-edited file compiles.
 
 **Loops.** Outputs and sends can't loop on their own, but a wire can close
 a loop with them, such as a compressor keyed from a group its own track
@@ -720,7 +722,7 @@ finds one, through a wire or a track's input ([commands.md](commands.md#wires)).
 
 **Edits.** A wire's gain is a parameter, sent to its `Gain` as a send's
 level is. Adding a wire, removing one or moving it to another tap changes
-the graph's shape and recompiles.
+the graph's shape and recompiles, and so does a note wire's channel.
 
 ## Inputs from taps
 
@@ -1091,7 +1093,8 @@ allocates what it needs, from a `Source` read whole or streaming, and
 
 Notes are `NoteEvent`s, at sample offsets like other events:
 `NodeEventKind::Note`, or `Event::Note` from outside the graph. `On` has
-the key and velocity, `Expression` changes one dimension of the note's
+the key, the velocity and the MIDI channel a note wire gave it, if one did
+(`None` otherwise), `Expression` changes one dimension of the note's
 expression (pitch bend in semitones, pressure and timbre from 0 to 1), and
 `Off` has the release velocity. Each names its note by `NoteId`, so notes on
 the same key can sound at once, each with its own expression, as MPE, VST3
@@ -1099,7 +1102,8 @@ and CLAP allow.
 
 Controllers travel with the notes: `NodeEventKind::Controller` moves a MIDI
 controller, such as the mod wheel or the sustain pedal, to a value from 0 to
-1, for every note the node plays, and it holds until the next move. It goes
+1, for every note the node plays, or with a channel, for those on it, and
+it holds until the next move. It goes
 where notes go (`Notes::send_controller`, and `NodeEventKind::is_played`
 for either), in order with them, and takes room in a block as a note does.
 
@@ -1133,13 +1137,13 @@ for either), in order with them, and takes room in a block as a note does.
   it keeps its time and its record.
 - Each node that plays notes keeps track of the notes it has sounding
   where its notes go, up to `Notes::CAPACITY`, and the switches it holds on
-  there, such as the sustain pedal. When a swap takes a route away, the
-  node ends the notes it had sounding along it, at the start of the next
-  block, and lets go of the switches, which would hold them on, so nothing
-  hangs where its notes no longer go (`Notes::release_all` does both at
-  once, as a switch does). Then the switches it holds on go on along the
-  routes the swap adds, so a pedal a track's clips hold down holds
-  whichever way their notes go.
+  there, such as the sustain pedal, on no channel and on each of the 16.
+  When a swap takes a route away, the node ends the notes it had sounding
+  along it, at the start of the next block, and lets go of the switches,
+  which would hold them on, so nothing hangs where its notes no longer go
+  (`Notes::release_all` does both at once, as a switch does). Then the
+  switches it holds on go on along the routes the swap adds, so a pedal a
+  track's clips hold down holds whichever way their notes go.
 
 **MIDI clips.** `MidiClips` sends the notes of a MIDI track's clips, with
 their expression, to the track's first instrument (`Track::instrument`),
@@ -1222,11 +1226,11 @@ no sound, and none goes through it.
   as the sustain pedal, so none hangs: the device's, which it plays no
   more, and those passed on, whose ends it would never hear. What plays
   from there starts from what the controllers that come in hold, as the
-  switch keeps them (`midi::Held`), so a pedal held down on the track
-  holds on: bypassed, they go on as they are, and the device brought back
-  hears them before the rest of its first part. Where the device starts or
-  stops partway through a block, it plays that part of the block as a
-  block of its own.
+  switch keeps them for each channel (`midi::Held`), so a pedal held down
+  on the track holds on: bypassed, they go on as they are, and the device
+  brought back hears them before the rest of its first part. Where the
+  device starts or stops partway through a block, it plays that part of
+  the block as a block of its own.
 - A deactivated MIDI effect is out of the notes' way, as a deactivated
   device is out of the signal, and its switch (`NoteSwitch::deactivated`)
   stays in the graph, so a plugin stops on the audio thread, and goes on
@@ -1240,6 +1244,38 @@ no sound, and none goes through it.
   notes it gets, so no node gets both.
 - Another MIDI track can take what a MIDI effect plays, after it, and what
   reaches the instrument, at Post FX ([Inputs from taps](#inputs-from-taps)).
+
+**Note wires.** A note wire (`Port::Notes`) plays a MIDI track's notes on
+an instrument or a MIDI effect on another track: the track's MIDI To. Each
+that plays (`Project::live_wires`) gets a `midi::NoteWire` (`keys::wire`),
+which the node playing the notes at its tap sends them to, as for a track's
+input ([Inputs from taps](#inputs-from-taps)), and which sends them on to
+the device's switch. An instrument plays them with its own track's, and a
+MIDI effect plays them through itself to the devices after it. A wire into
+a deactivated device, or a MIDI effect out of the notes' way, has nothing
+to play into, as an audio wire into a deactivated device has nothing to
+feed, and the compiler leaves it out. The modulators of a track hear the
+notes that reach its first instrument, wired ones too.
+
+- Each note goes on under an id of its own, with the wire's id in it, from
+  3 × 2^62 up, so the notes of two wires and those of the track's own
+  never clash where they meet.
+- With a channel (`Wire::channel`), every note and controller goes on it,
+  and a plugin plays it there, as a part of a multi-timbral instrument
+  ([plugins.md](plugins.md#notes-and-the-transport)). The built-in
+  instruments play every channel alike. Without one, the notes go on with
+  none, as a track's own do. Only a note wire gives notes a channel: a
+  monitor takes another track's notes on none, as it does a MIDI input's,
+  and the notes a MIDI effect plays have none of their own.
+- Mute and solo cut a note wire as they cut its track's output
+  (`Project::silenced`), through its `NoteWire::MUTE`, which is
+  `Gain::MUTE`, so the session sends it with the output stages' gates.
+  Cut, it ends the notes sounding through it and lets go of the switches it
+  held on, and open again, it sends what the controllers hold, and notes
+  play from the next that starts.
+- A wire that takes over in a swap carries on with the notes it had
+  sounding. On another channel, it lets go of the switches on the old one
+  and sends what the controllers hold on the new.
 
 **The test instrument.** `nodes::TestInstrument` (`DeviceKind::TestInstrument`)
 stands in for instruments until plugin hosting. It plays each note with a

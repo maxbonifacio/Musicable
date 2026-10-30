@@ -524,6 +524,17 @@ instrument. The output menu has the buses
 `mixer.set_input` and `mixer.set_output`
 ([commands.md](commands.md#the-mixers-controls)).
 
+A MIDI track without an instrument has a MIDI To menu in place of its
+output's, since it has no sound to send: No Output, then the instruments
+its notes can play on other tracks (`Project::midi_to_instruments`), each
+by its track's name, with the instrument's where that track has more than
+one, opening to Any Channel and Channel 1 to 16
+(`mixer::midi_channel_name`). It shows the instrument with the channel's
+number, such as "Strings 3", or how many instruments the track plays, if
+the Routing panel wired it into several, and runs `mixer.set_midi_to`. The
+track's audio output stays as it was, and the Routing panel still lists
+it.
+
 ## The Routing panel
 
 [The Routing panel](../manual/src/window/routing.md) in the manual says what
@@ -533,12 +544,17 @@ the output menu's buses (`Mixer::bus_items`), the input menu's tracks and
 Resampling (`Mixer::tap_items`), a send's level with its Pre switch
 (`Mixer::send_in`), and a track's fader as a bar across, up to +6 dB
 (`Mixer::volume_bar`). A key's source menu and gain are the Sidechain
-column's (`native::sidechain::source_menu` and `gain`). So they hand back
+column's (`native::sidechain::source_menu` and `gain`), and a note wire's
+source menu is too, with a menu of the MIDI channels in place of the gain,
+which runs `wire.set_channel`. So they hand back
 the same `mixer::Change`s and `wire.*` commands, and they're named as the
 strips' are, such as "Kick Output", with a key's named after its track, its
-device and the side input, such as "Bass Compressor Sidechain Source". The
+device and the side input, such as "Bass Compressor Sidechain Source", and
+a note wire's after its track and its device, such as "Strings Synth Notes
+Channel". The
 rows are listed from the project each frame: outputs, sends and inputs in
-the tracks' order, then keys in the order of the devices they go into. Only
+the tracks' order, then keys in the order of the devices they go into, and
+note wires the same way. Only
 the rows in sight are drawn, but every row's names are measured, so that
 each end's column is as wide as the widest name in it, a strip's width at
 least (`Columns::across`), and the rows read across however wide the panel

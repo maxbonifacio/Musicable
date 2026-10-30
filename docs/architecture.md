@@ -355,7 +355,11 @@ where a part has started, what's built.
   monitor's side input for notes, and the engine writes the notes as they
   played to the recorder through a note record. Format 23 has it take them
   after one of that track's MIDI effects too, or at its Post FX, where they
-  reach its instrument. A node's output is one
+  reach its instrument. Format 24 adds note wires, a track's MIDI To, which
+  play its notes on an instrument or a MIDI effect on another track,
+  through a relay that gives them ids of their own and a MIDI channel, if
+  the wire has one, for a part of a multi-timbral plugin
+  ([engine.md](engine.md#notes)). A node's output is one
   buffer of `Node::channels()` channels, so a multi-output instrument is a
   node with more of them, and a node for each of its outputs picks that
   output's channels out for a strip of its own. In the model, a track feeds the

@@ -161,8 +161,10 @@ pub fn list() -> Vec<Tool> {
             "Reads the project: its file, the tempo map and time signatures, the loop, the \
              tracks with their mixer settings, devices and clips, and their modulators and \
              routings if they have any, the master, the wires, each taking a tap's signal into a \
-             device's side input, the locators, and which parameters are automated, each with \
-             its id. A wire's tap and port are named as wire.connect takes them, and a track's \
+             device's side input at a gain, or a MIDI track's notes into an instrument's or a \
+             MIDI effect's note input, on a MIDI channel from 0 to 15 if it has one, the \
+             locators, and which parameters are automated, each with its id. A wire's tap and \
+             port are named as wire.connect takes them, and a track's \
              input from another track's tap, or Resampling, as mixer.set_input takes it. A \
              track whose output is \"sends_only\" feeds nothing but its sends. A device \
              that's bypassed says \"bypassed\": true, and one that's deactivated \"active\": \
@@ -187,7 +189,8 @@ pub fn list() -> Vec<Tool> {
              device.set_param and automation, which name a device's parameter as \"device 4 \
              param 2\" and its Bypass as \"device 4 bypass\", and its ports, with the wires \
              into each: a Compressor's or a Gate's Sidechain, or a plugin's side inputs, by the \
-             plugin's ids and names for them, as wire.connect takes them.",
+             plugin's ids and names for them, and an instrument's or a MIDI effect's note \
+             input, last, as wire.connect takes them.",
             object(
                 json!({ "device": id_number("The device's id.") }),
                 &["device"],

@@ -1,6 +1,8 @@
 //! Notes and controllers as MIDI 1.0 messages, for plugins that take MIDI:
 //! as MPE, each note on a channel of its own with its own expression, or on
-//! one channel, as a keyboard plays.
+//! one channel, as a keyboard plays. A note a note wire gives a channel
+//! goes on that channel, sharing it with the wire's other notes, as a part
+//! of a multi-timbral instrument plays, and so does a controller.
 //!
 //! It writes MIDI the way the engine reads it from MIDI inputs, so a
 //! performance recorded from MIDI plays back as it was played: MPE member
@@ -61,6 +63,11 @@ struct Playing {
     note: NoteId,
     channel: u8,
     key: u8,
+    /// Whether it shares its channel with other notes, as every note does
+    /// laid out on one channel, and a note on a channel a note wire gives
+    /// it: its pitch bend and slide are the channel's, and its pressure the
+    /// key's own.
+    shared: bool,
 }
 
 /// What a channel was last sent, and how busy it is.
@@ -158,9 +165,10 @@ impl MidiOut {
                 note,
                 key,
                 velocity,
+                channel,
             } => {
                 let start = starting(note, offset, after);
-                self.on(note, key.min(127), velocity, start, emit);
+                self.on(note, key.min(127), velocity, channel, start, emit);
             }
             NoteEvent::Expression {
                 note,
@@ -185,21 +193,26 @@ impl MidiOut {
         }
     }
 
-    /// The message that moves `controller`, on the master channel.
+    /// The message that moves `controller`, on `channel`, or with `None`,
+    /// on the master channel.
     pub(crate) fn controller(
         &mut self,
         controller: Controller,
         value: f32,
+        channel: Option<u8>,
         emit: &mut impl FnMut([u8; 3]),
     ) {
-        emit([0xB0 | MASTER, controller.number(), seven(value)]);
+        let channel = channel.map_or(MASTER, |c| c.min(15));
+        emit([0xB0 | channel, controller.number(), seven(value)]);
     }
 
+    /// Starts a note, on `channel` if it's given one.
     fn on(
         &mut self,
         note: NoteId,
         key: u8,
         velocity: f32,
+        channel: Option<u8>,
         start: Start,
         emit: &mut impl FnMut([u8; 3]),
     ) {
@@ -214,20 +227,27 @@ impl MidiOut {
         if self.notes.len() == self.notes.capacity() {
             return;
         }
-        let channel = match self.layout {
-            Layout::Mpe => self.free_channel(),
-            Layout::Channel => MASTER,
+        let (channel, shared) = match (channel, self.layout) {
+            (Some(channel), _) => (channel.min(15), true),
+            (None, Layout::Mpe) => (self.free_channel(), false),
+            (None, Layout::Channel) => (MASTER, true),
         };
         self.clock += 1;
         let state = &mut self.channels[usize::from(channel)];
         state.notes += 1;
         state.used = self.clock;
-        let playing = Playing { note, channel, key };
-        match self.layout {
+        let playing = Playing {
+            note,
+            channel,
+            key,
+            shared,
+        };
+        let range = self.bend_range(channel);
+        match shared {
             // MPE senders set all three before every note, so the note
             // starts as it should whatever the channel played last.
-            Layout::Mpe => {
-                let bend = bend(start.bend.unwrap_or(0.0), MPE_BEND_RANGE);
+            false => {
+                let bend = bend(start.bend.unwrap_or(0.0), range);
                 let pressure = seven(start.pressure.unwrap_or(0.0));
                 let timbre = start.timbre.map_or(TIMBRE_REST, seven);
                 self.send_bend(channel, bend, true, emit);
@@ -237,8 +257,8 @@ impl MidiOut {
             // The channel is every note's, so it only changes for a note
             // that starts with expression of its own, or one at rest after
             // another moved it.
-            Layout::Channel => {
-                let bend = bend(start.bend.unwrap_or(0.0), BEND_RANGE);
+            true => {
+                let bend = bend(start.bend.unwrap_or(0.0), range);
                 if start.bend.is_some() || self.channels[usize::from(channel)].bend.is_some() {
                     self.send_bend(channel, bend, false, emit);
                 }
@@ -249,10 +269,17 @@ impl MidiOut {
         }
         emit([0x90 | channel, key, seven(velocity).max(1)]);
         self.notes.push(playing);
-        if self.layout == Layout::Channel
-            && let Some(pressure) = start.pressure
-        {
+        if shared && let Some(pressure) = start.pressure {
             emit([0xA0 | channel, key, seven(pressure)]);
+        }
+    }
+
+    /// How far `channel` bends either way: an MPE member channel's 48
+    /// semitones, laid out as MPE, and MIDI's 2 otherwise.
+    fn bend_range(&self, channel: u8) -> f32 {
+        match self.layout == Layout::Mpe && MEMBERS.contains(&channel) {
+            true => MPE_BEND_RANGE,
+            false => BEND_RANGE,
         }
     }
 
@@ -264,17 +291,15 @@ impl MidiOut {
         emit: &mut impl FnMut([u8; 3]),
     ) {
         let channel = playing.channel;
-        match (dimension, self.layout) {
-            (Dimension::PitchBend, Layout::Mpe) => {
-                self.send_bend(channel, bend(value, MPE_BEND_RANGE), false, emit);
+        match (dimension, playing.shared) {
+            (Dimension::PitchBend, _) => {
+                let bend = bend(value, self.bend_range(channel));
+                self.send_bend(channel, bend, false, emit);
             }
-            (Dimension::PitchBend, Layout::Channel) => {
-                self.send_bend(channel, bend(value, BEND_RANGE), false, emit);
-            }
-            (Dimension::Pressure, Layout::Mpe) => {
+            (Dimension::Pressure, false) => {
                 self.send_pressure(channel, seven(value), false, emit);
             }
-            (Dimension::Pressure, Layout::Channel) => {
+            (Dimension::Pressure, true) => {
                 emit([0xA0 | channel, playing.key, seven(value)]);
             }
             (Dimension::Timbre, _) => self.send_timbre(channel, seven(value), false, emit),
@@ -382,6 +407,7 @@ mod tests {
             note: NoteId(note),
             key,
             velocity,
+            channel: None,
         }
     }
 
@@ -415,9 +441,11 @@ mod tests {
         for (i, e) in events.iter().enumerate() {
             match e.kind {
                 NodeEventKind::Note(note) => out.note(note, e.offset, &events[i + 1..], &mut emit),
-                NodeEventKind::Controller { controller, value } => {
-                    out.controller(controller, value, &mut emit);
-                }
+                NodeEventKind::Controller {
+                    controller,
+                    value,
+                    channel,
+                } => out.controller(controller, value, channel, &mut emit),
                 _ => {}
             }
         }
@@ -545,16 +573,66 @@ mod tests {
     }
 
     #[test]
-    fn controllers_go_on_the_master_channel() {
+    fn controllers_go_on_the_master_channel_or_their_own() {
         for layout in [Layout::Mpe, Layout::Channel] {
             let mut out = MidiOut::new(layout);
             play(&mut out, &[]);
             let mut messages = Vec::new();
-            out.controller(Controller::SUSTAIN, 1.0, &mut |m| messages.push(m));
-            out.controller(Controller::MOD_WHEEL, 64.0 / 127.0, &mut |m| {
-                messages.push(m)
-            });
-            assert_eq!(messages, [[0xB0, 64, 127], [0xB0, 1, 64]]);
+            let mut emit = |m| messages.push(m);
+            out.controller(Controller::SUSTAIN, 1.0, None, &mut emit);
+            out.controller(Controller::MOD_WHEEL, 64.0 / 127.0, None, &mut emit);
+            out.controller(Controller::SUSTAIN, 1.0, Some(5), &mut emit);
+            assert_eq!(messages, [[0xB0, 64, 127], [0xB0, 1, 64], [0xB5, 64, 127]]);
+        }
+    }
+
+    /// A note starting on `channel`.
+    fn on_channel(note: u64, key: u8, channel: u8) -> NoteEvent {
+        NoteEvent::On {
+            note: NoteId(note),
+            key,
+            velocity: 1.0,
+            channel: Some(channel),
+        }
+    }
+
+    #[test]
+    fn notes_on_a_channel_of_their_own_share_it_whatever_the_layout() {
+        for (layout, range) in [(Layout::Channel, BEND_RANGE), (Layout::Mpe, MPE_BEND_RANGE)] {
+            let mut out = MidiOut::new(layout);
+            play(&mut out, &[]);
+            let events = [
+                event(0, on_channel(1, 60, 3)),
+                event(0, on_channel(2, 64, 3)),
+                event(5, expression(2, Dimension::PitchBend, range)),
+                event(6, expression(1, Dimension::Pressure, 0.5)),
+                event(7, expression(1, Dimension::Timbre, 1.0)),
+                event(8, off(1)),
+                // Laid out as MPE, a note on no channel of its own takes one
+                // no other note has.
+                event(9, on(3, 67, 1.0)),
+            ];
+            let messages = play(&mut out, &events);
+            let last = match layout {
+                Layout::Mpe => [0x91, 67, 127],
+                Layout::Channel => [0x90, 67, 127],
+            };
+            assert_eq!(
+                messages[..6],
+                [
+                    [0x93, 60, 127],
+                    [0x93, 64, 127],
+                    // Their bend and slide are the channel's, and their
+                    // pressure the key's.
+                    [0xE3, 127, 127],
+                    [0xA3, 60, 64],
+                    [0xB3, 74, 127],
+                    [0x83, 60, 64],
+                ],
+                "{layout:?}"
+            );
+            assert_eq!(messages.last(), Some(&last), "{layout:?}");
+            assert_eq!(out.find(NoteId(2)), Some((3, 64)));
         }
     }
 

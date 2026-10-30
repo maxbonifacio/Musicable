@@ -1,11 +1,15 @@
 //! The wire commands: routing a tap's signal into a port, such as a kick's
-//! into the side input of the Compressor on the bass, so the kick ducks it.
+//! into the side input of the Compressor on the bass, so the kick ducks it,
+//! or a MIDI track's notes into an instrument on another track, so it plays
+//! it.
 //!
 //! A wire joins a [`Tap`] to a [`Port`], at a gain, and wires into the same
-//! port sum. The ports are the Compressor's and the Gate's Sidechain and
-//! plugins' side inputs. One that would close a loop is refused, and so is
-//! a move, an output, a send or an input that would close one through a
-//! wire: see [`musicable_model::routing`].
+//! port sum. The ports are the Compressor's and the Gate's Sidechain,
+//! plugins' side inputs, and instruments' and MIDI effects' note inputs,
+//! which note wires go into, on a MIDI channel or on the notes' own. One
+//! that would close a loop is refused, and so is a move, an output, a send
+//! or an input that would close one through a wire: see
+//! [`musicable_model::routing`].
 
 use musicable_model::native::{NativeKind, compressor, gate};
 use musicable_model::param::ParamAddress;
@@ -22,6 +26,8 @@ pub const DISCONNECT: CommandId = CommandId::new("wire.disconnect");
 pub const SET_SOURCE: CommandId = CommandId::new("wire.set_source");
 /// Sets a wire's gain.
 pub const SET_GAIN: CommandId = CommandId::new("wire.set_gain");
+/// Sets the MIDI channel a note wire plays on.
+pub const SET_CHANNEL: CommandId = CommandId::new("wire.set_channel");
 
 const WIRE: Param = Param::required("wire", Type::Wire, "The wire.");
 
@@ -50,6 +56,14 @@ const AFTER: Param = Param::optional(
 /// commands name them.
 pub(crate) const TAPS: &[&str] = &["pre_fx", "post_fx", "post_fader"];
 
+/// The argument that names a note wire's channel.
+const CHANNEL: Param = Param::optional(
+    "channel",
+    Type::Int,
+    "The MIDI channel to play every note on, from 0 to 15: each note on its own without it, \
+     with its own expression.",
+);
+
 /// Registers the wire commands.
 pub fn register(registry: &mut Registry) {
     registry.add(
@@ -58,13 +72,21 @@ pub fn register(registry: &mut Registry) {
                 "device",
                 Type::Device,
                 "The device the signal goes into, at a side input: a Compressor's or a \
-                 Gate's Sidechain, which this turns on, or a plugin's.",
+                 Gate's Sidechain, which this turns on, or a plugin's. Or with notes, its note \
+                 input.",
             ),
             Param::optional(
                 "input",
                 Type::Int,
                 "Which of a plugin's side inputs, by the plugin's id for it, as get_device \
                  lists them: its first without it. A Compressor or a Gate has one.",
+            ),
+            Param::optional(
+                "notes",
+                Type::Bool,
+                "Wires notes into the device's note input instead: an instrument's or a MIDI \
+                 effect's, from a MIDI track's pre_fx or post_fx, or after one of its MIDI \
+                 effects. That's how a track plays an instrument on another.",
             ),
             TRACK,
             MASTER,
@@ -74,20 +96,44 @@ pub fn register(registry: &mut Registry) {
                 "gain",
                 Type::Number,
                 "The wire's gain, linear: 1 is unity, and the most is about 15.85, +24 dB. 1 \
-                 without it.",
+                 without it. A note wire has none.",
+            ),
+            Param::optional(
+                "channel",
+                Type::Int,
+                "For a note wire, the MIDI channel to play every note on, from 0 to 15: each \
+                 note on its own without it, with its own expression.",
             ),
         ]),
         |ctx, args| {
             let from = tap(ctx, args)?;
+            let notes = args.opt("notes")?.unwrap_or(false);
             let to = port(
                 ctx.document.project(),
                 args.get("device")?,
                 args.opt("input")?,
+                notes,
             )?;
-            let gain = args.opt::<f64>("gain")?.map_or(1.0, |gain| gain as f32);
+            let gain = args.opt::<f64>("gain")?;
+            let channel = channel(args)?;
+            match (notes, gain, channel) {
+                (true, Some(_), _) => {
+                    return Err(CommandError::invalid(
+                        "a note wire has no gain: leave out gain",
+                    ));
+                }
+                (false, _, Some(_)) => {
+                    return Err(CommandError::invalid(
+                        "only a note wire has a channel: give notes, or leave out channel",
+                    ));
+                }
+                _ => {}
+            }
+            let gain = gain.map_or(1.0, |gain| gain as f32);
             let made = ctx.document.transact("Connect Wire", |tx| {
                 let wire = Wire {
                     gain,
+                    channel,
                     ..tx.new_wire(from, to)
                 };
                 tx.add_wire(usize::MAX, wire)?;
@@ -136,6 +182,17 @@ pub fn register(registry: &mut Registry) {
         ]),
         |ctx, args| {
             let wire = existing(ctx, args.get("wire")?)?;
+            if ctx
+                .document
+                .project()
+                .wire(wire)
+                .is_some_and(Wire::takes_notes)
+            {
+                return Err(CommandError::invalid(format!(
+                    "wire {} is a note wire, which has no gain",
+                    wire.0
+                )));
+            }
             let gain = args.get::<f64>("gain")?;
             // As if by hand: a lane on the gain stops moving it.
             ctx.document.transact("Wire Gain", |tx| {
@@ -144,6 +201,42 @@ pub fn register(registry: &mut Registry) {
             Ok(Value::None)
         },
     );
+    registry.add(
+        Command::new(SET_CHANNEL, "Set Wire Channel").with_params(&[WIRE, CHANNEL]),
+        |ctx, args| {
+            let wire = existing(ctx, args.get("wire")?)?;
+            if !ctx
+                .document
+                .project()
+                .wire(wire)
+                .is_some_and(Wire::takes_notes)
+            {
+                return Err(CommandError::invalid(format!(
+                    "wire {} takes sound, which has no channel: only a note wire has one",
+                    wire.0
+                )));
+            }
+            let channel = channel(args)?;
+            ctx.document.transact("Wire Channel", |tx| {
+                tx.set_wire_channel(wire, channel);
+            });
+            Ok(Value::None)
+        },
+    );
+}
+
+/// The MIDI channel the argument `channel` names, from 0 to 15, or `None`
+/// without it.
+pub(crate) fn channel(args: &Args) -> Result<Option<u8>, CommandError> {
+    let Some(channel) = args.opt::<i64>("channel")? else {
+        return Ok(None);
+    };
+    match u8::try_from(channel) {
+        Ok(channel) if channel < Wire::CHANNELS => Ok(Some(channel)),
+        _ => Err(CommandError::invalid(format!(
+            "there's no MIDI channel {channel}: they go from 0 to 15"
+        ))),
+    }
 }
 
 /// The tap the arguments of [`CONNECT`] and [`SET_SOURCE`] name: after a
@@ -188,12 +281,30 @@ fn tap(ctx: &Context<'_>, args: &Args) -> Result<Tap, CommandError> {
 }
 
 /// The port of the device with id `device` that [`CONNECT`] wires into: a
-/// plugin's side input with the plugin's id `input`, or its first, or a
-/// Compressor's or a Gate's Sidechain.
-fn port(project: &Project, device: DeviceId, input: Option<i64>) -> Result<Port, CommandError> {
+/// plugin's side input with the plugin's id `input`, or its first, a
+/// Compressor's or a Gate's Sidechain, or with `notes`, its note input.
+fn port(
+    project: &Project,
+    device: DeviceId,
+    input: Option<i64>,
+    notes: bool,
+) -> Result<Port, CommandError> {
     let Some((_, _, found)) = project.find_device(device) else {
         return Err(no_device(device));
     };
+    if notes {
+        if input.is_some() {
+            return Err(CommandError::invalid(
+                "notes go into the device's note input, not a side input: leave out input",
+            ));
+        }
+        return project.note_input(device).ok_or_else(|| {
+            CommandError::invalid(format!(
+                "{} has no note input: only an instrument and a MIDI effect have one",
+                found.kind.name()
+            ))
+        });
+    }
     let DeviceKind::Plugin(plugin) = &found.kind else {
         return match input {
             Some(_) => Err(CommandError::invalid(
@@ -227,6 +338,7 @@ pub fn with_port(args: Args, port: Port) -> Args {
         Port::PluginInput(device, input) => {
             args.with("device", device).with("input", i64::from(input))
         }
+        Port::Notes(device) => args.with("device", device).with("notes", true),
     }
 }
 
@@ -258,7 +370,7 @@ pub fn switch(project: &Project, port: Port) -> Option<ParamAddress> {
             };
             Some(ParamAddress::Device(device, n as u32))
         }
-        Port::PluginInput(..) => None,
+        Port::PluginInput(..) | Port::Notes(_) => None,
     }
 }
 
@@ -285,7 +397,12 @@ fn wire_error(project: &Project, from: Tap, to: Port, error: WireError) -> Comma
         .unwrap_or_else(|| "that device".to_owned());
     CommandError::invalid(match error {
         WireError::NoTap => format!("the project has no {tap}"),
-        WireError::Notes => format!("{tap} is notes, which no wire takes yet"),
+        WireError::Notes => format!(
+            "{tap} is notes, which go only into an instrument's or a MIDI effect's note input: \
+             give notes"
+        ),
+        WireError::Sound => format!("{tap} is sound, and the {port} takes notes"),
+        WireError::NoPort if to.takes_notes() => format!("the {port} has no note input"),
         WireError::NoPort => format!("the {port} has no side input"),
         WireError::Wired(wire) => {
             format!("{tap} is wired to the {port} already, by wire {}", wire.0)
@@ -420,6 +537,7 @@ mod tests {
             from: Tap::PostFx(Chain::Track(m.kick)),
             to,
             gain: 1.0,
+            channel: None,
         };
         assert_eq!(m.project().wires, [keyed]);
         assert_eq!(m.project().param_value(sidechain), Some(1.0));
@@ -507,7 +625,8 @@ mod tests {
         let keys = Args::new().with("track", m.keys).with("tap", "pre_fx");
         assert_eq!(
             error(&mut m, keys, compressor),
-            "Keys Pre FX is notes, which no wire takes yet"
+            "Keys Pre FX is notes, which go only into an instrument's or a MIDI effect's note \
+             input: give notes"
         );
         assert_eq!(
             error(&mut m, Args::new().with("track", kick), eq),
@@ -655,6 +774,7 @@ mod tests {
             from: Tap::Device(gate),
             to,
             gain: 0.5,
+            channel: None,
         };
         assert_eq!(m.project().wires[0], moved);
         assert!(m.project().lane(ParamAddress::Wire(wire)).is_some());
@@ -975,5 +1095,106 @@ mod tests {
             let inputs = vec![input(1, "Sidechain")];
             (m.setup.document).follow("Change", |tx| tx.set_plugin_inputs(device, inputs));
         }
+    }
+
+    #[test]
+    fn a_midi_track_plays_another_tracks_synth_through_a_note_wire() {
+        let mut m = mix();
+        let (lead, synth) = m.setup.document.transact("Lead", |tx| {
+            let lead = tx.new_track("Lead", TrackKind::Midi);
+            let id = lead.id;
+            tx.add_track(usize::MAX, lead);
+            let synth = tx.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Synth)));
+            let synth_id = synth.id;
+            tx.add_device(Chain::Track(id), 0, synth);
+            (id, synth_id)
+        });
+        m.setup.committed_names();
+        let notes = |from: Args| from.with("notes", true).with("device", synth);
+        let keys = Args::new().with("track", m.keys);
+        let wire = match m
+            .setup
+            .run_with(&CONNECT, notes(keys.clone()).with("channel", 3_i64))
+        {
+            Ok(Value::Wire(wire)) => wire,
+            other => panic!("{other:?}"),
+        };
+        let played = Wire {
+            id: wire,
+            from: Tap::PostFx(Chain::Track(m.keys)),
+            to: Port::Notes(synth),
+            gain: 1.0,
+            channel: Some(3),
+        };
+        assert_eq!(m.project().wire(wire), Some(&played));
+        assert_eq!(m.setup.committed_names(), ["Connect Wire"]);
+        let refused = |m: &mut Mix, command: &CommandId, args: Args| {
+            m.setup.run_with(command, args).unwrap_err().to_string()
+        };
+        let error = refused(&mut m, &CONNECT, notes(keys.clone()));
+        assert!(
+            error.contains("is wired to the Synth on Lead already"),
+            "{error}"
+        );
+        // Sound goes into no note input, and notes into no side input.
+        let kick = Args::new().with("track", m.kick);
+        let error = refused(&mut m, &CONNECT, notes(kick));
+        assert!(
+            error.contains("Kick Post FX is sound, and the Synth on Lead takes notes"),
+            "{error}"
+        );
+        let pre = keys.clone().with("tap", "pre_fx");
+        let compressor = pre.clone().with("device", m.compressor);
+        let error = refused(&mut m, &CONNECT, compressor);
+        assert!(error.contains("Keys Pre FX is notes"), "{error}");
+        let gate = pre.clone().with("device", m.gate).with("notes", true);
+        let error = refused(&mut m, &CONNECT, gate);
+        assert!(error.contains("Gate has no note input"), "{error}");
+        // A note wire has a channel, and no gain.
+        let error = refused(&mut m, &CONNECT, notes(pre.clone()).with("gain", 0.5));
+        assert!(error.contains("a note wire has no gain"), "{error}");
+        let audio = Args::new()
+            .with("track", m.kick)
+            .with("device", m.compressor);
+        let error = refused(&mut m, &CONNECT, audio.with("channel", 2_i64));
+        assert!(error.contains("only a note wire has a channel"), "{error}");
+        let error = refused(&mut m, &CONNECT, notes(pre).with("channel", 16_i64));
+        assert!(error.contains("there's no MIDI channel 16"), "{error}");
+        assert!(m.setup.committed_names().is_empty());
+
+        // Its channel changes, or goes back to the notes' own.
+        let channel = |m: &Mix| m.project().wire(wire).unwrap().channel;
+        let set = Args::new().with("wire", wire);
+        m.setup
+            .run_with(&SET_CHANNEL, set.clone().with("channel", 15_i64))
+            .unwrap();
+        assert_eq!(channel(&m), Some(15));
+        m.setup.run_with(&SET_CHANNEL, set.clone()).unwrap();
+        assert_eq!(channel(&m), None);
+        assert_eq!(m.setup.committed_names(), ["Wire Channel", "Wire Channel"]);
+        assert!(m.setup.document.undo());
+        assert_eq!(channel(&m), Some(15));
+        let error = refused(&mut m, &SET_CHANNEL, set.with("channel", -1_i64));
+        assert!(error.contains("there's no MIDI channel -1"), "{error}");
+        let error = refused(
+            &mut m,
+            &SET_GAIN,
+            Args::new().with("wire", wire).with("gain", 0.5),
+        );
+        assert!(
+            error.contains("is a note wire, which has no gain"),
+            "{error}"
+        );
+        let key = m.key(m.kick, m.compressor);
+        let error = refused(&mut m, &SET_CHANNEL, Args::new().with("wire", key));
+        assert!(
+            error.contains("takes sound, which has no channel"),
+            "{error}"
+        );
+        // Muting the keys silences what they play on the lead's synth.
+        let muted = Args::new().with("track", m.keys).with("muted", true);
+        m.setup.run_with(&mixer::SET_MUTE, muted).unwrap();
+        assert!(m.project().silenced().wire(wire));
+        assert!(!m.project().silenced().output(lead));
     }
 }

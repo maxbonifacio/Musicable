@@ -92,6 +92,18 @@ synth the chord its track's clip holds, a note at a time.
   on an instrument of its own or record them as a clip ([Taking another
   track's notes](routing.md#taking-another-tracks-notes)).
 
+## Multi-timbral instruments
+
+A multi-timbral instrument, such as a sampler with a part on each MIDI
+channel, plays another sound on each channel. Give each part a MIDI track
+without an instrument, and set the track's **MIDI To** to the instrument,
+on the part's channel ([Playing another track's
+instrument](routing.md#playing-another-tracks-instrument)): four tracks on
+channels 1 to 4 play four parts, each with its own clips, mute and solo.
+The instrument's own track plays it as it would without them: on the first
+channel, unless the plugin takes MPE, which spreads its notes over a
+channel each.
+
 ## Plugin windows
 
 **Plugin Window**, on the plugin's device in the devices panel, opens the

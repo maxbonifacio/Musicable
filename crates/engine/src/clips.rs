@@ -1123,6 +1123,7 @@ impl MidiClips {
                     note: id,
                     key: note.key,
                     velocity: note.velocity,
+                    channel: None,
                 },
             ));
             for dimension in Dimension::ALL {
@@ -1436,7 +1437,9 @@ mod tests {
                 let at = ctx.transport.position + event.offset as u64;
                 match event.kind {
                     NodeEventKind::Note(note) => self.notes.push((at, note)),
-                    NodeEventKind::Controller { controller, value } => {
+                    NodeEventKind::Controller {
+                        controller, value, ..
+                    } => {
                         self.controllers.push((at, controller, value));
                     }
                     _ => {}
@@ -1634,7 +1637,8 @@ mod tests {
                 NoteEvent::On {
                     note: id,
                     key: 60,
-                    velocity: 0.75
+                    velocity: 0.75,
+                    channel: None,
                 }
             );
             assert_eq!(

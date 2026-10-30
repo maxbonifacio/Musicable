@@ -40,6 +40,7 @@ fn on(note: u64, key: u8, velocity: f32) -> NoteEvent {
         note: NoteId(note),
         key,
         velocity,
+        channel: None,
     }
 }
 
@@ -401,9 +402,11 @@ impl Node for Clips {
             let offset = (time - ctx.time) as usize;
             match kind {
                 NodeEventKind::Note(note) => notes.send(offset, note),
-                NodeEventKind::Controller { controller, value } => {
-                    notes.send_controller(offset, controller, value)
-                }
+                NodeEventKind::Controller {
+                    controller,
+                    value,
+                    channel,
+                } => notes.send_controller_on(offset, controller, value, channel),
                 _ => continue,
             };
         }
@@ -432,7 +435,9 @@ impl Node for Keep {
             let time = ctx.time + event.offset as u64;
             match event.kind {
                 NodeEventKind::Note(note) => self.notes.push((time, note)),
-                NodeEventKind::Controller { controller, value } => {
+                NodeEventKind::Controller {
+                    controller, value, ..
+                } => {
                     self.moves.push((time, controller, value));
                 }
                 _ => {}
@@ -796,7 +801,11 @@ fn a_swap_keeps_notes_held_on_the_same_input_and_ends_the_rest() {
 
 /// A controller's move, as a clip player sends it.
 fn controller(controller: Controller, value: f32) -> NodeEventKind {
-    NodeEventKind::Controller { controller, value }
+    NodeEventKind::Controller {
+        controller,
+        value,
+        channel: None,
+    }
 }
 
 #[test]
@@ -1018,4 +1027,260 @@ fn a_swap_keeps_the_notes_taken_and_ends_them_when_the_input_changes() {
     rig.swap(monitor_taking(Monitor::In, false));
     rig.block(&[]);
     assert_eq!(rig.kept(), [(384, off(LIVE_NOTES + 3, RELEASE))]);
+}
+
+/// Keeps the notes and controllers' moves it gets, at their engine times,
+/// with their channels, as a multi-timbral instrument would play them.
+struct Hears(Vec<(u64, NodeEventKind)>);
+
+impl Node for Hears {
+    fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        for event in ctx.events.iter().filter(|e| e.kind.is_played()) {
+            self.0.push((ctx.time + event.offset as u64, event.kind));
+        }
+        output.clear();
+    }
+}
+
+/// A clip player playing into a note wire's relay, and the relay into an
+/// instrument, rendered a block of 64 frames at a time.
+struct Wired {
+    graph: PreparedGraph,
+    time: u64,
+    tempo: TempoMap,
+}
+
+const RELAY: NodeId = NodeId(1);
+const HEARS: NodeId = NodeId(2);
+
+/// Wire 7's notes count up from here.
+const WIRE: u64 = WIRED_NOTES | 7 << 32;
+
+fn wired(relay: NoteWire, clips: Vec<(u64, NodeEventKind)>) -> PreparedGraph {
+    let mut g = Graph::new();
+    let player = g.add(NodeKey(0), Clips(clips));
+    let relay = g.add(NodeKey(1), relay);
+    let instrument = g.add(NodeKey(2), Hears(Vec::with_capacity(64)));
+    assert_eq!((relay, instrument), (RELAY, HEARS));
+    g.send_notes(player, relay).unwrap();
+    g.send_notes(relay, instrument).unwrap();
+    g.set_output(instrument).unwrap();
+    g.prepare(&CONFIG).unwrap()
+}
+
+impl Wired {
+    fn new(relay: NoteWire, clips: Vec<(u64, NodeEventKind)>) -> Self {
+        let graph = wired(relay, clips);
+        let tempo = TempoMap::default();
+        Self {
+            graph,
+            time: 0,
+            tempo,
+        }
+    }
+
+    fn block(&mut self) {
+        let block = Block {
+            frames: 64,
+            time: self.time,
+            transport: TransportState::default(),
+            tempo: &self.tempo,
+            input: AudioRef::empty(64),
+            midi: &[],
+            ahead: false,
+        };
+        let graph = &mut self.graph;
+        rt::scope(|| {
+            assert_eq!(graph.play_notes(&block), 0);
+            graph.load_routed();
+            ReferenceRenderer.render(graph, &block);
+            graph.clear_routed();
+        });
+        self.time += 64;
+    }
+
+    /// Mutes or unmutes the relay, `offset` frames into the next block.
+    fn mute(&mut self, offset: usize, muted: bool) {
+        let value = if muted { 1.0 } else { 0.0 };
+        let kind = NodeEventKind::Param {
+            param: NoteWire::MUTE,
+            value,
+        };
+        assert!(self.graph.route(RELAY, NodeEvent { offset, kind }));
+    }
+
+    /// Puts in a graph with `relay` in place of the relay, playing `clips`,
+    /// as a swap does.
+    fn swap(&mut self, relay: NoteWire, clips: Vec<(u64, NodeEventKind)>) {
+        let mut new = wired(relay, clips);
+        rt::scope(|| new.adopt_from(&mut self.graph));
+        self.graph = new;
+    }
+
+    /// What the instrument got since this was last asked.
+    fn heard(&mut self) -> Vec<(u64, NodeEventKind)> {
+        let node = self.graph.nodes[HEARS.0].as_mut();
+        let hears = node.downcast_mut::<Hears>().unwrap();
+        std::mem::replace(&mut hears.0, Vec::with_capacity(64))
+    }
+}
+
+/// A note starting on `channel`.
+fn on_channel(id: u64, key: u8, channel: Option<u8>) -> NodeEventKind {
+    note(NoteEvent::On {
+        note: NoteId(id),
+        key,
+        velocity: 1.0,
+        channel,
+    })
+}
+
+/// A controller's move on `channel`.
+fn moved_on(controller: Controller, value: f32, channel: Option<u8>) -> NodeEventKind {
+    NodeEventKind::Controller {
+        controller,
+        value,
+        channel,
+    }
+}
+
+#[test]
+fn a_note_wire_plays_its_notes_on_under_ids_of_its_own_on_its_channel() {
+    let wheel = Controller::MOD_WHEEL;
+    let clips = vec![
+        (0, on_channel(1, 60, None)),
+        (10, note(bend(1, 2.0))),
+        (20, moved_on(wheel, 0.5, None)),
+        (30, note(off(1, 0.25))),
+        // A note that comes on a channel goes on the wire's.
+        (40, on_channel(1, 64, Some(5))),
+        (50, note(off(1, 1.0))),
+        // An end or a change for a note that never came is passed over.
+        (60, note(off(2, 1.0))),
+    ];
+    let mut rig = Wired::new(NoteWire::new(WireId(7), Some(2)), clips.clone());
+    rig.block();
+    let two = Some(2);
+    assert_eq!(
+        rig.heard(),
+        [
+            (0, on_channel(WIRE, 60, two)),
+            (10, note(bend(WIRE, 2.0))),
+            (20, moved_on(wheel, 0.5, two)),
+            (30, note(off(WIRE, 0.25))),
+            (40, on_channel(WIRE + 1, 64, two)),
+            (50, note(off(WIRE + 1, 1.0))),
+        ]
+    );
+
+    // Without a channel, they go on on none.
+    let mut rig = Wired::new(NoteWire::new(WireId(7), None), clips);
+    rig.block();
+    let heard = rig.heard();
+    assert_eq!(heard[0], (0, on_channel(WIRE, 60, None)));
+    assert_eq!(heard[2], (20, moved_on(wheel, 0.5, None)));
+    assert_eq!(heard[4], (40, on_channel(WIRE + 1, 64, None)));
+}
+
+#[test]
+fn a_muted_note_wire_ends_its_notes_and_plays_none_until_its_unmuted() {
+    let (pedal, wheel) = (Controller::SUSTAIN, Controller::MOD_WHEEL);
+    let one = Some(1);
+    let clips = vec![
+        (0, on_channel(1, 60, None)),
+        (5, moved_on(pedal, 1.0, None)),
+        (70, on_channel(2, 62, None)),
+        (80, moved_on(wheel, 0.25, None)),
+        (90, note(off(1, 1.0))),
+        (150, note(off(2, 1.0))),
+        (160, on_channel(3, 64, None)),
+    ];
+    let mut rig = Wired::new(NoteWire::new(WireId(7), one), clips);
+    rig.block();
+    assert_eq!(
+        rig.heard(),
+        [
+            (0, on_channel(WIRE, 60, one)),
+            (5, moved_on(pedal, 1.0, one))
+        ]
+    );
+    // Muted on its frame: the note ends and the pedal is let go there, and
+    // nothing plays after.
+    rig.mute(3, true);
+    rig.block();
+    assert_eq!(
+        rig.heard(),
+        [
+            (67, note(off(WIRE, RELEASE))),
+            (67, moved_on(pedal, 0.0, one))
+        ]
+    );
+    // Unmuted, the controllers go back to what they hold, and notes play
+    // from the next that starts.
+    rig.mute(0, false);
+    rig.block();
+    assert_eq!(
+        rig.heard(),
+        [
+            (128, moved_on(wheel, 0.25, one)),
+            (128, moved_on(pedal, 1.0, one)),
+            (160, on_channel(WIRE + 1, 64, one)),
+        ]
+    );
+
+    // A wire muted from the start plays nothing.
+    let clips = vec![(0, on_channel(1, 60, None))];
+    let mut rig = Wired::new(NoteWire::new(WireId(7), one).with_muted(true), clips);
+    rig.block();
+    assert_eq!(rig.heard(), []);
+}
+
+#[test]
+fn a_swap_keeps_a_note_wires_notes_and_moves_its_controllers_to_a_new_channel() {
+    let pedal = Controller::SUSTAIN;
+    let clips = vec![
+        (0, on_channel(1, 60, None)),
+        (5, moved_on(pedal, 1.0, None)),
+    ];
+    let mut rig = Wired::new(NoteWire::new(WireId(7), Some(1)), clips);
+    rig.block();
+    rig.heard();
+    // On the same channel, the note plays on until it's let go.
+    let clips = vec![(70, note(off(1, 0.5))), (80, on_channel(2, 62, None))];
+    rig.swap(NoteWire::new(WireId(7), Some(1)), clips);
+    rig.block();
+    assert_eq!(
+        rig.heard(),
+        [
+            (70, note(off(WIRE, 0.5))),
+            (80, on_channel(WIRE + 1, 62, Some(1)))
+        ]
+    );
+
+    // On another, the note ends when it's let go, by its id, and the pedal
+    // lets go on the old channel and goes down on the new.
+    let clips = vec![(140, note(off(2, 0.5))), (150, on_channel(3, 64, None))];
+    rig.swap(NoteWire::new(WireId(7), Some(4)), clips);
+    rig.block();
+    assert_eq!(
+        rig.heard(),
+        [
+            (128, moved_on(pedal, 0.0, Some(1))),
+            (128, moved_on(pedal, 1.0, Some(4))),
+            (140, note(off(WIRE + 1, 0.5))),
+            (150, on_channel(WIRE + 2, 64, Some(4))),
+        ]
+    );
+
+    // A muted wire that takes over from one playing ends its notes.
+    let clips = vec![(200, on_channel(4, 65, None))];
+    rig.swap(NoteWire::new(WireId(7), Some(4)).with_muted(true), clips);
+    rig.block();
+    assert_eq!(
+        rig.heard(),
+        [
+            (192, note(off(WIRE + 2, RELEASE))),
+            (192, moved_on(pedal, 0.0, Some(4)))
+        ]
+    );
 }

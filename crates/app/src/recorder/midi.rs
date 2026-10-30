@@ -383,13 +383,15 @@ const CONTROLLER: u8 = 4;
 /// A note's start, change or end, or a controller's move, in a
 /// [`NoteBuffer`]'s two words: the note's id, or the controller's number,
 /// and then the value's bits, what it is, and the note's key or the
-/// dimension of its expression. `None` for what isn't one.
+/// dimension of its expression. `None` for what isn't one. Clips' notes are
+/// on no channel, so a channel isn't kept.
 pub(super) fn pack(kind: NodeEventKind) -> Option<[u64; 2]> {
     let (id, what, detail, value) = match kind {
         NodeEventKind::Note(NoteEvent::On {
             note,
             key,
             velocity,
+            ..
         }) => (note.0, ON, key, velocity),
         NodeEventKind::Note(NoteEvent::Expression {
             note,
@@ -400,9 +402,9 @@ pub(super) fn pack(kind: NodeEventKind) -> Option<[u64; 2]> {
             (note.0, EXPRESSION, d.unwrap_or(0) as u8, value)
         }
         NodeEventKind::Note(NoteEvent::Off { note, velocity }) => (note.0, OFF, 0, velocity),
-        NodeEventKind::Controller { controller, value } => {
-            (u64::from(controller.number()), CONTROLLER, 0, value)
-        }
+        NodeEventKind::Controller {
+            controller, value, ..
+        } => (u64::from(controller.number()), CONTROLLER, 0, value),
         _ => return None,
     };
     let word = u64::from(value.to_bits()) | u64::from(what) << 32 | u64::from(detail) << 40;
@@ -419,6 +421,7 @@ pub(super) fn unpack([id, word]: [u64; 2]) -> Option<Played> {
             note,
             key: detail,
             velocity: value,
+            channel: None,
         }),
         EXPRESSION => Played::Note(NoteEvent::Expression {
             note,
@@ -450,6 +453,7 @@ fn follow(
             note,
             key,
             velocity,
+            ..
         } => {
             let state = match pass {
                 Some(pass) => {

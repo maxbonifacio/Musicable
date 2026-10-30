@@ -446,6 +446,7 @@ mod tests {
         project.master.devices.push(gain);
         let sampler = NativeDevice::new(NativeKind::Sampler);
         let sampler = project.new_device(DeviceKind::Native(sampler));
+        let notes = Port::Notes(sampler.id);
         project.track_mut(midi).unwrap().devices.push(sampler);
         let compressor = NativeDevice::new(NativeKind::Compressor);
         let compressor = project.new_device(DeviceKind::Native(compressor));
@@ -455,6 +456,8 @@ mod tests {
             let wire = project.new_wire(Tap::PostFx(Chain::Track(track)), key);
             project.wires.push(wire);
         }
+        let wire = project.new_wire(Tap::PreFx(midi), notes);
+        project.wires.push(wire);
         let lanes = [
             (ParamAddress::Volume(Chain::Track(audio)), fade()),
             (ParamAddress::Pan(Chain::Master), vec![point(0, -0.5)]),
@@ -875,6 +878,11 @@ mod tests {
                 from: 1.0,
                 to: 0.25,
             },
+            Edit::WireChannel {
+                wire: WireId(2),
+                from: None,
+                to: Some(9),
+            },
             Edit::RemoveWire {
                 index: 0,
                 wire: project.wires[0],
@@ -982,7 +990,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 75;
+    const KINDS: usize = 76;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -1063,6 +1071,7 @@ mod tests {
             Edit::WireGain { .. } => 72,
             Edit::WireFrom { .. } => 73,
             Edit::PluginInputs { .. } => 74,
+            Edit::WireChannel { .. } => 75,
         }
     }
 

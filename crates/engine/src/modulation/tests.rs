@@ -53,6 +53,7 @@ fn note_on(offset: usize, note: u64) -> NodeEvent {
         note: NoteId(note),
         key: 60,
         velocity: 1.0,
+        channel: None,
     };
     NodeEvent {
         offset,
