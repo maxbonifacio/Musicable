@@ -14,7 +14,7 @@ use musicable_model::{Project, TrackKind};
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
-use crate::testing::Player;
+use crate::testing::{Player, drag_pressing};
 use crate::{Levels, Plugins, Waveforms};
 
 struct State {
@@ -313,17 +313,7 @@ fn double_click(harness: &mut Harness<'_, State>, at: Pos2) {
 
 /// Drags from `from` to `to` with `mods` held, in a few moves.
 fn drag(harness: &mut Harness<'_, State>, from: Pos2, to: Pos2, mods: Modifiers) {
-    harness.event(Event::ModifiersChanged(mods));
-    harness.hover_at(from);
-    harness.run();
-    press(harness, from, true, mods);
-    for step in 1..=4 {
-        harness.hover_at(from + (to - from) * step as f32 / 4.0);
-        harness.run();
-    }
-    press(harness, to, false, mods);
-    harness.event(Event::ModifiersChanged(Modifiers::NONE));
-    harness.run();
+    drag_pressing(harness, from, to, mods, mods);
 }
 
 fn wheel(harness: &mut Harness<'_, State>, over: Pos2, delta: Vec2, mods: Modifiers) {
@@ -513,6 +503,38 @@ fn edges_trim_notes() {
     drag(&mut harness, from, to, Modifiers::NONE);
     let g = harness.state().note(g3);
     assert_eq!((g.start, g.end()), (Beats::from_f64(2.5), Beats::new(3)));
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn alt_pressed_part_of_the_way_through_takes_notes_off_the_grid() {
+    let (project, clip, [c3, e3, g3]) = project();
+    let mut harness = harness(project, Some(clip));
+    let (none, alt, ctrl) = (Modifiers::NONE, Modifiers::ALT, Modifiers::COMMAND);
+    // Alt held as a drag of a note starts changes its velocity, but pressed
+    // once the notes are moving, it takes them off the grid, as in Live.
+    let from = note(&harness, "Note C3 at 2. 1. 1").center();
+    let to = from + vec2(width(&harness, 1.1), 0.0);
+    drag_pressing(&mut harness, from, to, none, alt);
+    let moved = harness.state().note(c3);
+    assert!((moved.start.to_f64() - 1.1).abs() < 0.001, "{moved:?}");
+    assert_eq!((moved.key, moved.velocity), (60, 0.5));
+    // Letting go of it puts them back on the grid, and Ctrl copies them.
+    let from = note(&harness, "Note E3 at 2. 2. 1").center();
+    let to = from + vec2(width(&harness, 4.1), 0.0);
+    drag_pressing(&mut harness, from, to, ctrl | alt, ctrl);
+    let state = harness.state();
+    assert_eq!(state.notes().len(), 4);
+    assert_eq!(state.note(e3).start, Beats::new(1));
+    let copy = state.selected();
+    assert_eq!(state.note(copy[0]).start, Beats::new(5));
+    // Trimming goes off the grid from when Alt is pressed.
+    let rect = note(&harness, "Note G3 at 2. 3. 1");
+    let from = pos2(rect.right() - 2.0, rect.center().y);
+    let to = from - vec2(width(&harness, 0.6), 0.0);
+    drag_pressing(&mut harness, from, to, none, alt);
+    let g = harness.state().note(g3);
+    assert!((g.end().to_f64() - 3.4).abs() < 0.001, "{g:?}");
     assert!(harness.state().errors.is_empty());
 }
 

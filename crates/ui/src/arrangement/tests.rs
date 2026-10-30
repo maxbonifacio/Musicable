@@ -21,7 +21,7 @@ use musicable_model::{DeviceKind, LocatorId, PluginFormat, Project, TakeId, Trac
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
-use crate::testing::Player;
+use crate::testing::{Player, drag_pressing};
 use crate::{Levels, Live, Plugins, Waveforms};
 
 struct State {
@@ -291,17 +291,7 @@ fn click(harness: &mut Harness<'_, State>, at: Pos2, mods: Modifiers) {
 
 /// Drags from `from` to `to` with `mods` held, in a few moves.
 fn drag(harness: &mut Harness<'_, State>, from: Pos2, to: Pos2, mods: Modifiers) {
-    harness.event(Event::ModifiersChanged(mods));
-    harness.hover_at(from);
-    harness.run();
-    press(harness, from, true, mods);
-    for step in 1..=4 {
-        harness.hover_at(from + (to - from) * step as f32 / 4.0);
-        harness.run();
-    }
-    press(harness, to, false, mods);
-    harness.event(Event::ModifiersChanged(Modifiers::NONE));
-    harness.run();
+    drag_pressing(harness, from, to, mods, mods);
 }
 
 /// The distance `beats` beats take on the timeline.
@@ -477,6 +467,73 @@ fn ctrl_drag_copies_and_alt_drag_moves_off_the_grid() {
 }
 
 #[test]
+fn alt_pressed_part_of_the_way_through_a_drag_takes_it_off_the_grid() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let (none, alt, ctrl) = (Modifiers::NONE, Modifiers::ALT, Modifiers::COMMAND);
+    // A clip's end, trimmed, goes off the grid once Alt is pressed.
+    let rect = harness.get_by_label("Clip Line").rect();
+    let from = pos2(rect.right() - 2.0, rect.center().y);
+    let to = from - vec2(width(&harness, 1.25), 0.0);
+    drag_pressing(&mut harness, from, to, none, alt);
+    near(clip(&harness, ids.line).1.end().to_f64(), 22.75);
+    // And back on it once Alt is let go.
+    let rect = harness.get_by_label("Clip Kick").rect();
+    let from = pos2(rect.right() - 2.0, rect.center().y);
+    let to = from - vec2(width(&harness, 2.2), 0.0);
+    drag_pressing(&mut harness, from, to, alt, none);
+    assert_eq!(clip(&harness, ids.kick).1.end(), Beats::new(6));
+    // Ctrl, then Alt with it, copies clips off the grid.
+    let from = title(&harness, "Line", 30.0);
+    let to = from + vec2(width(&harness, 8.25), 0.0);
+    drag_pressing(&mut harness, from, to, ctrl, ctrl | alt);
+    let starts: Vec<f64> = (harness.state().project().tracks[2].clips.iter())
+        .map(|clip| clip.start.to_f64())
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[0], 16.0);
+    near(starts[1], 24.25);
+    assert_eq!(harness.state().document.undo_name(), Some("Copy Clips"));
+
+    // The loop and locators, which have no Alt-drag of their own, go off
+    // it too.
+    let (from, to) = (strip(&harness, 20.0), strip(&harness, 27.6));
+    drag_pressing(&mut harness, from, to, none, alt);
+    let region = harness.state().project().loop_region;
+    assert_eq!(region.start, Beats::new(20));
+    near(region.end.to_f64(), 27.6);
+    let (from, to) = (strip(&harness, 22.0), strip(&harness, 23.25));
+    drag_pressing(&mut harness, from, to, none, alt);
+    let region = harness.state().project().loop_region;
+    near(region.start.to_f64(), 21.25);
+    near(region.end.to_f64(), 28.85);
+    let at = harness.get_by_label("Locator Verse").rect();
+    let from = pos2(at.center().x, at.top() + 2.0);
+    let to = from + vec2(width(&harness, 1.25), 0.0);
+    drag_pressing(&mut harness, from, to, none, alt);
+    let verse = harness.state().project().locator(ids.verse).unwrap();
+    near(verse.at.to_f64(), 17.25);
+    // A time selection's start stays where the drag put it, on the grid or
+    // off it, as Alt was then.
+    let from = in_lane(&harness, "Drums", 26.3);
+    let to = in_lane(&harness, "Keys", 34.4);
+    drag_pressing(&mut harness, from, to, none, alt);
+    let time = |harness: &Harness<'_, State>| {
+        let editor = harness.state().editor();
+        let time = editor.selection.time.as_ref().expect("a time selection");
+        (time.range.start.to_f64(), time.range.end.to_f64())
+    };
+    let (start, end) = time(&harness);
+    assert_eq!(start, 26.0);
+    near(end, 34.4);
+    drag_pressing(&mut harness, from, to, alt, none);
+    let (start, end) = time(&harness);
+    near(start, 26.3);
+    assert_eq!(end, 34.0);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
 fn edges_trim_and_handles_fade() {
     let (project, ids) = project();
     let mut harness = harness(project);
@@ -554,6 +611,16 @@ fn shift_dragging_a_warped_clip_s_edge_stretches_it() {
     let line = clip(&harness, ids.line).1;
     assert_eq!(line.range(), BeatRange::new(Beats::new(14), Beats::new(24)));
     assert!((tempo(&harness, ids.line) - 150.0).abs() < 1e-6);
+    // Alt pressed part of the way through takes it off the grid.
+    let rect = harness.get_by_label("Clip Kick").rect();
+    let from = pos2(rect.right() - 2.0, rect.center().y);
+    let to = from + vec2(width(&harness, 1.3), 0.0);
+    let (shift, alt) = (Modifiers::SHIFT, Modifiers::ALT);
+    drag_pressing(&mut harness, from, to, shift, shift | alt);
+    let kick = clip(&harness, ids.kick).1;
+    assert_eq!(kick.start, Beats::ZERO);
+    near(kick.end().to_f64(), 13.3);
+    near(tempo(&harness, ids.kick), 120.0 * 13.3 / 8.0);
     // A clip that isn't warped trims.
     let rect = harness.get_by_label("Clip Chords").rect();
     let from = pos2(rect.right() - 2.0, rect.center().y);
@@ -1292,6 +1359,16 @@ fn takes_show_in_lanes_and_dragging_or_clicking_comps_them() {
     click(&mut harness, at, Modifiers::NONE);
     assert_eq!(played(&harness, ids.bass), [(bars(16, 24), 0)]);
 
+    // Alt pressed part of the way through a drag takes its end off the
+    // grid, and its start stays where it was put.
+    drag_pressing(&mut harness, from, to, Modifiers::NONE, Modifiers::ALT);
+    let comped = played(&harness, ids.bass);
+    assert_eq!(comped.len(), 3, "{comped:?}");
+    assert_eq!((comped[1].0.start, comped[1].1), (Beats::new(18), 96_000));
+    near(comped[1].0.end.to_f64(), 19.9);
+    let at = in_take(&harness, "Take 1 of Bass", 21.0);
+    click(&mut harness, at, Modifiers::NONE);
+
     // A double click on a take's name renames it, and its menu deletes it.
     // Long enough after the last click that it isn't a triple click.
     for _ in 0..40 {
@@ -1605,6 +1682,74 @@ fn a_drag_on_an_automation_lane_draws_a_step_of_the_grid_at_a_time() {
     near(value(5.0), quarter);
     near(value(9.0), 1.0);
     near(value(15.0), 1.0);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn alt_pressed_part_of_the_way_through_drawing_draws_off_the_grid() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let volume = ParamAddress::Volume(Chain::Track(ids.drums));
+    let spec = ParamSpec::volume();
+    let quarter = spec.scale.from_unit(0.25, spec.min, spec.max);
+    let lane = "Volume of Drums";
+    harness
+        .get_by_label("Show automation of track Drums")
+        .click();
+    harness.run();
+    let drawn_at = |harness: &Harness<'_, State>| -> Vec<f64> {
+        (points(harness, volume).iter())
+            .map(|&(at, _)| at.to_f64())
+            .collect()
+    };
+    // A step of the grid at a time until Alt is pressed, and then freely,
+    // to where the pointer lets go.
+    let from = on_lane(&harness, lane, &spec, 2.5, quarter);
+    let to = on_lane(&harness, lane, &spec, 7.5, quarter);
+    drag_pressing(&mut harness, from, to, Modifiers::NONE, Modifiers::ALT);
+    // And freely until Alt is let go, and then to the end of the step the
+    // pointer lets go in.
+    let from = on_lane(&harness, lane, &spec, 10.5, quarter);
+    let to = on_lane(&harness, lane, &spec, 15.5, quarter);
+    drag_pressing(&mut harness, from, to, Modifiers::ALT, Modifiers::NONE);
+    let drawn = drawn_at(&harness);
+    let expected = [2.0, 2.0, 7.5, 7.5, 10.5, 10.5, 16.0, 16.0];
+    assert_eq!(drawn.len(), expected.len(), "{drawn:?}");
+    for (at, expected) in drawn.into_iter().zip(expected) {
+        near(at, expected);
+    }
+    for (_, value) in points(&harness, volume) {
+        assert!(value == 1.0 || (value - quarter).abs() < 1e-4, "{value}");
+    }
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn alt_pressed_part_of_the_way_through_moves_a_point_off_the_grid() {
+    let (mut project, ids) = project();
+    let volume = ParamAddress::Volume(Chain::Track(ids.drums));
+    let set = vec![
+        Point::new(Beats::new(4), 1.0),
+        Point::new(Beats::new(12), 0.0),
+    ];
+    project.automation.push(Lane::new(volume, set));
+    let mut harness = harness(project);
+    harness
+        .get_by_label("Show automation of track Drums")
+        .click();
+    harness.run();
+    let (lane, spec) = ("Volume of Drums", ParamSpec::volume());
+    let from = on_lane(&harness, lane, &spec, 12.0, 0.0);
+    let to = on_lane(&harness, lane, &spec, 8.3, 0.0);
+    drag_pressing(&mut harness, from, to, Modifiers::NONE, Modifiers::ALT);
+    let moved = points(&harness, volume);
+    assert_eq!(moved[0], (Beats::new(4), 1.0));
+    near(moved[1].0.to_f64(), 8.3);
+    // Letting go of it puts the point back on the grid.
+    let from = on_lane(&harness, lane, &spec, 8.3, 0.0);
+    let to = on_lane(&harness, lane, &spec, 10.2, 0.0);
+    drag_pressing(&mut harness, from, to, Modifiers::ALT, Modifiers::NONE);
+    assert_eq!(points(&harness, volume)[1].0, Beats::new(10));
     assert!(harness.state().errors.is_empty());
 }
 

@@ -294,7 +294,15 @@ sets the theme from the Settings window's Appearance page and theme files
 mouse map file, which holds the changes to `MouseMap::live()`
 (`musicable_ui::MouseMapFile`). What each place can do with each gesture,
 which the page offers, is `Target::actions`: a new action goes in that
-table, as well as in the views that carry it out.
+table, as well as in the views that carry it out. A drag looks the
+modifiers up again on every frame it lasts, with `MouseMap::during`, which
+switches it between versions of the same drag (`MouseAction::plain`): on
+the grid or off it, or copying rather than moving. So Alt and Ctrl count
+from whenever they're pressed until they're let go, and a drag that snaps
+with no version off the grid of its own keeps off it while the modifiers
+that move clips off the grid are held. The views snap by the drag's
+`free`, not by its action, and where a drag started keeps the grid as it
+was then.
 
 ### How fast it draws
 

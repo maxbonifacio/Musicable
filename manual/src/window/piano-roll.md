@@ -55,10 +55,11 @@ undo history.
 | The ruler | Click; drag | Puts the start marker and the playhead there; zooms |
 | Anywhere else | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 
-Live turns off the grid with Alt while a drag goes, but Alt-dragging a note
-changes its velocity here, so to move notes off the grid, turn Snap to Grid
-(Ctrl+4) off. With Snap to Grid off, drawing a controller fills steps of
-three points. Escape cancels a drag. The Settings window's Mouse page
+Alt held as a drag of notes starts changes their velocity, but pressed once
+they're moving or being trimmed, it keeps them off the grid until it's let
+go, as in Live. Ctrl pressed part of the way through a move copies them,
+and letting go of it moves them again. With Snap to Grid off, drawing a
+controller fills steps of three points. Escape cancels a drag. The Settings window's Mouse page
 changes what the gestures do ([The mouse](../customising/mouse.md)).
 
 ## Right-click menus

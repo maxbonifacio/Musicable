@@ -471,6 +471,41 @@ pub(crate) fn click_at(harness: &mut Harness<'_, State>, at: Pos2) {
     harness.run();
 }
 
+/// Drags with the mouse from `from` to `to` in a few moves, with `first`
+/// held for the first half of the way and `then` for the rest, and lets go.
+pub(crate) fn drag_pressing<S>(
+    harness: &mut Harness<'_, S>,
+    from: Pos2,
+    to: Pos2,
+    first: egui::Modifiers,
+    then: egui::Modifiers,
+) {
+    let press = |harness: &mut Harness<'_, S>, pos, pressed, modifiers| {
+        harness.event(Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        });
+        harness.run();
+    };
+    harness.event(Event::ModifiersChanged(first));
+    harness.hover_at(from);
+    harness.run();
+    press(harness, from, true, first);
+    for step in 1..=4 {
+        if step == 3 && then != first {
+            harness.event(Event::ModifiersChanged(then));
+            harness.run();
+        }
+        harness.hover_at(from + (to - from) * step as f32 / 4.0);
+        harness.run();
+    }
+    press(harness, to, false, then);
+    harness.event(Event::ModifiersChanged(egui::Modifiers::NONE));
+    harness.run();
+}
+
 /// A key pressed and let go of, as a window of its own gets it.
 pub(crate) fn key(key: egui::Key) -> [Event; 2] {
     [true, false].map(|pressed| Event::Key {

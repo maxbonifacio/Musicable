@@ -18,7 +18,7 @@ use musicable_model::warp::Onsets;
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
-use crate::testing::Player;
+use crate::testing::{Player, drag_pressing};
 use crate::{Levels, PeaksBuilder, Plugins, Waveforms};
 
 /// The file the clip plays: four seconds at 48 kHz, eight beats at 120 BPM.
@@ -395,17 +395,7 @@ fn double_click(harness: &mut Harness<'_, State>, at: Pos2) {
 
 /// Drags from `from` to `to` with `mods` held, in a few moves.
 fn drag(harness: &mut Harness<'_, State>, from: Pos2, to: Pos2, mods: Modifiers) {
-    harness.event(Event::ModifiersChanged(mods));
-    harness.hover_at(from);
-    harness.run();
-    press(harness, from, true, mods);
-    for step in 1..=4 {
-        harness.hover_at(from + (to - from) * step as f32 / 4.0);
-        harness.run();
-    }
-    press(harness, to, false, mods);
-    harness.event(Event::ModifiersChanged(Modifiers::NONE));
-    harness.run();
+    drag_pressing(harness, from, to, mods, mods);
 }
 
 /// Opens the context menu at `at`.
@@ -567,6 +557,22 @@ fn dragging_a_marker_moves_it_on_the_grid_and_alt_frees_it() {
     drag(&mut harness, from, from - vec2(900.0, 0.0), Modifiers::NONE);
     let markers = harness.state().markers();
     assert!(near(markers[1].1, 1.0 / 6.0), "{markers:?}");
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn alt_pressed_part_of_the_way_through_moves_a_marker_off_the_grid() {
+    let (project, clip) = project(&[(0, 0.0), (4 * BEAT, 4.0)]);
+    let mut harness = harness(project, Some(clip));
+    let (none, alt) = (Modifiers::NONE, Modifiers::ALT);
+    let from = on_handle(&harness, 8.0);
+    drag_pressing(&mut harness, from, from + vec2(112.0, 0.0), none, alt);
+    let markers = harness.state().markers();
+    assert!(near(markers[1].1, 5.12), "{markers:?}");
+    // Letting go of it puts the marker back on the grid.
+    let from = on_handle(&harness, 9.12);
+    drag_pressing(&mut harness, from, from + vec2(91.0, 0.0), alt, none);
+    assert_eq!(harness.state().markers(), [(0, 0.0), (4 * BEAT, 6.0)]);
     assert!(harness.state().errors.is_empty());
 }
 

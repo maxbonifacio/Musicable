@@ -26,6 +26,23 @@ mixer](../window/mixer.md#moving-the-controls) and the devices panel, for
 and [its Bypass button](../window/devices-panel.md#bypassing-and-deactivating),
 say what the gestures do at first.
 
+## Modifiers part of the way through a drag
+
+A drag starts as its gesture does with the modifiers held then. Pressing
+or letting go of modifiers part of the way through changes it from there
+on, when what they're bound to is the same drag, on the grid or off it, or
+copying rather than moving: so at first, Alt keeps a drag off the grid
+and Ctrl copies clips and notes, while they're held. Modifiers held
+together that have no binding together there count one by one, so Ctrl
+and Alt copy off the grid. Those bound to another drag, such as Shift on
+a clip's edge, which stretches it rather than trimming it, change nothing
+until the next drag.
+
+A drag that snaps to the grid with no version off it of its own there,
+such as moving notes, whose Alt-drag changes their velocity, the loop, a
+locator or a time selection, keeps off the grid while the modifiers that
+move clips off the grid are held: Alt, at first.
+
 ## Your mouse map file
 
 Your mouse map file is `mouse.toml` in Musicable's config folder
