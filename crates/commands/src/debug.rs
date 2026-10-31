@@ -1,12 +1,15 @@
 //! Commands for checking Musicable itself, which agents run in the PC
 //! checks: recording what the audio device plays, with a timeline of what
-//! the engine applied as it played, and measuring a device's response.
+//! the engine applied as it played, measuring a device's response, and
+//! blind tests of pairs of sounds.
 
 use std::path::PathBuf;
 
 use musicable_model::DeviceId;
 
-use crate::{Command, CommandError, CommandId, Param, Probing, Registry, Request, Type, Value};
+use crate::{
+    BlindRound, Command, CommandError, CommandId, Param, Probing, Registry, Request, Type, Value,
+};
 
 /// Records every frame Musicable hands the audio device to a WAV file, with
 /// a timeline of what the engine applied, on the same clock, beside it.
@@ -16,6 +19,10 @@ pub const STOP_RECORDING_OUTPUT: CommandId = CommandId::new("debug.stop_recordin
 /// Plays a known signal through a copy of a device, offline, and measures
 /// its frequency, phase and dynamics response.
 pub const MEASURE_RESPONSE: CommandId = CommandId::new("debug.measure_response");
+/// Makes a blind test of pairs of files, in a folder of its own.
+pub const MAKE_BLIND_TEST: CommandId = CommandId::new("debug.make_blind_test");
+/// Opens a blind test in the Blind Test window, to be judged.
+pub const OPEN_BLIND_TEST: CommandId = CommandId::new("debug.open_blind_test");
 
 /// Registers the debug commands.
 pub fn register(registry: &mut Registry) {
@@ -78,6 +85,82 @@ pub fn register(registry: &mut Registry) {
                 level_dbfs,
                 at,
             }));
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(MAKE_BLIND_TEST, "Make Blind Test").with_params(&[
+            Param::required(
+                "folder",
+                Type::Text,
+                "A new or empty folder for the round, a full path.",
+            ),
+            Param::required(
+                "first",
+                Type::List(&Type::Text),
+                "Files, full paths: each is paired with the file at the same place in second.",
+            ),
+            Param::required(
+                "second",
+                Type::List(&Type::Text),
+                "Their partners, as many, full paths.",
+            ),
+            Param::optional(
+                "first_name",
+                Type::Text,
+                "What the first files are, such as Live, for the results. Without it, first.",
+            ),
+            Param::optional(
+                "second_name",
+                Type::Text,
+                "What the second files are, such as Musicable. Without it, second.",
+            ),
+            Param::optional(
+                "name",
+                Type::Text,
+                "The round's name, which the window shows.",
+            ),
+            Param::optional(
+                "abx",
+                Type::Bool,
+                "Whether each trial has an X, a copy of A or of B, to name. Without it, true.",
+            ),
+            Param::optional(
+                "seed",
+                Type::Int,
+                "The seed the order and sides are shuffled with. Without it, the time.",
+            ),
+        ]),
+        |ctx, args| {
+            let paths = |name: &str| -> Result<Vec<PathBuf>, CommandError> {
+                let list: Vec<String> = args.get(name)?;
+                Ok(list.into_iter().map(PathBuf::from).collect())
+            };
+            let name = |key: &str, or: &str| -> Result<String, CommandError> {
+                Ok(args.opt::<String>(key)?.unwrap_or_else(|| or.to_owned()))
+            };
+            ctx.requests.push(Request::MakeBlindTest(BlindRound {
+                folder: PathBuf::from(args.get::<String>("folder")?),
+                first: paths("first")?,
+                second: paths("second")?,
+                first_name: name("first_name", "first")?,
+                second_name: name("second_name", "second")?,
+                name: name("name", "")?,
+                abx: args.opt("abx")?.unwrap_or(true),
+                seed: args.opt::<i64>("seed")?.map(|seed| seed as u64),
+            }));
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(OPEN_BLIND_TEST, "Open Blind Test...").with_params(&[Param::asked(
+            "folder",
+            Type::Text,
+            "The round's folder, a full path: the app asks which without it.",
+        )]),
+        |ctx, args| {
+            let folder = args.opt::<String>("folder")?.map(PathBuf::from);
+            ctx.requests.push(Request::OpenBlindTest(folder));
             Ok(Value::None)
         },
     );

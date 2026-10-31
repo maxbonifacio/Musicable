@@ -33,6 +33,7 @@
 - [Modulation](using/modulation.md)
 - [Plugins](using/plugins.md)
 - [Exporting audio](using/exporting.md)
+- [Blind tests](using/blind-tests.md)
 - [Projects and files](using/projects.md)
 
 # Built-in devices

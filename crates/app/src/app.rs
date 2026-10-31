@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use musicable_audio::InputKind;
 use musicable_commands::{
-    Args, CommandError, ExportOptions, Focus, Keymap, Probing, Request, arrange, browser, device,
+    Args, BlindRound, CommandError, ExportOptions, Focus, Keymap, Probing, Request, arrange,
+    browser, device,
 };
 use musicable_engine::{EngineHandle, Lead, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
@@ -30,6 +31,8 @@ use self::agents::Agents;
 use crate::analyses::Analyses;
 use crate::appearance_page::Asked as AppearanceAsked;
 use crate::audio_files::{AudioFiles, clip_path};
+use crate::blind_test::{self, Making};
+use crate::blind_test_window::BlindTestWindow;
 use crate::export::{self, Bits, Export, ExportSettings, FileFormat, Job, Report, Span};
 use crate::export_window::{Asked, ExportWindow};
 use crate::frame_times::FrameTimes;
@@ -103,6 +106,7 @@ pub struct App {
     export: Option<Export>,
     /// The device response being measured, if one is.
     probe: Option<Probe>,
+    blind_test: BlindTestWindow,
     /// Where the last export went, where the next one's dialog starts.
     export_folder: Option<PathBuf>,
     /// The project's file, once it has one.
@@ -288,6 +292,7 @@ impl App {
             export_window: ExportWindow::new(),
             export: None,
             probe: None,
+            blind_test: BlindTestWindow::new(),
             export_folder: None,
             path,
             folder,
@@ -965,6 +970,27 @@ impl App {
             }
             Request::MeasureResponse(probing) => {
                 if let Err(error) = self.measure_response(probing, ctx) {
+                    self.messages.push(error);
+                }
+            }
+            Request::MakeBlindTest(round) => {
+                let folder = round.folder.clone();
+                let made = blind_test::make(&making(round))
+                    .and_then(|_| self.blind_test.open(&folder, &mut self.session).map(|_| ()));
+                if let Err(error) = made {
+                    self.messages.push(error);
+                }
+            }
+            Request::OpenBlindTest(folder) => {
+                let folder = folder.or_else(|| {
+                    rfd::FileDialog::new()
+                        .set_parent(frame)
+                        .set_title("Open Blind Test")
+                        .pick_folder()
+                });
+                if let Some(folder) = folder
+                    && let Err(error) = self.blind_test.open(&folder, &mut self.session)
+                {
                     self.messages.push(error);
                 }
             }
@@ -2095,6 +2121,9 @@ impl eframe::App for App {
             }
             None => {}
         }
+        if let Some(said) = self.blind_test.show(&ctx, &mut self.session) {
+            self.messages.push(said);
+        }
         self.ask_to_save(&ctx, frame);
         self.update_title(&ctx);
         if let Some(times) = &mut self.frame_times {
@@ -2246,6 +2275,20 @@ fn recordings(session: &Session) -> Vec<musicable_ui::Recording> {
             }
         })
         .collect()
+}
+
+/// What `debug.make_blind_test` asked for, as a round to make.
+fn making(round: BlindRound) -> Making {
+    Making {
+        folder: round.folder,
+        first: round.first,
+        second: round.second,
+        first_name: round.first_name,
+        second_name: round.second_name,
+        name: round.name,
+        abx: round.abx,
+        seed: round.seed,
+    }
 }
 
 /// Wakes the window whose context is `ctx`, from any thread, so a frame

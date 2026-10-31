@@ -36,6 +36,7 @@ use tokio::task::JoinHandle;
 
 use super::App;
 use super::testing::{TempDir, window};
+use crate::blind_test::Side;
 use crate::plugin_scan::PLUGINS_FILE;
 use crate::settings::{SETTINGS_FILE, Settings};
 
@@ -1439,4 +1440,127 @@ fn agents_measure_a_devices_response() {
             .is_err_and(|why| why.contains("level_dbfs")),
         "{refused:?}"
     );
+}
+
+#[test]
+fn agents_make_a_blind_test_and_the_user_judges_it() {
+    let dir = TempDir::new("agents-blind-test");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let run = |window: &mut Window, id: &str, args: Json| {
+        agent.call(window, "run_command", json!({"id": id, "args": args}))
+    };
+    // Two pairs: a quiet and a loud second of a constant, each.
+    let mut files = Vec::new();
+    for (name, level) in [
+        ("live 1", 0.1),
+        ("ours 1", 0.2),
+        ("live 2", 0.3),
+        ("ours 2", 0.4),
+    ] {
+        let file = dir.0.join(format!("{name}.wav"));
+        let samples = vec![level; 48_000];
+        let format = musicable_io::audio::SampleFormat::Float32;
+        musicable_io::audio::save_wav(&file, 48_000, format, &[&samples]).unwrap();
+        files.push(file);
+    }
+    let folder = dir.0.join("Round");
+    let relative = run(
+        &mut window,
+        "debug.make_blind_test",
+        json!({"folder": "Round", "first": [files[0]], "second": [files[1]]}),
+    );
+    assert!(
+        relative
+            .as_ref()
+            .is_err_and(|why| why.contains("full path")),
+        "{relative:?}"
+    );
+    let made = run(
+        &mut window,
+        "debug.make_blind_test",
+        json!({
+            "folder": folder,
+            "first": [files[0], files[2]],
+            "second": [files[1], files[3]],
+            "first_name": "Live",
+            "second_name": "Musicable",
+            "name": "Levels",
+            "seed": 3,
+        }),
+    )
+    .unwrap();
+    assert_eq!(made["result"]["trials"], 2, "{made}");
+    let opened = run(
+        &mut window,
+        "debug.open_blind_test",
+        json!({"folder": folder}),
+    )
+    .unwrap();
+    assert_eq!(opened["result"]["judged"], 0, "{opened}");
+    window.run();
+    window.get_by_label("Trial 1 of 2");
+
+    // A plays, and B takes over where A was.
+    let level = |window: &mut Window| {
+        let played = window.state_mut().output.play_idle(256);
+        played[played.len() - 1]
+    };
+    window.get_by_label("Play A").click();
+    window.run();
+    let a = level(&mut window);
+    assert!(a > 0.0, "{a}");
+    let at = window.state().session.sound_at().unwrap();
+    assert!(at.frame >= 256, "{at:?}");
+    window.get_by_label("Play B").click();
+    window.run();
+    let b = level(&mut window);
+    assert!(b > 0.0 && b != a, "{a} {b}");
+    let later = window.state().session.sound_at().unwrap();
+    assert!(later.frame > at.frame, "{at:?} {later:?}");
+    // The transport's Stop comes first.
+    window.get_all_by_label("Stop").last().unwrap().click();
+    window.run();
+    level(&mut window);
+    assert_eq!(window.state().session.sound_at(), None);
+
+    // Each trial judged: X named, and the louder one better.
+    for trial in 0..2 {
+        let round = window.state().blind_test.round().unwrap().clone();
+        let samples = |side| {
+            let path = round.sound(trial, side).unwrap();
+            Decoder::open(&path).unwrap().read_all().unwrap()[0][0]
+        };
+        let (a, b, x) = (
+            samples(Some(Side::A)),
+            samples(Some(Side::B)),
+            samples(None),
+        );
+        let named = usize::from(x != a);
+        let better = if a > b { 0 } else { 2 };
+        assert_eq!(window.get_all_by_label("A").count(), 2);
+        let pick = |window: &mut Window, label: &str, index: usize| {
+            let node = window.get_all_by_label(label).nth(index).unwrap();
+            node.click();
+            window.run();
+        };
+        pick(&mut window, ["A", "B"][named], 0);
+        pick(
+            &mut window,
+            ["A", "Same", "B"][better],
+            usize::from(better != 1),
+        );
+        if trial == 0 {
+            window.get_by_label("Next").click();
+            window.run();
+        }
+    }
+    window.get_by_label("Unseal").click();
+    window.run();
+    let results: Json =
+        serde_json::from_str(&fs::read_to_string(folder.join("results.json")).unwrap()).unwrap();
+    assert_eq!(results["abx"]["correct"], 2, "{results:#}");
+    assert_eq!(results["preference"]["second"], 2, "{results:#}");
+    window.get_by_label_contains("X named right in 2 of 2");
 }

@@ -1259,6 +1259,21 @@ The signal has three parts, about 14 seconds in all:
 
 The status bar says how it went when you run it from the command palette.
 
+## Blind tests
+
+`crates/app/src/blind_test.rs` makes and keeps rounds of blind pairs, and
+`blind_test_window.rs` is the Blind Test window that plays them to be
+judged ([Blind tests](../manual/src/using/blind-tests.md) in the manual).
+A round is a folder: the trials' copies, `round.json` naming them, the
+key in `key.json`, the answers in `answers.json`, written as each is
+given, and once unsealed, `results.json`. The shuffle is SplitMix64 from
+a seed the key keeps, so a round can be made again. The window loads a
+trial's sounds whole and plays them as previews (`Session::play_sound`),
+with ids of its own, starting a sound where the last one was
+(`Preview::starting_at`) to switch at the same place. Results give the
+ABX score's binomial chance by guessing and a two-sided sign test of the
+preferences, leaving out Same.
+
 ## Settings and your keymap
 
 The app keeps its settings, the user's keymap, mouse map, themes, workspaces

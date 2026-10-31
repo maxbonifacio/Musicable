@@ -8,6 +8,8 @@ mod app;
 mod appearance_page;
 mod audio_files;
 mod audio_page;
+mod blind_test;
+mod blind_test_window;
 pub mod bridge_tools;
 mod command_log;
 pub mod export;

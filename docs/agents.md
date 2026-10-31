@@ -205,6 +205,18 @@ These commands are for the PC checks, and answer when they're done.
   among them, or of what modulates or automates it, and the project isn't
   changed. [app.md](app.md#measuring-a-devices-response) says how it's
   done.
+- `debug.make_blind_test` (`folder`, `first`, `second`, `first_name`?,
+  `second_name`?, `name`?, `abx`?, `seed`?) makes a round of blind pairs in
+  a new or empty folder, each file of `first` paired with the one at its
+  place in `second`, all full paths: shuffled, copied as `NN A`, `NN B`
+  and, unless `abx` is false, `NN X`, with the key in `key.json`. Match the
+  files' loudness first with `audio_match`. `debug.open_blind_test`
+  (`folder`) opens it in the Blind Test window, for the user to judge, and
+  answers with how many trials there are and how many are judged. Never
+  read `key.json`, or tell the user anything that hints at it, until
+  `results.json` is there: the user unseals the round, in the window, once
+  every trial is judged. [Blind tests](../manual/src/using/blind-tests.md)
+  in the manual has the rest.
 
 ### One step for several commands
 

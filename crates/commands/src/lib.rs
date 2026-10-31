@@ -435,6 +435,11 @@ pub enum Request {
     StopRecordingOutput,
     /// Measure a device's response, offline: see [`debug`].
     MeasureResponse(Probing),
+    /// Make a blind test: see [`debug::MAKE_BLIND_TEST`].
+    MakeBlindTest(BlindRound),
+    /// Open the blind test in this folder to be judged, or the one the
+    /// user picks.
+    OpenBlindTest(Option<PathBuf>),
     /// Clear the highest peak of every channel's meter.
     ClearPeaks,
     /// Give `command` these keys, everywhere or in a panel, in place of
@@ -467,6 +472,20 @@ pub struct ExportOptions {
     pub stems: Option<bool>,
     /// The tracks to write on their own: all of them without it.
     pub tracks: Option<Vec<TrackId>>,
+}
+
+/// The round of pairs [`debug::MAKE_BLIND_TEST`] makes: each file of
+/// `first` paired with the one at its place in `second`, in `folder`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlindRound {
+    pub folder: PathBuf,
+    pub first: Vec<PathBuf>,
+    pub second: Vec<PathBuf>,
+    pub first_name: String,
+    pub second_name: String,
+    pub name: String,
+    pub abx: bool,
+    pub seed: Option<u64>,
 }
 
 /// What [`debug::MEASURE_RESPONSE`] measures: `device`'s response, with

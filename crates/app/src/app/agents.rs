@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use musicable_commands::{Args, Editor, ExportOptions, Keymap, Registry, Request, Steps, arrange};
+use musicable_commands::{
+    Args, BlindRound, Editor, ExportOptions, Keymap, Registry, Request, Steps, arrange,
+};
 use musicable_engine::Lead;
 use musicable_mcp::pipe::Address;
 use musicable_mcp::{
@@ -20,6 +22,7 @@ use serde_json::json;
 
 use super::{App, with_extension};
 use crate::audio_files::clip_path;
+use crate::blind_test;
 use crate::export::{Report, Stage};
 use crate::renders::RenderCache;
 
@@ -296,6 +299,30 @@ impl App {
             )),
             Request::RecordOutput(file) => self.session.record_output(&file),
             Request::StopRecordingOutput => self.session.stop_recording_output(),
+            Request::MakeBlindTest(round) => match whole_paths(&round) {
+                Some(path) => Err(format!(
+                    "{} isn't a full path: give each file's full path, from the root of its \
+                     drive.",
+                    path.display()
+                )),
+                None => blind_test::make(&super::making(round)),
+            },
+            Request::OpenBlindTest(None) => Err("Give the round's folder.".into()),
+            Request::OpenBlindTest(Some(folder)) if !folder.is_absolute() => Err(format!(
+                "{} isn't a full path: give the folder's full path, from the root of its drive.",
+                folder.display()
+            )),
+            Request::OpenBlindTest(Some(folder)) => {
+                (self.blind_test.open(&folder, &mut self.session)).map(|round| {
+                    json!({
+                        "folder": folder,
+                        "name": round.file.name,
+                        "trials": round.file.trials.len(),
+                        "judged": round.judged_count(),
+                        "unsealed": round.results.is_some(),
+                    })
+                })
+            }
             Request::MeasureResponse(probing) => {
                 match self.measure_response(probing, ctx) {
                     Ok(()) => self.agents.measuring = Some(reply),
@@ -762,6 +789,8 @@ fn answers(request: &Request) -> bool {
             | Request::RecordOutput(_)
             | Request::StopRecordingOutput
             | Request::MeasureResponse(_)
+            | Request::MakeBlindTest(_)
+            | Request::OpenBlindTest(_)
     )
 }
 
@@ -782,6 +811,13 @@ fn relative_path(request: &Request) -> Option<&Path> {
         _ => Vec::new(),
     };
     paths.into_iter().find(|path| !path.is_absolute())
+}
+
+/// The first of a round's paths that isn't a full one, if there's one.
+fn whole_paths(round: &BlindRound) -> Option<&Path> {
+    let folder = std::iter::once(&round.folder);
+    let mut paths = folder.chain(&round.first).chain(&round.second);
+    paths.find(|path| !path.is_absolute()).map(PathBuf::as_path)
 }
 
 /// Answers `reply` with the file the project was saved to, or why it

@@ -242,7 +242,15 @@ const LAST_MENUS: [MenuSpec; 5] = [
         ],
     ),
     // Last, as it's for checking Musicable rather than making music.
-    ("Debug", "debug", &[Some(debug::STOP_RECORDING_OUTPUT)]),
+    (
+        "Debug",
+        "debug",
+        &[
+            Some(debug::STOP_RECORDING_OUTPUT),
+            None,
+            Some(debug::OPEN_BLIND_TEST),
+        ],
+    ),
 ];
 
 /// A menu of commands.
