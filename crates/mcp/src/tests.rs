@@ -322,6 +322,7 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_history",
             "get_performance",
             "get_status",
+            "wait_for",
             "get_messages",
             "get_settings",
             "get_plugins",
@@ -1211,6 +1212,7 @@ fn the_status_says_what_plays_and_whats_under_way() {
             "export": null,
             "scanning_plugins": false,
             "library": {"scanning": [], "reading": [], "finding_presets": false},
+            "revision": 0,
         })
     );
     rig.window.status = Status {
@@ -1237,6 +1239,7 @@ fn the_status_says_what_plays_and_whats_under_way() {
         scanning_folders: vec![("/Samples".into(), 120)],
         reading_folders: vec![("/Loops".into(), 7)],
         finding_presets: true,
+        revision: 12,
     };
     let status = rig.call("get_status", json!({})).unwrap();
     assert_eq!(
@@ -1259,6 +1262,7 @@ fn the_status_says_what_plays_and_whats_under_way() {
                 "reading": [{"folder": "/Loops", "left": 7}],
                 "finding_presets": true,
             },
+            "revision": 12,
         })
     );
     // Each piece of work alone keeps it busy.
@@ -1282,6 +1286,125 @@ fn the_status_says_what_plays_and_whats_under_way() {
         rig.call("get_status", json!({"track": 1})),
         Err("get_status takes no argument called track.".into())
     );
+}
+
+impl Rig {
+    /// Calls `wait_for` with `arguments`, answering the window's calls
+    /// meanwhile, and after `reads` status reads, changing its status with
+    /// `change`, as the work it waits for lands.
+    fn wait(
+        &mut self,
+        arguments: Json,
+        reads: usize,
+        change: impl FnOnce(&mut Status),
+    ) -> Result<Json, String> {
+        let Rig {
+            runtime,
+            client,
+            calls,
+            window,
+        } = self;
+        let mut read = 0;
+        let mut change = Some(change);
+        let result = call(runtime, client, "wait_for", arguments, || {
+            while let Ok(call) = calls.try_recv() {
+                read += 1;
+                if read == reads
+                    && let Some(change) = change.take()
+                {
+                    change(&mut window.status);
+                }
+                answer(call, window);
+            }
+        });
+        crate::tests::read(result)
+    }
+}
+
+#[test]
+fn agents_wait_for_what_lands_later() {
+    let mut rig = Rig::new(Project::new());
+    rig.window.status.analysing = vec!["Samples/kick.wav".into()];
+    let waited = rig
+        .wait(json!({"until": "analysed", "timeout": 5}), 4, |status| {
+            status.analysing.clear();
+        })
+        .unwrap();
+    assert_eq!(waited["met"], true, "{waited}");
+    assert_eq!(waited["status"]["analysing"], json!([]));
+    // It waited for the fourth read, a tenth of a second apart, and one
+    // more to be sure.
+    let seconds = waited["waited_seconds"].as_f64().unwrap();
+    assert!((0.3..2.0).contains(&seconds), "{waited}");
+
+    // The project changing, from the revision it's at, or one given.
+    rig.window.status.revision = 4;
+    let waited = rig
+        .wait(json!({"until": "changed", "timeout": 5}), 3, |status| {
+            status.revision = 5;
+        })
+        .unwrap();
+    assert_eq!(waited["met"], true, "{waited}");
+    assert_eq!(waited["status"]["revision"], 5);
+    let waited = (rig.wait(json!({"until": "changed", "since": 4}), 1, |_| {})).unwrap();
+    assert_eq!(waited["met"], true, "{waited}");
+
+    // Out of time, it says so, with the status.
+    rig.window.status.compiling = true;
+    let waited = (rig.wait(json!({"until": "rendered", "timeout": 0.3}), 1, |_| {})).unwrap();
+    assert_eq!(waited["met"], false, "{waited}");
+    assert_eq!(waited["status"]["compiling"], true);
+    assert!(
+        waited["waited_seconds"].as_f64().unwrap() >= 0.3,
+        "{waited}"
+    );
+    // With no time, it reads once.
+    let waited = (rig.wait(json!({"until": "stopped", "timeout": 0}), 1, |_| {})).unwrap();
+    assert_eq!(waited["met"], true, "{waited}");
+    assert_eq!(waited["waited_seconds"], 0.0);
+
+    assert_eq!(
+        rig.wait(json!({"until": "done"}), 1, |_| {}),
+        Err(
+            "until is one of idle, stopped, recorded, analysed, scanned, rendered, changed, \
+             answered, not done."
+                .into()
+        )
+    );
+}
+
+#[test]
+fn a_cancelled_wait_stops_reading() {
+    let mut rig = Rig::new(Project::new());
+    rig.window.status.compiling = true;
+    let Json::Object(arguments) = json!({"until": "rendered", "timeout": 30}) else {
+        unreachable!();
+    };
+    let request = CallToolRequestParams::new("wait_for").with_arguments(arguments);
+    let peer = rig.client.peer().clone();
+    let call = rig
+        .runtime
+        .spawn(async move { peer.call_tool(request).await });
+    // Answers the window's reads for `for_ms`, and says how many there were.
+    let pump = |rig: &mut Rig, for_ms: u64| {
+        let mut reads = 0;
+        let until = std::time::Instant::now() + Duration::from_millis(for_ms);
+        while std::time::Instant::now() < until {
+            while let Ok(call) = rig.calls.try_recv() {
+                reads += 1;
+                answer(call, &mut rig.window);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        reads
+    };
+    let reads = pump(&mut rig, 500);
+    assert!(reads >= 3, "the wait read the status {reads} times");
+    // Dropping the call cancels it, as an agent's client does.
+    call.abort();
+    pump(&mut rig, 300);
+    let after = pump(&mut rig, 500);
+    assert_eq!(after, 0, "the wait went on reading after it was cancelled");
 }
 
 #[test]

@@ -25,6 +25,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::{Map, Value as Json, json};
 
+use crate::waiting::{self, Until};
 use crate::{Asked, Call, Reply, Run, reads};
 
 pub const LIST_COMMANDS: &str = "list_commands";
@@ -46,6 +47,7 @@ pub const LIST_AUDIO_DEVICES: &str = "list_audio_devices";
 pub const GET_PLUGINS: &str = "get_plugins";
 pub const GET_LAYOUT: &str = "get_layout";
 pub const GET_LEVELS: &str = "get_levels";
+pub const WAIT_FOR: &str = "wait_for";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -287,8 +289,46 @@ pub fn list() -> Vec<Tool> {
              that lands later, with nothing to wait on: audio files being analysed, segments \
              still to render, a graph compiling, an export, with how much of it is done, and \
              the plugins' and the library's scans. idle is true once none of that work is \
-             under way, so an agent can call it again until then.",
+             under way, and wait_for waits until then. revision goes up with every change to \
+             the project.",
             object(json!({}), &[]),
+        ),
+        read(
+            WAIT_FOR,
+            "Wait For",
+            "Waits until what lands later has, then answers with met, true, the seconds it \
+             waited, and the status as get_status reads it. until says what for: idle, no work \
+             under way, as get_status's idle says; stopped, the transport not playing; \
+             recorded, the takes in the project after Stop; analysed, no audio file being \
+             analysed; scanned, no plugin scan and no library scan, file reading or presets \
+             search; rendered, no segment left to render and no graph compiling; changed, the \
+             project changed since the revision since, from get_status, or since the wait \
+             began, as when the user edits it; answered, no question waiting for the user. \
+             After timeout seconds, it answers with met false. Cancelling the call stops the \
+             wait.",
+            object(
+                json!({
+                    "until": {
+                        "type": "string",
+                        "enum": Until::names(),
+                        "description": "What to wait for.",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 600,
+                        "description": "The most seconds to wait: 60 unless it says. With 0, \
+                                        it reads the status once.",
+                    },
+                    "since": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "With changed, the revision the project should move on \
+                                        from, as get_status gave it.",
+                    },
+                }),
+                &["until"],
+            ),
         ),
         tool(
             GET_MESSAGES,
@@ -653,6 +693,13 @@ impl ServerHandler for Tools {
     ) -> Result<CallToolResponse, ErrorData> {
         let agent = self.agent(&context);
         let arguments = request.arguments.unwrap_or_default();
+        if request.name == WAIT_FOR {
+            let result = match waiting::wait(&arguments) {
+                Ok(wait) => self.wait_for(&agent, wait, &context).await,
+                Err(why) => failed(why),
+            };
+            return Ok(result.into());
+        }
         let asked = match asked(&request.name, &arguments, &self.link.commands) {
             Ok(asked) => asked,
             Err(Refused::NoTool(name)) => {
@@ -661,20 +708,30 @@ impl ServerHandler for Tools {
             }
             Err(Refused::Arguments(why)) => return Ok(failed(why).into()),
         };
-        let (reply, answer) = Reply::new(agent);
-        if self.link.calls.send(Call { asked, reply }).is_err() {
-            return Ok(failed("Musicable has stopped letting agents control it.").into());
-        }
-        (self.link.wake)();
-        let result = match answer.await {
-            Ok(Ok(json)) => CallToolResult::success(vec![ContentBlock::text(json.to_string())]),
-            Ok(Err(why)) => failed(why),
-            Err(_) => failed(
-                "Musicable stopped letting agents control it before it answered: \
-                 get_history says whether the change was made.",
-            ),
+        let result = match self.ask(&agent, asked).await {
+            Ok(json) => CallToolResult::success(vec![ContentBlock::text(json.to_string())]),
+            Err(why) => failed(why),
         };
         Ok(result.into())
+    }
+}
+
+impl Tools {
+    /// Asks the window `asked` for `agent`, and waits for its answer.
+    pub(crate) async fn ask(&self, agent: &str, asked: Asked) -> Result<Json, String> {
+        let (reply, answer) = Reply::new(agent.to_owned());
+        if self.link.calls.send(Call { asked, reply }).is_err() {
+            return Err("Musicable has stopped letting agents control it.".into());
+        }
+        (self.link.wake)();
+        match answer.await {
+            Ok(answer) => answer,
+            Err(_) => Err(
+                "Musicable stopped letting agents control it before it answered: \
+                           get_history says whether the change was made."
+                    .into(),
+            ),
+        }
     }
 }
 
@@ -837,7 +894,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 20);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

@@ -1075,6 +1075,7 @@ pub(crate) fn status(window: &impl Window) -> Json {
             "reading": folders(&status.reading_folders, "left"),
             "finding_presets": status.finding_presets,
         },
+        "revision": status.revision,
     })
 }
 
