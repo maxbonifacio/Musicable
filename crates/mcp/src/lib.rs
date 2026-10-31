@@ -34,6 +34,7 @@ use serde_json::{Map, Value as Json};
 use tokio::sync::oneshot;
 
 pub mod bridge;
+mod hands;
 mod host;
 pub mod local;
 pub mod pipe;
@@ -43,6 +44,7 @@ mod tests;
 pub mod tools;
 mod waiting;
 
+pub use hands::{Button, Hands, Step, Target, Watch};
 pub use host::Host;
 pub use reads::catalogue;
 
@@ -98,6 +100,8 @@ enum Asked {
     Screenshot(Shot),
     /// What's in a window, as a screen reader reads it.
     UiTree(Tree),
+    /// The mouse and keys, used in a window.
+    Hands(Hands),
     /// The messages the window shows the user, and whether to clear them
     /// once read.
     Messages {
@@ -483,6 +487,12 @@ pub trait Window {
         reply.failed("This window can't read what's in it.");
     }
 
+    /// Does what `hands` says with the mouse and keys in a window, and
+    /// answers `reply` once it's done, or the user took over.
+    fn use_mouse_and_keys(&mut self, _hands: Hands, reply: Reply) {
+        reply.failed("This window can't be used with the mouse and keys.");
+    }
+
     /// The settings, as the settings file has them, with the profile in
     /// use's, and what plays, as JSON.
     fn settings(&self) -> Json {
@@ -521,6 +531,7 @@ pub fn answer(call: Call, window: &mut impl Window) {
         Asked::Run(run) => return window.run(run, reply),
         Asked::Screenshot(shot) => return window.screenshot(shot, reply),
         Asked::UiTree(tree) => return window.ui_tree(tree, reply),
+        Asked::Hands(hands) => return window.use_mouse_and_keys(hands, reply),
         Asked::Windows => Ok(window.windows()),
         Asked::Commands(filter) => Ok(reads::commands(window, filter.as_deref())),
         Asked::Command(id) => reads::command(window, &id),

@@ -34,6 +34,9 @@ pub(crate) struct UiTrees {
     ending: Option<ViewportId>,
     /// Whether AccessKit is on because an agent asked.
     ours: bool,
+    /// How many others need AccessKit on, as an agent using the mouse and
+    /// keys does.
+    holders: usize,
 }
 
 /// An agent's ask, waiting for its window to be drawn.
@@ -51,21 +54,10 @@ struct Waiting {
 /// Reads what `ask` says of the window `viewport` as it's next drawn, and
 /// answers `reply` with it.
 pub(crate) fn read(ctx: &egui::Context, viewport: ViewportId, ask: Ask, reply: Reply) {
-    // A screen reader may have AccessKit on already, which stays on.
-    let on = ctx.has_accesskit_node(egui::accesskit_root_id());
-    // Where egui draws the windows of their own inside the main window,
-    // as in tests, it reads them in the main window's tree.
-    let viewport = if ctx.embed_viewports() {
-        ViewportId::ROOT
-    } else {
-        viewport
-    };
+    let viewport = drawn_in(ctx, viewport);
     let trees = ctx.plugin_or_default::<UiTrees>();
     let mut trees = trees.lock();
-    if !on {
-        ctx.enable_accesskit();
-        trees.ours = true;
-    }
+    trees.turn_on(ctx);
     trees.waiting.push(Waiting {
         viewport,
         began: false,
@@ -74,6 +66,49 @@ pub(crate) fn read(ctx: &egui::Context, viewport: ViewportId, ask: Ask, reply: R
         reply,
     });
     ctx.request_repaint_of(viewport);
+}
+
+/// The window egui draws `viewport` in: itself, or the main window where
+/// egui draws the windows of their own inside it, as in tests.
+pub(crate) fn drawn_in(ctx: &egui::Context, viewport: ViewportId) -> ViewportId {
+    if ctx.embed_viewports() {
+        ViewportId::ROOT
+    } else {
+        viewport
+    }
+}
+
+/// Keeps AccessKit on while `on`, from then until it's called again
+/// without, for what reads the trees as each frame is drawn.
+pub(crate) fn hold(ctx: &egui::Context, on: bool) {
+    let trees = ctx.plugin_or_default::<UiTrees>();
+    let mut trees = trees.lock();
+    if on {
+        trees.holders += 1;
+        trees.turn_on(ctx);
+    } else {
+        trees.holders = trees.holders.saturating_sub(1);
+        trees.turn_off_if_unused(ctx);
+    }
+}
+
+impl UiTrees {
+    /// Turns AccessKit on, unless it is already, as when a screen reader
+    /// has it on, which leaves it on.
+    fn turn_on(&mut self, ctx: &egui::Context) {
+        if !ctx.has_accesskit_node(egui::accesskit_root_id()) && !self.ours {
+            ctx.enable_accesskit();
+            self.ours = true;
+        }
+    }
+
+    /// Turns AccessKit off once nothing needs it, if it turned it on.
+    fn turn_off_if_unused(&mut self, ctx: &egui::Context) {
+        if self.waiting.is_empty() && self.holders == 0 && self.ours {
+            ctx.disable_accesskit();
+            self.ours = false;
+        }
+    }
 }
 
 impl egui::Plugin for UiTrees {
@@ -113,16 +148,13 @@ impl egui::Plugin for UiTrees {
                 reply.done(answer(update, &ask));
             }
         }
-        if self.waiting.is_empty() && self.ours {
-            ctx.disable_accesskit();
-            self.ours = false;
-        }
+        self.turn_off_if_unused(ctx);
     }
 }
 
 /// What `ask` reads of the tree `update`: the window, the panel, the nodes
 /// it keeps, nested, and how many more it left out.
-fn answer(update: &TreeUpdate, ask: &Ask) -> Json {
+pub(crate) fn answer(update: &TreeUpdate, ask: &Ask) -> Json {
     let nodes: std::collections::HashMap<NodeId, &Node> =
         update.nodes.iter().map(|(id, node)| (*id, node)).collect();
     let root = update.tree.as_ref().map(|tree| tree.root);

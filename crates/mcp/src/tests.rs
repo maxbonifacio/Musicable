@@ -330,6 +330,7 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_windows",
             "get_screenshot",
             "get_ui_tree",
+            "use_mouse_and_keys",
             "get_levels",
             "get_command_log",
             "list_audio_devices",

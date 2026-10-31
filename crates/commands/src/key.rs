@@ -152,7 +152,8 @@ impl Modifiers {
         (Self::CMD, "Win"),
     ];
 
-    fn from_name(name: &str) -> Option<Modifiers> {
+    /// The modifier called `name`, such as `Ctrl`, `Control` or `ctrl`.
+    pub fn from_name(name: &str) -> Option<Modifiers> {
         Self::NAMES
             .iter()
             .chain(&Self::ALIASES)

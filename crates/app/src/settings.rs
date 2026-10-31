@@ -47,6 +47,7 @@
 //!
 //! [agents]
 //! enabled = true
+//! mouse_and_keys = false
 //!
 //! [plugins.kinds]
 //! "vst3:ABCDEF0123456789ABCDEF0123456789" = "midi_effect"
@@ -460,6 +461,10 @@ pub struct AgentSettings {
     /// Whether Musicable listens for agents, on a pipe only the user's
     /// account can open. Off until the user switches it on.
     pub enabled: bool,
+    /// Whether agents may use the mouse and keys in Musicable's windows,
+    /// as its input, never the system's pointer. Off until the user
+    /// switches it on, and agents can't.
+    pub mouse_and_keys: bool,
 }
 
 /// How Musicable records.
@@ -781,7 +786,10 @@ mod tests {
                 max_size_gb: 50,
                 min_free_gb: 10,
             },
-            agents: AgentSettings { enabled: true },
+            agents: AgentSettings {
+                enabled: true,
+                mouse_and_keys: true,
+            },
             plugins: PluginsSettings {
                 kinds: BTreeMap::from([(
                     "vst3:ABCDEF0123456789ABCDEF0123456789".to_owned(),

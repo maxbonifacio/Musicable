@@ -94,6 +94,15 @@ Other agents' apps start `musicable mcp` the same way. It passes their
 calls on to the Musicable that's running, and only your account on your
 computer can connect to it.
 
+**Let agents use the mouse and keys**, on the same page and off until you
+switch it on, lets agents click, drag, scroll, hover, press keys, type and
+drop files in Musicable's windows, to check what the mouse and keys do
+there. Their input goes into Musicable's, so your mouse pointer never
+moves, and the status bar says "Agent: using the mouse and keys" while
+they're at it. The moment you use the mouse or keys in Musicable, they
+stop, and wait until you've left it alone for a few seconds. Agents can't
+turn the switch on themselves.
+
 Agents can read what each device costs the CPU too, as the
 [Performance panel](../window/performance.md) lists it, to say which plugin
 to freeze or take out, and how far ahead of the audio device Musicable
