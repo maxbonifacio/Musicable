@@ -8,6 +8,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use musicable_commands::editor::PlayFrom;
@@ -791,4 +792,142 @@ fn the_command_log_says_what_the_user_and_agents_ran() {
     assert_eq!(lines.len() as u64, before + 3);
     assert_eq!(lines.last(), entries.last());
     assert!(Path::new(file).starts_with(dir.0.join("command logs")));
+}
+
+/// Answers the pictures the app asked egui for with a picture of `size`
+/// pixels, of one colour, as a frame drawn by the graphics card would,
+/// until `call` has its answer, which it gives back whole.
+fn take_pictures(
+    agent: &Agent,
+    window: &mut Window,
+    call: JoinHandle<Result<CallToolResult, ServiceError>>,
+    size: [usize; 2],
+) -> CallToolResult {
+    let started = Instant::now();
+    while !call.is_finished() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no picture");
+        window.step();
+        let asked = (window.output().viewport_output.values())
+            .flat_map(|viewport| &viewport.commands)
+            .filter_map(|command| match command {
+                egui::ViewportCommand::Screenshot(callback) => Some(callback.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for callback in asked {
+            let image = egui::ColorImage::filled(size, egui::Color32::from_rgb(10, 20, 30));
+            callback.complete(std::sync::Arc::new(image));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    window.run();
+    agent.runtime.block_on(call).unwrap().unwrap()
+}
+
+#[test]
+fn agents_list_the_windows_and_take_pictures_of_them() {
+    let dir = TempDir::new("agents-pictures");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let windows = agent.call(&mut window, "get_windows", json!({})).unwrap();
+    assert_eq!(windows["windows"][0]["window"], "main", "{windows}");
+    assert_eq!(
+        windows["windows"][0]["title"], "Untitled - Musicable",
+        "{windows}"
+    );
+    assert_eq!(windows["windows"].as_array().unwrap().len(), 1, "{windows}");
+    let in_sight = windows["windows"][0]["panels"].as_array().unwrap().clone();
+    assert!(in_sight.contains(&json!("arrangement")), "{windows}");
+    // Letting agents in left Settings open, a dialog over the main window.
+    assert_eq!(windows["dialogs"], json!(["Settings"]), "{windows}");
+
+    // The whole main window, saved to a file too.
+    let file = dir.0.join("main.png");
+    let shot = agent.start("get_screenshot", json!({"file": file}));
+    let result = take_pictures(&agent, &mut window, shot, [64, 48]);
+    let answer: Json = read(result.clone()).unwrap();
+    assert_eq!(
+        answer,
+        json!({"window": "main", "panel": null, "size": [64, 48], "file": file})
+    );
+    let image = result.content[1]
+        .as_image()
+        .expect("the picture is an image");
+    assert_eq!(image.mime_type, "image/png");
+    let png = fs::read(&file).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+
+    // A panel, cut out of its window.
+    let shot = agent.start("get_screenshot", json!({"panel": "arrangement"}));
+    let scale = window.ctx.pixels_per_point();
+    let size = (window.ctx.content_rect().size() * scale).round();
+    let size = [size.x as usize, size.y as usize];
+    let result = take_pictures(&agent, &mut window, shot, size);
+    let answer: Json = read(result).unwrap();
+    assert_eq!(answer["panel"], "arrangement", "{answer}");
+    let [width, height] = [
+        answer["size"][0].as_u64().unwrap(),
+        answer["size"][1].as_u64().unwrap(),
+    ];
+    assert!(width > 100 && width <= size[0] as u64, "{answer}");
+    assert!(height > 50 && height < size[1] as u64, "{answer}");
+
+    // What can't be taken.
+    let layout = agent.call(&mut window, "get_layout", json!({})).unwrap();
+    let panels = layout["panels"].as_array().unwrap();
+    let hidden = panels
+        .iter()
+        .find(|panel| panel["in_sight"] == false)
+        .unwrap();
+    let hidden = hidden["id"].as_str().unwrap();
+    let shot = agent.call(&mut window, "get_screenshot", json!({"panel": hidden}));
+    let why = shot.unwrap_err();
+    assert!(
+        why.starts_with(&format!("The panel {hidden} isn't in sight")),
+        "{why}"
+    );
+    let none = agent.call(&mut window, "get_screenshot", json!({"panel": "jukebox"}));
+    assert_eq!(
+        none,
+        Err("There's no panel jukebox: get_layout gives their ids.".to_owned())
+    );
+    let none = agent.call(&mut window, "get_screenshot", json!({"window": 2}));
+    assert_eq!(
+        none,
+        Err(
+            "There's no window 2: there are 0 windows of their own besides the main one."
+                .to_owned()
+        )
+    );
+    let both = agent.call(
+        &mut window,
+        "get_screenshot",
+        json!({"window": 1, "panel": "mixer"}),
+    );
+    assert!(
+        both.unwrap_err()
+            .starts_with("Give the window or the panel")
+    );
+    // A window of its own is listed, but egui takes no pictures of it, nor
+    // of the panels in it.
+    window
+        .state_mut()
+        .shell
+        .move_to_new_window("mixer")
+        .unwrap();
+    window.run();
+    let windows = agent.call(&mut window, "get_windows", json!({})).unwrap();
+    let own = &windows["windows"][1];
+    assert_eq!(own["window"], 1, "{windows}");
+    assert_eq!(own["title"], "Mixer - Untitled - Musicable", "{windows}");
+    assert_eq!(own["panels"], json!(["mixer"]), "{windows}");
+    for shot in [json!({"window": 1}), json!({"panel": "mixer"})] {
+        let refused = agent.call(&mut window, "get_screenshot", shot);
+        let why = refused.unwrap_err();
+        assert!(
+            why.starts_with("Musicable can't take pictures of the windows"),
+            "{why}"
+        );
+    }
 }

@@ -327,6 +327,8 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_settings",
             "get_plugins",
             "get_layout",
+            "get_windows",
+            "get_screenshot",
             "get_levels",
             "get_command_log",
             "list_audio_devices",

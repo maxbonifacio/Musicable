@@ -22,6 +22,8 @@ musicable-analysis = { path = "crates/analysis" }
 musicable-stretch = { path = "crates/stretch" }
 rtrb = "0.4"
 base64 = "0.22"
+# Encodes the pictures agents take of the windows.
+png = "0.18"
 # Decodes FLAC frames; finding them is ours (io::audio).
 claxon = "0.4"
 serde = { version = "1", features = ["derive"] }
