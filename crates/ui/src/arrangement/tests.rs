@@ -621,6 +621,22 @@ fn shift_dragging_a_warped_clip_s_edge_stretches_it() {
     assert_eq!(kick.start, Beats::ZERO);
     near(kick.end().to_f64(), 13.3);
     near(tempo(&harness, ids.kick), 120.0 * 13.3 / 8.0);
+    // Shift pressed part of the way through a trim stretches the clip from
+    // where its edge was, back onto the grid.
+    let to = pos2(x_of(&harness, 12.0) - 2.0, from.y);
+    let from = pos2(x_of(&harness, 13.3) - 2.0, from.y);
+    drag_pressing(&mut harness, from, to, Modifiers::NONE, shift);
+    let kick = clip(&harness, ids.kick).1;
+    assert_eq!(kick.range(), BeatRange::new(Beats::ZERO, Beats::new(12)));
+    near(tempo(&harness, ids.kick), 180.0);
+    // And letting go of it part of the way through a stretch trims it.
+    let rect = harness.get_by_label("Clip Line").rect();
+    let from = pos2(rect.right() - 2.0, rect.center().y);
+    let to = pos2(x_of(&harness, 22.0) - 2.0, from.y);
+    drag_pressing(&mut harness, from, to, shift, Modifiers::NONE);
+    let line = clip(&harness, ids.line).1;
+    assert_eq!(line.range(), BeatRange::new(Beats::new(14), Beats::new(22)));
+    assert!((tempo(&harness, ids.line) - 150.0).abs() < 1e-6);
     // A clip that isn't warped trims.
     let rect = harness.get_by_label("Clip Chords").rect();
     let from = pos2(rect.right() - 2.0, rect.center().y);

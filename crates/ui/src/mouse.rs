@@ -748,9 +748,7 @@ impl MouseAction {
 
     /// The drag it's a version of, on the grid and moving rather than
     /// copying: Move for Copy and Move off the grid, Trim for Trim off the
-    /// grid, and so on, and itself for the rest. Modifiers pressed or let go
-    /// part of the way through a drag switch it between versions
-    /// ([`MouseMap::during`]), but not to another drag.
+    /// grid, and so on, and itself for the rest.
     pub const fn plain(self) -> MouseAction {
         use MouseAction as A;
         match self {
@@ -761,6 +759,18 @@ impl MouseAction {
             A::DrawFree => A::Draw,
             A::MoveMarkerFree => A::MoveMarker,
             action => action,
+        }
+    }
+
+    /// The drags it switches between part of the way through, as modifiers
+    /// are pressed or let go ([`MouseMap::during`]): its versions
+    /// ([`plain`](Self::plain)), and for a clip's edge trimming and
+    /// stretching, as Shift switches them. It's the plain drag for the
+    /// rest, and Trim for those.
+    pub const fn family(self) -> MouseAction {
+        match self {
+            MouseAction::Stretch => MouseAction::Trim,
+            action => action.plain(),
         }
     }
 
@@ -895,13 +905,14 @@ impl MouseMap {
     /// grid.
     ///
     /// The modifiers count as if the drag started with them held: when
-    /// they're bound to a version of the same drag there
-    /// ([`MouseAction::plain`]), such as copying rather than moving, or
-    /// trimming off the grid, the drag does that from then on, and letting
-    /// go of them goes back to what it does without them. Modifiers held
-    /// together that aren't bound together there count one by one, so Ctrl
-    /// and Alt copy clips off the grid, and those bound to another drag,
-    /// such as Shift on a clip's edge, which stretches it, change nothing.
+    /// they're bound to a drag of the same family there
+    /// ([`MouseAction::family`]), such as copying rather than moving,
+    /// trimming off the grid, or stretching a clip's edge rather than
+    /// trimming it, the drag does that from then on, and letting go of them
+    /// goes back to what it does without them. Modifiers held together that
+    /// aren't bound together there count one by one, so Ctrl and Alt copy
+    /// clips off the grid, and those bound to another drag, such as Alt on
+    /// a note, which changes its velocity, change nothing.
     ///
     /// A drag that snaps with no version off the grid there, such as moving
     /// notes, whose Alt-drag changes their velocity, or the loop, keeps off
@@ -914,13 +925,14 @@ impl MouseMap {
         action: MouseAction,
         mods: Modifiers,
     ) -> (MouseAction, bool) {
-        let plain = action.plain();
+        let family = action.family();
         let drags = |on: Target| {
             (self.iter()).filter(move |&(at, gesture, ..)| at == on && gesture == Gesture::Drag)
         };
-        // The version of the drag `mods` give there, if they give one.
-        let version =
-            |mods| (self.bound(target, Gesture::Drag, mods)).filter(|bound| bound.plain() == plain);
+        // The drag of the family `mods` give there, if they give one.
+        let version = |mods| {
+            (self.bound(target, Gesture::Drag, mods)).filter(|bound| bound.family() == family)
+        };
         let held = |some: Modifiers| (some | mods) == mods;
         let given: Vec<MouseAction> = match version(mods) {
             Some(version) => vec![version],
@@ -928,24 +940,25 @@ impl MouseMap {
                 .filter_map(version)
                 .collect(),
         };
+        // Copying or stretching over keeping off the grid, so Ctrl and Alt
+        // copy off the grid, and Shift and Alt stretch off it.
+        let action = (given.iter().copied())
+            .find(|&version| version != family && !version.off_grid())
+            .or_else(|| (given.iter().copied()).find(|version| version.off_grid()))
+            .or_else(|| given.first().copied())
+            .or_else(|| version(Modifiers::NONE))
+            .unwrap_or(family);
+        let plain = action.plain();
         let off_grid_there =
             drags(target).any(|(.., bound)| bound.plain() == plain && bound.off_grid());
         let off_grid_as_clips = drags(Target::ClipTitle).any(|(_, _, grid, bound)| {
             bound == MouseAction::MoveFree
                 && grid != Modifiers::NONE
                 && held(grid)
-                && version(grid).is_none_or(|version| version == plain)
+                && version(grid).is_none_or(|version| version == plain || version.off_grid())
         });
         let free = given.iter().any(|version| version.off_grid())
             || (action.snaps() && !off_grid_there && off_grid_as_clips);
-        let action = match given.contains(&MouseAction::Copy) {
-            true => MouseAction::Copy,
-            false => (given.iter().copied())
-                .find(|version| version.off_grid())
-                .or_else(|| given.first().copied())
-                .or_else(|| version(Modifiers::NONE))
-                .unwrap_or(plain),
-        };
         (action, free)
     }
 
@@ -1230,15 +1243,15 @@ mod tests {
             assert_eq!(title(ctrl | alt), (A::Copy, true));
             assert_eq!(title(shift | alt), (A::MoveFree, true));
         }
-        // Shift stretches a clip's edge, which is another drag, so it
-        // leaves a trim as it is, and letting go of it leaves a stretch.
+        // Shift switches a clip's edge between trimming and stretching,
+        // and Alt keeps either off the grid.
         let edge = |action, mods| during(Target::ClipEdge, action, mods);
-        assert_eq!(edge(A::Trim, alt), (A::TrimFree, true));
-        assert_eq!(edge(A::TrimFree, none), (A::Trim, false));
-        assert_eq!(edge(A::Trim, shift), (A::Trim, false));
-        assert_eq!(edge(A::Stretch, none), (A::Stretch, false));
-        // A stretch has no version off the grid, so Alt takes it off.
-        assert_eq!(edge(A::Stretch, shift | alt), (A::Stretch, true));
+        for started in [A::Trim, A::TrimFree, A::Stretch] {
+            assert_eq!(edge(started, none), (A::Trim, false));
+            assert_eq!(edge(started, alt), (A::TrimFree, true));
+            assert_eq!(edge(started, shift), (A::Stretch, false));
+            assert_eq!(edge(started, shift | alt), (A::Stretch, true));
+        }
         // So do moving notes, whose Alt-drag changes their velocity, the
         // loop and locators.
         assert_eq!(during(Target::Note, A::Move, alt), (A::Move, true));
@@ -1279,6 +1292,12 @@ mod tests {
             map.during(Target::ClipEdge, A::Trim, alt),
             (A::TrimFree, true)
         );
+        // With Shift and Alt bound together to stretching, Alt still keeps
+        // a stretch off the grid, as it trims off it.
+        let mut map = MouseMap::live();
+        map.bind(Target::ClipEdge, Gesture::Drag, shift | alt, A::Stretch);
+        let stretch = map.during(Target::ClipEdge, A::Trim, shift | alt);
+        assert_eq!(stretch, (A::Stretch, true));
     }
 
     #[test]

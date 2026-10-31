@@ -30,13 +30,14 @@ say what the gestures do at first.
 
 A drag starts as its gesture does with the modifiers held then. Pressing
 or letting go of modifiers part of the way through changes it from there
-on, when what they're bound to is the same drag, on the grid or off it, or
-copying rather than moving: so at first, Alt keeps a drag off the grid
-and Ctrl copies clips and notes, while they're held. Modifiers held
-together that have no binding together there count one by one, so Ctrl
-and Alt copy off the grid. Those bound to another drag, such as Shift on
-a clip's edge, which stretches it rather than trimming it, change nothing
-until the next drag.
+on, when what they're bound to is the same drag, on the grid or off it,
+copying rather than moving, or stretching a clip's edge rather than
+trimming it: so at first, Alt keeps a drag off the grid, Ctrl copies
+clips and notes, and Shift stretches a clip's edge, while they're held.
+Modifiers held together that have no binding together there count one by
+one, so Ctrl and Alt copy off the grid, and Shift and Alt stretch off it.
+Those bound to another drag, such as Alt on a note, which changes its
+velocity rather than moving it, change nothing until the next drag.
 
 A drag that snaps to the grid with no version off it of its own there,
 such as moving notes, whose Alt-drag changes their velocity, the loop, a
