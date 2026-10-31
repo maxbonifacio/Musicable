@@ -114,11 +114,16 @@ where Musicable was started from, and skip the dialogs:
 - `file.import_audio` (`files`, `track`?, `at`?) puts audio files on a
   track, all of them or none if one can't be read, and gives back the
   clips, as one step.
-- `file.export_audio` (`file`) renders the mix to the file, with the
-  export window's last settings and the format the file's extension says,
-  `wav`, `aiff` or `flac`, from what the window starts out with: the time
-  selection, or else the song. The call waits for the export, and gives
-  back the file; your export settings stay as they were.
+- `file.export_audio` (`file`, `range`?, `bits`?, `sample_rate`?,
+  `dither`?, `normalize`?, `tail`?, `mix`?, `stems`?, `tracks`?) renders
+  the song to the file, in the format its extension says, `wav`, `aiff` or
+  `flac`, over the `range`, `song`, `loop` or `selection`, or else what the
+  window starts out with: the time selection, or else the song. What the
+  other arguments leave out is as the export window last had it. It writes
+  the mix unless `mix` is false, and with `stems`, each of `tracks`, or of
+  all the tracks, on its own, next to the file, named after it. The call
+  waits for the export, and gives back the files; your export settings
+  stay as they were.
 
 ### Settings
 
@@ -145,10 +150,23 @@ status bar says an agent changed it, as for its other commands.
   the device won't open, the one before plays on, and the call fails saying
   why. An ASIO driver's buffer is set in its own panel.
 - `transport.reset_dropouts` counts dropouts from zero again, as clicking
-  **Dropouts** does.
+  **Dropouts** does, and `mixer.clear_peaks` clears every channel's highest
+  peak, as clicking one does.
+- `options.set_keys` (`command`, `keys`) gives a command its keys in place
+  of the ones it has, as the Keys page does, and saves them to the keymap
+  file: each as `list_commands` gives them, such as `Ctrl+Shift+M`, or
+  `Delete in arrangement` for one that works only while that panel has the
+  focus. A key another command has in the same place is taken from it.
+  `options.reset_keys` (`command`) gives it its default keys again. Both
+  answer with the `command`, its keys as they `was` and are `now`, and the
+  keys `taken`, each with the command it was taken `from`.
+- `workspace.save_as` (`name`) keeps the panels' layout as a new workspace,
+  and `workspace.rename` (`name`) renames the one in use, as the dialogs
+  you'd be asked in do. They answer with the `workspace`.
 
 The code is in
-[`crates/app/src/app/changing_settings.rs`](../crates/app/src/app/changing_settings.rs).
+[`crates/app/src/app/changing_settings.rs`](../crates/app/src/app/changing_settings.rs)
+and [`changing_keys.rs`](../crates/app/src/app/changing_keys.rs).
 
 ### One step for several commands
 

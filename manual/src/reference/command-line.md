@@ -113,8 +113,15 @@ size and [Render Ahead](../getting-started/audio.md#render-ahead), with the
 commands Change Setting, Set Audio Device and Set Render Ahead. Changing a
 setting isn't a step in the undo history, so the status bar says when an
 agent did, and the agent hears what the setting was, to put it back when
-it's done. Agents can't change the theme, your workspaces or profiles, or
+it's done. They can change a command's keys too, with Set Keys and Reset
+Keys, as the [Keys page](../customising/keys.md) does, save the layout as a
+new workspace, or rename the one in use, by the name they give. Agents
+can't change the theme or your profiles, delete a workspace, or change
 whether they're let in.
+
+When they export, they can say the range, bits, sample rate, dither,
+normalizing, tail, and which stems to write, as the export window does;
+your export settings stay as they were.
 
 They can also read the plugins the browser lists, to add one by its id;
 whether a plugin device's plugin loaded, or why not, and whether its window

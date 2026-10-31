@@ -15,8 +15,8 @@ use musicable_model::{
 };
 
 use crate::{
-    Args, Command, CommandError, CommandId, Document, Loop, Param, Registry, Transaction, Type,
-    Value, track, wire,
+    Args, Command, CommandError, CommandId, Document, Loop, Param, Registry, Request, Transaction,
+    Type, Value, track, wire,
 };
 
 /// Sets a track's fader.
@@ -55,6 +55,9 @@ pub const SET_MASTER_CLIP_TYPE: CommandId = CommandId::new("mixer.set_master_cli
 /// Sets the instrument a MIDI track's notes play on another track, and
 /// the channel: its MIDI To.
 pub const SET_MIDI_TO: CommandId = CommandId::new("mixer.set_midi_to");
+/// Clears the highest peak of every channel's meter, as clicking a meter's
+/// peak does.
+pub const CLEAR_PEAKS: CommandId = CommandId::new("mixer.clear_peaks");
 
 const TRACK: Param = Param::required("track", Type::Track, "The track.");
 const TO: Param = Param::required("to", Type::Track, "The return track the send goes to.");
@@ -356,6 +359,10 @@ fn check_midi_to(project: &Project, track: TrackId, device: DeviceId) -> Result<
 
 /// Registers the mixer's commands.
 pub fn register(registry: &mut Registry) {
+    crate::register_requests(
+        registry,
+        &[(CLEAR_PEAKS, "Clear Peaks", Request::ClearPeaks)],
+    );
     for (id, title, params, build) in COMMANDS {
         registry.add(
             Command::new(id, title).with_params(params),

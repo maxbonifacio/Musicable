@@ -763,6 +763,22 @@ fn examples() -> Vec<Example> {
         leaves(file::EXPORT_AUDIO, |_| {
             Some(Args::new().with("file", "/exports/Song.wav"))
         }),
+        leaves(file::EXPORT_AUDIO, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(
+                Args::new()
+                    .with("file", "/exports/Song.flac")
+                    .with("range", "loop")
+                    .with("bits", 16_i64)
+                    .with("sample_rate", 44_100_i64)
+                    .with("dither", false)
+                    .with("normalize", true)
+                    .with("tail", false)
+                    .with("mix", false)
+                    .with("stems", true)
+                    .with("tracks", vec![track]),
+            )
+        }),
         leaves(file::IMPORT_AUDIO, bare),
         leaves(file::IMPORT_AUDIO, |s| {
             let track = find_track(s, |t| t.kind == TrackKind::Audio)?.id;
@@ -1367,6 +1383,16 @@ fn examples() -> Vec<Example> {
         leaves(options::SET_RENDER_AHEAD, |_| {
             Some(Args::new().with("render_ahead", "long"))
         }),
+        leaves(options::SET_KEYS, |_| {
+            Some(
+                Args::new()
+                    .with("command", "transport.play_stop")
+                    .with("keys", vec!["Ctrl+Shift+Space", "Enter in arrangement"]),
+            )
+        }),
+        leaves(options::RESET_KEYS, |_| {
+            Some(Args::new().with("command", "transport.play_stop"))
+        }),
         edits(take::COMP, |s| {
             let take = find_take(s, |_| true)?;
             let clip = pick(s, take.clips.iter())?;
@@ -1452,6 +1478,7 @@ fn examples() -> Vec<Example> {
         }),
         leaves(transport::CAPTURE, bare),
         leaves(transport::RESET_DROPOUTS, bare),
+        leaves(mixer::CLEAR_PEAKS, bare),
         leaves(transport::GO_TO_START, bare),
         leaves(transport::LOCATE, |_| {
             Some(Args::new().with("at", Beats::new(8)))
@@ -1873,8 +1900,14 @@ fn examples() -> Vec<Example> {
         }),
         leaves(workspace::DELETE, bare),
         leaves(workspace::RENAME, bare),
+        leaves(workspace::RENAME, |_| {
+            Some(Args::new().with("name", "Tracking"))
+        }),
         leaves(workspace::RESET, bare),
         leaves(workspace::SAVE_AS, bare),
+        leaves(workspace::SAVE_AS, |_| {
+            Some(Args::new().with("name", "Mixing"))
+        }),
     ];
     examples.extend(switches);
     examples

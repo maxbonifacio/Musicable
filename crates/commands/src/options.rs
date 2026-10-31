@@ -6,7 +6,10 @@
 //! the app's, so these ask the app, with a [`Request`]. Agents can't see the
 //! Settings window, so the commands that show it are the user's.
 
-use crate::{AudioDevice, Command, CommandError, CommandId, Param, Registry, Request, Type, Value};
+use crate::{
+    AudioDevice, Command, CommandError, CommandId, KeyChord, Param, Registry, Request, Scope, Type,
+    Value,
+};
 
 /// Shows the Settings window, at the page it showed last.
 pub const SETTINGS: CommandId = CommandId::new("options.settings");
@@ -41,6 +44,11 @@ pub const SET_RENDER_AHEAD: CommandId = CommandId::new("options.set_render_ahead
 /// Plays through another audio device, or through the same one with
 /// another buffer size, sample rate or mode.
 pub const SET_AUDIO_DEVICE: CommandId = CommandId::new("options.set_audio_device");
+/// Gives a command the keys it's given, everywhere or in a panel, in place
+/// of the ones it has, as the Keys page does.
+pub const SET_KEYS: CommandId = CommandId::new("options.set_keys");
+/// Gives a command its default keys again, as the Keys page's Reset does.
+pub const RESET_KEYS: CommandId = CommandId::new("options.reset_keys");
 
 /// Render Ahead's settings, as the settings file names them.
 pub const RENDER_AHEAD: &[&str] = &["off", "short", "normal", "long"];
@@ -171,6 +179,65 @@ pub fn register(registry: &mut Registry) {
             Ok(Value::None)
         },
     );
+    const COMMAND: Param = Param::required(
+        "command",
+        Type::Text,
+        "The command's id, such as transport.play_stop.",
+    );
+    registry.add(
+        Command::new(SET_KEYS, "Set Keys")
+            .with_params(&[
+                COMMAND,
+                Param::required(
+                    "keys",
+                    Type::List(&Type::Text),
+                    "Its keys, as list_commands gives them: such as \"Ctrl+Shift+M\", or \
+                     \"Delete in arrangement\" for a key that works only while that panel has \
+                     the focus. None leaves it without keys. A key another command has in \
+                     the same place is taken from it.",
+                ),
+            ])
+            .alone(),
+        |ctx, args| {
+            let command = CommandId::from(args.get::<String>("command")?);
+            let keys = (args.get::<Vec<String>>("keys")?.iter())
+                .map(|key| place_of(key))
+                .collect::<Result<_, _>>()?;
+            ctx.requests.push(Request::SetKeys { command, keys });
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(RESET_KEYS, "Reset Keys")
+            .with_params(&[COMMAND])
+            .alone(),
+        |ctx, args| {
+            let command = CommandId::from(args.get::<String>("command")?);
+            ctx.requests.push(Request::ResetKeys(command));
+            Ok(Value::None)
+        },
+    );
+}
+
+/// A key as [`SET_KEYS`] takes it, and where it works: "Ctrl+M", or
+/// "Delete in arrangement" in a panel.
+fn place_of(key: &str) -> Result<(Scope, KeyChord), CommandError> {
+    let (chord, scope) = match key.rsplit_once(" in ") {
+        Some((chord, panel)) => {
+            let scope = Scope::panel(panel.trim()).ok_or_else(|| {
+                CommandError::invalid(format!(
+                    "there's no panel called {}: it's one of {}",
+                    panel.trim(),
+                    crate::panel::ALL.join(", ")
+                ))
+            })?;
+            (chord, scope)
+        }
+        None => (key, Scope::Everywhere),
+    };
+    let chord = (chord.trim().parse::<KeyChord>())
+        .map_err(|error| CommandError::invalid(format!("{key} isn't a key: {error}")))?;
+    Ok((scope, chord))
 }
 
 #[cfg(test)]
@@ -238,6 +305,56 @@ mod tests {
         assert!(chords(AUDIO_SETTINGS).is_empty());
         assert_eq!(chords(KEYBOARD_SHORTCUTS), ["Ctrl+K"]);
         assert_eq!(chords(view::COMMAND_PALETTE), ["Ctrl+Shift+P"]);
+    }
+
+    #[test]
+    fn keys_change_through_the_app() {
+        let mut registry = Registry::new();
+        register(&mut registry);
+        let mut document = Document::new(Project::new());
+        let mut requests = Vec::new();
+        let mut run = |id: &CommandId, args: crate::Args| {
+            let mut ctx = Context {
+                document: &mut document,
+                transport: &mut StubTransport::default(),
+                requests: &mut requests,
+                library: &mut crate::NoLibrary,
+            };
+            registry.run_with(id, &args, &mut ctx)
+        };
+        let args = |keys: &[&str]| {
+            let keys: Vec<String> = keys.iter().map(|key| key.to_string()).collect();
+            crate::Args::new()
+                .with("command", "transport.play_stop")
+                .with("keys", keys)
+        };
+        run(&SET_KEYS, args(&["Ctrl+Shift+M", "Delete in arrangement"])).unwrap();
+        run(&SET_KEYS, args(&[])).unwrap();
+        let reset = crate::Args::new().with("command", "transport.play_stop");
+        run(&RESET_KEYS, reset).unwrap();
+        let why = run(&SET_KEYS, args(&["Ctrl+Nope"])).unwrap_err();
+        assert!(why.to_string().contains("Ctrl+Nope isn't a key"), "{why}");
+        let why = run(&SET_KEYS, args(&["M in nowhere"])).unwrap_err();
+        assert!(why.to_string().contains("no panel called nowhere"), "{why}");
+        let play_stop = CommandId::from("transport.play_stop");
+        let arrangement = Scope::panel("arrangement").unwrap();
+        assert_eq!(
+            requests,
+            [
+                Request::SetKeys {
+                    command: play_stop.clone(),
+                    keys: vec![
+                        (Scope::Everywhere, "Ctrl+Shift+M".parse().unwrap()),
+                        (arrangement, "Delete".parse().unwrap()),
+                    ],
+                },
+                Request::SetKeys {
+                    command: play_stop.clone(),
+                    keys: Vec::new(),
+                },
+                Request::ResetKeys(play_stop),
+            ]
+        );
     }
 
     #[test]

@@ -38,7 +38,8 @@ From the top, a strip has these parts, which can be hidden and moved
 - **The fader**, from silence to +6 dB, beside the meter and its scale.
 - **The gain** in dB, to drag or type into, and **the highest peak** since
   the peaks were cleared, red once the channel has gone over full scale.
-  Clicking a peak clears every channel's.
+  Clicking a peak clears every channel's, as **Transport > Clear Peaks**
+  does.
 - **M, S and the arm button**: mute, solo, and arm for recording, which
   audio and MIDI tracks have. Clicking S solos that track alone, as in Live;
   Ctrl-click solos it along with the others.

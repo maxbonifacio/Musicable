@@ -147,8 +147,10 @@
 
 | Command | Id |
 |---|---|
+| Reset Keys | `options.reset_keys` |
 | Change Setting | `options.set` |
 | Set Audio Device | `options.set_audio_device` |
+| Set Keys | `options.set_keys` |
 | Set Render Ahead | `options.set_render_ahead` |
 
 ### Take
