@@ -1469,6 +1469,7 @@ impl App {
             }
             Asked::DefaultPresetsFolder => self.set_presets_folder(None),
             Asked::Agents(on) => self.let_agents_in(on, ctx),
+            Asked::AgentsMouseAndKeys(on) => self.let_agents_use_hands(on, ctx),
             Asked::OpenWorkspacesFolder => {
                 let Some(folder) = self.workspaces.folder() else {
                     return;
@@ -1744,6 +1745,10 @@ impl eframe::App for App {
     /// While the Settings window's Keys page waits for the keys to give a
     /// command, they go to it instead.
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        // An agent's mouse and keys go in first, so the keymap sees its
+        // keys as it sees the user's.
+        crate::agent_hands::feed_main(ctx, input);
+        self.log_hands(ctx);
         if self.pending.is_none() && self.shell.capturing() {
             if let Some(chord) = self.keys.capture(input) {
                 self.shell.captured(chord);
@@ -1857,6 +1862,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.log_hands(&ctx);
         // Commands that keys ran before this frame.
         self.handle_requests(&ctx, frame);
         self.update_plugin_status();
@@ -1873,7 +1879,7 @@ impl eframe::App for App {
         let scanning = library.scanning();
         let reading = library.reading();
         let (found, total) = library.found();
-        let agent = self.agents.status();
+        let agent = self.agents.status(crate::agent_hands::busy(&ctx));
         let analysing = self.analyses.status();
         let rendering = match RenderCache::global().pending() {
             0 => None,
@@ -1975,7 +1981,7 @@ impl eframe::App for App {
             presets_folder: library.presets_folder(),
             workspaces_folder: self.workspaces.folder(),
             render_folder: render_folder.as_deref(),
-            agents: self.agents.page(self.settings.agents.enabled),
+            agents: (self.agents).page(&self.settings.agents, crate::agent_hands::busy(&ctx)),
         };
         let asked = self.settings_window.show(&ctx, settings);
         for action in actions {
@@ -2281,6 +2287,7 @@ mod switching_profiles;
 mod testing;
 #[cfg(test)]
 mod theming;
+mod touching_for_agents;
 #[cfg(test)]
 mod undoing;
 #[cfg(test)]

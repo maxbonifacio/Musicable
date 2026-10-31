@@ -1038,3 +1038,175 @@ fn agents_read_what_is_in_the_windows() {
     let nodes = every_node(&own["nodes"]);
     assert!(labelled(&nodes, "Master Volume").is_some(), "{own}");
 }
+
+/// Starts `steps` with the mouse and keys, and draws the window's frames
+/// until the call answers, the main window's input going through the app's
+/// raw input hook first, as eframe's does. `user` is input of the user's
+/// own, given at the third frame.
+fn use_hands(
+    agent: &Agent,
+    window: &mut Window,
+    arguments: Json,
+    user: Option<egui::Event>,
+) -> Result<Json, String> {
+    let call = agent.start("use_mouse_and_keys", arguments);
+    let started = Instant::now();
+    let mut user = user;
+    let mut frame = 0;
+    while !call.is_finished() {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the call got no answer"
+        );
+        let mut input = egui::RawInput::default();
+        if frame == 3 {
+            input.events.extend(user.take());
+        }
+        let ctx = window.ctx.clone();
+        eframe::App::raw_input_hook(window.state_mut(), &ctx, &mut input);
+        window.input_mut().events.extend(input.events);
+        window.input_mut().dropped_files.extend(input.dropped_files);
+        window.step();
+        frame += 1;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    window.run();
+    let result = agent.runtime.block_on(call).unwrap();
+    read(result.expect("the call gets an answer"))
+}
+
+fn tempo(window: &Window) -> f64 {
+    let project = window.state().session.project();
+    project.tempo.bpm_at(musicable_model::time::Beats::ZERO)
+}
+
+#[test]
+fn agents_use_the_mouse_and_keys_while_the_user_lets_them() {
+    let dir = TempDir::new("agents-hands");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let click = json!({"steps": [{"click": [10, 10]}]});
+    let refused = use_hands(&agent, &mut window, click.clone(), None);
+    assert!(
+        refused
+            .unwrap_err()
+            .starts_with("The user doesn't let agents use the mouse and keys"),
+    );
+    // Only the user can let them, on the Agents page.
+    window
+        .get_by_label("Let agents use the mouse and keys")
+        .click();
+    window.run();
+    assert!(window.state().settings.agents.mouse_and_keys);
+    let kept = Settings::read(&dir.0.join(crate::settings::SETTINGS_FILE)).unwrap();
+    assert!(kept.agents.mouse_and_keys);
+    // That click was the user's, which agents wait out.
+    std::thread::sleep(crate::agent_hands::IDLE);
+
+    // A click on a button found in the UI tree.
+    let found = agent
+        .call(&mut window, "get_ui_tree", json!({"filter": "Metronome"}))
+        .unwrap();
+    let nodes = every_node(&found["nodes"]);
+    let metronome = labelled(&nodes, "Metronome").unwrap()["id"].clone();
+    assert!(!window.state().session.project().metronome);
+    let done = use_hands(
+        &agent,
+        &mut window,
+        json!({"steps": [{"click": metronome}]}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(done["steps"], 1, "{done}");
+    assert!(window.state().session.project().metronome);
+
+    // A drag up the tempo, read as each frame is drawn.
+    let found = agent
+        .call(&mut window, "get_ui_tree", json!({"filter": "BPM"}))
+        .unwrap();
+    let nodes = every_node(&found["nodes"]);
+    let node = labelled(&nodes, "BPM").unwrap();
+    let bpm = node["id"].clone();
+    // Straight up from its middle: a drag value goes up as the pointer
+    // goes right or up, so going left would take some of it back.
+    let [x, y] = [0, 1].map(|axis| {
+        node["at"][axis].as_f64().unwrap() + node["size"][axis].as_f64().unwrap() / 2.0
+    });
+    let done = use_hands(
+        &agent,
+        &mut window,
+        json!({
+            "steps": [{"drag": bpm, "to": [x, (y - 40.0).max(0.0)], "seconds": 0.2}],
+            "watch": {"filter": "BPM"},
+        }),
+        None,
+    )
+    .unwrap();
+    assert!(tempo(&window) > 120.5, "{done}");
+    // The command log says the agent changed it.
+    let log = agent
+        .call(&mut window, "get_command_log", json!({"last": 1}))
+        .unwrap();
+    assert_eq!(log["entries"][0]["command"], "transport.set_tempo", "{log}");
+    assert_ne!(log["entries"][0]["by"], "user", "{log}");
+    let frames = done["frames"].as_array().unwrap();
+    let values: Vec<&str> = (frames.iter())
+        .filter_map(|frame| labelled(&every_node(&frame["nodes"]), "BPM"))
+        .filter_map(|node| node["value"].as_str())
+        .collect();
+    assert_eq!(values.first(), Some(&"120.00 BPM"), "{done}");
+    assert!(values.len() > 2, "the tempo went up frame by frame: {done}");
+
+    // Keys go through the keymap: Ctrl+Z undoes the drag.
+    use_hands(
+        &agent,
+        &mut window,
+        json!({"steps": [{"key": "Ctrl+Z"}]}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(tempo(&window), 120.0);
+
+    // The user's own mouse stops the agent's, and keeps it off a while.
+    let moved = egui::Event::PointerMoved(egui::pos2(300.0, 300.0));
+    let hover = json!({"steps": [{"hover": bpm, "seconds": 5}, {"click": bpm}]});
+    let why = use_hands(&agent, &mut window, hover, Some(moved)).unwrap_err();
+    assert!(
+        why.starts_with("The user took over: they used the mouse or keys in Musicable, so the agent's input stopped after 0 of 2 steps."),
+        "{why}"
+    );
+    let why = use_hands(&agent, &mut window, click.clone(), None).unwrap_err();
+    assert!(why.starts_with("The user is using Musicable"), "{why}");
+
+    // A node that isn't there.
+    let gone = json!({"steps": [{"click": "123"}]});
+    let mut why = Err(String::new());
+    for _ in 0..100 {
+        why = use_hands(&agent, &mut window, gone.clone(), None);
+        if why
+            .as_ref()
+            .is_err_and(|why| !why.starts_with("The user is using"))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        why,
+        Err(
+            "Step 1: there's no node 123 with a place in the window now: get_ui_tree gives \
+             their ids."
+                .to_owned()
+        )
+    );
+
+    // Turning the switch off stops it.
+    window
+        .get_by_label("Let agents use the mouse and keys")
+        .click();
+    window.run();
+    assert!(!window.state().settings.agents.mouse_and_keys);
+    let refused = use_hands(&agent, &mut window, click, None);
+    assert!(refused.is_err());
+}

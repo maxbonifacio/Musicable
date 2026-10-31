@@ -2,6 +2,7 @@
 //! commands that drive it, and the window the `musicable` binary opens.
 //! `docs/app.md` describes it.
 
+mod agent_hands;
 mod analyses;
 mod app;
 mod appearance_page;

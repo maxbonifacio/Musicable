@@ -25,6 +25,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::{Map, Value as Json, json};
 
+use crate::hands::{Hands, Watch};
 use crate::waiting::{self, Until};
 use crate::{Asked, Call, Reply, Run, Shot, Tree, reads};
 
@@ -52,6 +53,7 @@ pub const GET_COMMAND_LOG: &str = "get_command_log";
 pub const GET_WINDOWS: &str = "get_windows";
 pub const GET_SCREENSHOT: &str = "get_screenshot";
 pub const GET_UI_TREE: &str = "get_ui_tree";
+pub const USE_MOUSE_AND_KEYS: &str = "use_mouse_and_keys";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -491,6 +493,47 @@ pub fn list() -> Vec<Tool> {
                 &[],
             ),
         ),
+        run(
+            USE_MOUSE_AND_KEYS,
+            "Use Mouse and Keys",
+            "Uses the mouse and the keys in a window, the main window unless window says, as \
+             the user would: moves, clicks, double-clicks, drags, hovers, scrolls, key chords, \
+             held modifiers, typing and dropping files, step by step, at the user's speed. It \
+             goes into Musicable's input, never the system's pointer, so it works with the window \
+             covered, though not minimized, but only while the user lets it: the Agents page of Settings \
+             has a switch for it, Let agents use the mouse and keys, which only the user can turn \
+             on. If the user touches the mouse or keys in Musicable while it runs, it stops and \
+             says so; try again once they've left it alone for a few seconds. Steps point at a \
+             node's id from get_ui_tree, or at a place in pixels in the window. With watch, it \
+             reads the window as get_ui_tree does each time a frame is drawn, and gives the \
+             frames that changed, with their time from the start, as when a drag plays out. \
+             Prefer run_command for what a command does: this is for checking what the mouse \
+             and keys themselves do.",
+            object(
+                json!({
+                    "window": {
+                        "description": "main, or a window of its own's number from 1, as \
+                                        get_windows gives it.",
+                        "anyOf": [
+                            { "type": "string", "enum": ["main"] },
+                            { "type": "integer", "minimum": 1 },
+                        ],
+                    },
+                    "steps": crate::hands::schema(),
+                    "watch": {
+                        "type": "object",
+                        "description": "What to read each frame, as get_ui_tree's arguments: \
+                                        panel, filter and limit.",
+                        "properties": {
+                            "panel": { "type": "string" },
+                            "filter": { "type": "string" },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": LONGEST_TREE },
+                        },
+                    },
+                }),
+                &["steps"],
+            ),
+        ),
         read(
             GET_LEVELS,
             "Get Levels",
@@ -586,7 +629,7 @@ pub(crate) fn commands(registry: &Registry) -> Commands {
 
 /// Why a call can't go to the window.
 #[derive(Debug, PartialEq)]
-enum Refused {
+pub(crate) enum Refused {
     /// There's no tool with that name.
     NoTool(String),
     /// The arguments are wrong, as this sentence says.
@@ -611,6 +654,7 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_SCREENSHOT => &["window", "panel", "device", "file"],
         GET_WINDOWS => &[],
         GET_UI_TREE => &["window", "panel", "filter", "limit"],
+        USE_MOUSE_AND_KEYS => &["window", "steps", "watch"],
         GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
         | LIST_AUDIO_DEVICES | GET_LAYOUT | GET_LEVELS => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
@@ -675,20 +719,39 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
                 let problem = "Give the window or the panel, not both: a panel is in one window.";
                 return Err(Refused::Arguments(problem.into()));
             }
+            let (filter, limit) = tree_reading(arguments)?;
             Asked::UiTree(Tree {
                 window,
                 panel,
-                filter: optional_text(arguments, "filter")?.filter(|filter| !filter.is_empty()),
-                limit: match optional_number(arguments, "limit", LONGEST_TREE)? {
-                    Some(0) => {
-                        let problem = format!("limit must be from 1 to {LONGEST_TREE}.");
-                        return Err(Refused::Arguments(problem));
-                    }
-                    Some(limit) => limit as usize,
-                    None => TREE,
-                },
+                filter,
+                limit,
             })
         }
+        USE_MOUSE_AND_KEYS => Asked::Hands(Hands {
+            window: window(arguments)?,
+            steps: crate::hands::steps(arguments)?,
+            watch: match arguments.get("watch") {
+                None | Some(Json::Null) => None,
+                Some(Json::Object(watch)) => {
+                    if let Some(other) = (watch.keys())
+                        .find(|key| !["panel", "filter", "limit"].contains(&key.as_str()))
+                    {
+                        let problem = format!("watch takes no {other}.");
+                        return Err(Refused::Arguments(problem));
+                    }
+                    let (filter, limit) = tree_reading(watch)?;
+                    Some(Watch {
+                        panel: optional_text(watch, "panel")?,
+                        filter,
+                        limit,
+                    })
+                }
+                Some(_) => {
+                    let problem = "watch is what to read each frame, as get_ui_tree's arguments.";
+                    return Err(Refused::Arguments(problem.into()));
+                }
+            },
+        }),
         GET_COMMAND_LOG => Asked::CommandLog {
             since: optional_number(arguments, "since", u64::MAX)?,
             last: optional_number(arguments, "last", LONGEST_LOG)?
@@ -797,6 +860,20 @@ fn window(arguments: &JsonObject) -> Result<Option<usize>, Refused> {
 /// it can say.
 const TREE: usize = 300;
 const LONGEST_TREE: u64 = 5000;
+
+/// The filter and the limit `arguments` give for reading a UI tree.
+fn tree_reading(arguments: &JsonObject) -> Result<(Option<String>, usize), Refused> {
+    let filter = optional_text(arguments, "filter")?.filter(|filter| !filter.is_empty());
+    let limit = match optional_number(arguments, "limit", LONGEST_TREE)? {
+        Some(0) => {
+            let problem = format!("limit must be from 1 to {LONGEST_TREE}.");
+            return Err(Refused::Arguments(problem));
+        }
+        Some(limit) => limit as usize,
+        None => TREE,
+    };
+    Ok((filter, limit))
+}
 
 /// What `get_screenshot`'s `arguments` ask a picture of.
 fn shot(arguments: &JsonObject) -> Result<Shot, Refused> {
@@ -1119,6 +1196,39 @@ mod tests {
         assert_eq!(call(GET_LAYOUT, json!({})), Ok(Asked::Layout));
         assert_eq!(call(GET_LEVELS, json!({})), Ok(Asked::Levels));
         assert_eq!(call(GET_WINDOWS, json!({})), Ok(Asked::Windows));
+        assert_eq!(
+            call(
+                USE_MOUSE_AND_KEYS,
+                json!({"window": 2, "steps": [{"wait": 1}], "watch": {"filter": "BPM"}})
+            ),
+            Ok(Asked::Hands(Hands {
+                window: Some(1),
+                steps: vec![crate::Step::Wait(1.0)],
+                watch: Some(Watch {
+                    panel: None,
+                    filter: Some("BPM".into()),
+                    limit: 300,
+                }),
+            }))
+        );
+        assert_eq!(
+            call(
+                USE_MOUSE_AND_KEYS,
+                json!({"steps": [{"wait": 1}], "watch": {"depth": 2}})
+            ),
+            refused("watch takes no depth.")
+        );
+        assert_eq!(
+            call(
+                USE_MOUSE_AND_KEYS,
+                json!({"steps": [{"wait": 1}], "watch": 3})
+            ),
+            refused("watch is what to read each frame, as get_ui_tree's arguments.")
+        );
+        assert_eq!(
+            call(USE_MOUSE_AND_KEYS, json!({})),
+            refused("steps must be a list of steps.")
+        );
         let tree = Tree {
             window: None,
             panel: None,
@@ -1300,7 +1410,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 25);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

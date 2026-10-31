@@ -9,8 +9,8 @@
 use std::path::Path;
 
 use eframe::egui::{
-    self, Align, Align2, DragValue, Key, Label, Layout, RichText, Role, ScrollArea, Slider, Ui,
-    WidgetInfo, vec2,
+    self, Align, Align2, Checkbox, DragValue, Key, Label, Layout, RichText, Role, ScrollArea,
+    Slider, Ui, WidgetInfo, vec2,
 };
 use musicable_audio::StreamRequest;
 use musicable_commands::editor::{Behaviour, MiddleC, PlayFrom};
@@ -199,6 +199,8 @@ pub enum Asked {
     OpenRenderCacheFolder,
     /// Let agents control Musicable from now on, or stop letting them.
     Agents(bool),
+    /// Let agents use the mouse and keys from now on, or stop letting them.
+    AgentsMouseAndKeys(bool),
 }
 
 /// What the pages show, from the app.
@@ -236,6 +238,10 @@ pub struct Cx<'a> {
 pub struct Agents<'a> {
     /// Whether the user lets agents control Musicable.
     pub enabled: bool,
+    /// Whether the user lets agents use the mouse and keys.
+    pub mouse_and_keys: bool,
+    /// Whether an agent is using them now.
+    pub using_hands: bool,
     /// Where Musicable listens for them, while it does.
     pub listening: Option<String>,
     /// The agents connected, as their clients name themselves.
@@ -857,6 +863,28 @@ fn agents(ui: &mut Ui, agents: &Agents<'_>) -> Option<Asked> {
         )
         .weak(),
     );
+    let mut hands = agents.mouse_and_keys;
+    if ui
+        .add_enabled(
+            agents.enabled,
+            Checkbox::new(&mut hands, "Let agents use the mouse and keys"),
+        )
+        .on_hover_text(
+            "Agents can then click, drag and type in Musicable's windows, to check what the mouse \
+             and keys do",
+        )
+        .changed()
+    {
+        asked = Some(Asked::AgentsMouseAndKeys(hands));
+    }
+    ui.label(
+        RichText::new(
+            "Their clicks, drags and keys go into Musicable's input, so your mouse pointer never \
+             moves, and the status bar says while they're at it. They stop the moment you use \
+             the mouse or keys in Musicable.",
+        )
+        .weak(),
+    );
     ui.add_space(8.0);
     ui.label(RichText::new("Status").strong());
     match (agents.enabled, agents.problem, &agents.listening) {
@@ -871,6 +899,9 @@ fn agents(ui: &mut Ui, agents: &Agents<'_>) -> Option<Asked> {
                 [] => ui.label("Listening for agents. None is connected."),
                 connected => ui.label(format!("Connected: {}.", connected.join(", "))),
             };
+            if agents.using_hands {
+                ui.label("An agent is using the mouse and keys.");
+            }
             if let Some(address) = listening {
                 ui.add(
                     Label::new(RichText::new(address).monospace().weak())

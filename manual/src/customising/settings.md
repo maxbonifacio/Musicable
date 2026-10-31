@@ -37,7 +37,8 @@ a panel, so workspaces don't keep it.
 - **Profiles**: your profiles, and picking one switches to it
   ([Profiles](profiles.md)).
 - **Agents**: **Let agents control Musicable**, off until you switch it on,
-  how they're doing, and the command that adds Musicable to Claude Code,
+  **Let agents use the mouse and keys**, off too, how they're doing, and
+  the command that adds Musicable to Claude Code,
   with a **Copy** button ([The command
   line](../reference/command-line.md#agents)).
 

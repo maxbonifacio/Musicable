@@ -159,7 +159,7 @@ impl App {
     /// The window that `window` or `panel` names, as the window, counted
     /// from 0 with `None` for the main one, and its viewport, and where the
     /// panel is in it, or why there isn't one.
-    fn place(
+    pub(super) fn place(
         &self,
         window: Option<usize>,
         panel: Option<&str>,

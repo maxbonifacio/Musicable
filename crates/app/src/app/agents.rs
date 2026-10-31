@@ -62,14 +62,17 @@ impl Agents {
     }
 
     /// What the status bar says while agents are connected: "Agent: Move
-    /// Notes", their last change, or "Agent connected" before they make
-    /// one.
-    pub(super) fn status(&self) -> Option<String> {
+    /// Notes", their last change, "Agent connected" before they make one,
+    /// or "Agent using the mouse and keys" while `using_hands`.
+    pub(super) fn status(&self, using_hands: bool) -> Option<String> {
         let who = match self.connected().len() {
             0 => return None,
             1 => "Agent".to_owned(),
             n => format!("{n} agents"),
         };
+        if using_hands {
+            return Some(format!("{who}: using the mouse and keys"));
+        }
         Some(match &self.change {
             Some(change) => format!("{who}: {change}"),
             None => format!("{who} connected"),
@@ -77,9 +80,15 @@ impl Agents {
     }
 
     /// How the Agents page of the Settings window shows them.
-    pub(super) fn page(&self, enabled: bool) -> crate::settings_window::Agents<'_> {
+    pub(super) fn page(
+        &self,
+        settings: &crate::settings::AgentSettings,
+        using_hands: bool,
+    ) -> crate::settings_window::Agents<'_> {
         crate::settings_window::Agents {
-            enabled,
+            enabled: settings.enabled,
+            mouse_and_keys: settings.mouse_and_keys,
+            using_hands,
             listening: self.host.as_ref().map(|host| host.address().to_string()),
             connected: self.connected(),
             problem: self.problem.as_deref(),
@@ -105,10 +114,24 @@ impl App {
         self.follow_agent_settings(ctx);
     }
 
+    /// Lets agents use the mouse and keys from now on, or stops letting
+    /// them, and keeps that in the settings.
+    pub(super) fn let_agents_use_hands(&mut self, on: bool, ctx: &egui::Context) {
+        self.settings.agents.mouse_and_keys = on;
+        self.save_settings();
+        self.follow_agent_settings(ctx);
+    }
+
     /// Listens for agents while the settings let them in, and stops when
     /// they don't. Calls still waiting for an answer then get none.
     pub(super) fn follow_agent_settings(&mut self, ctx: &egui::Context) {
         let agents = &mut self.agents;
+        if !(self.settings.agents.enabled && self.settings.agents.mouse_and_keys) {
+            crate::agent_hands::stop(
+                ctx,
+                "The user stopped letting agents use the mouse and keys.",
+            );
+        }
         if !self.settings.agents.enabled {
             agents.host = None;
             agents.problem = None;
@@ -181,7 +204,7 @@ impl App {
         let agent = reply.agent().to_owned();
         self.session.command_log_mut().set_by(Some(agent));
         self.run_as_agent(run, reply, ctx, frame);
-        self.session.command_log_mut().set_by(None);
+        self.log_hands(ctx);
     }
 
     fn run_as_agent(&mut self, run: Run, reply: Reply, ctx: &egui::Context, frame: &eframe::Frame) {
@@ -646,6 +669,10 @@ impl musicable_mcp::Window for Agent<'_> {
 
     fn ui_tree(&mut self, tree: musicable_mcp::Tree, reply: Reply) {
         self.app.ui_tree_for_agent(tree, reply, self.ctx);
+    }
+
+    fn use_mouse_and_keys(&mut self, hands: musicable_mcp::Hands, reply: Reply) {
+        self.app.hands_for_agent(hands, reply, self.ctx);
     }
 }
 
