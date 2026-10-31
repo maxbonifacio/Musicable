@@ -1210,3 +1210,21 @@ fn agents_use_the_mouse_and_keys_while_the_user_lets_them() {
     let refused = use_hands(&agent, &mut window, click, None);
     assert!(refused.is_err());
 }
+
+#[test]
+fn agents_play_midi_only_into_their_input_while_it_is_open() {
+    let dir = TempDir::new("agents-midi");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let played = agent.call(
+        &mut window,
+        "play_midi",
+        json!({"events": [{"note": 60, "length": 0.1}]}),
+    );
+    let why = played.unwrap_err();
+    assert!(
+        why.starts_with("Musicable Agent MIDI isn't open: a MIDI track takes it"),
+        "{why}"
+    );
+}

@@ -103,6 +103,13 @@ they're at it. The moment you use the mouse or keys in Musicable, they
 stop, and wait until you've left it alone for a few seconds. Agents can't
 turn the switch on themselves.
 
+Agents can also play notes, the sustain pedal and other controllers, pitch
+bend and pressure, MPE included, into **Musicable Agent MIDI**, a MIDI
+input of their own, as if from a keyboard plugged in. A MIDI track takes it
+as its input like any other, so they can check what recording and MIDI
+routing do with what's played. It plays on Windows only so far, where
+Musicable records MIDI.
+
 Agents can read what each device costs the CPU too, as the
 [Performance panel](../window/performance.md) lists it, to say which plugin
 to freeze or take out, and how far ahead of the audio device Musicable

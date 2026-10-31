@@ -394,6 +394,14 @@ latency and a period after they were heard.
 **Elsewhere.** On macOS and Linux, MIDI inputs don't open yet: each says so
 in `StreamInfo::midi_inputs`.
 
+`midi::agent` adds one input that isn't a device: Musicable Agent MIDI
+(`AGENT_INPUT`), listed on Windows after the system's. Opening it makes a
+buffer like any input's, and `play_agent_midi` writes into it: a thread
+sleeps until each message's time, and stamps it with the frame the
+output's clock gives for the time it was meant to come, not the time the
+thread woke, so its timing holds. Agents play it with `play_midi`
+([agents.md](agents.md)).
+
 ## The audio thread
 
 Each WASAPI stream has its own thread, named `musicable-audio`. It joins COM's
