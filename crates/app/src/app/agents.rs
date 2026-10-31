@@ -8,7 +8,9 @@ use eframe::egui;
 use musicable_commands::{Args, Editor, Keymap, Registry, Request, Steps, arrange};
 use musicable_engine::Lead;
 use musicable_mcp::pipe::Address;
-use musicable_mcp::{CpuPart, CpuRow, Host, Performance, RenderingAhead, Reply, Run};
+use musicable_mcp::{
+    CpuPart, CpuRow, Exporting, Host, Performance, RenderingAhead, Reply, Run, Status,
+};
 use musicable_model::param::ParamSpec;
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, Project, TrackId};
@@ -17,7 +19,8 @@ use serde_json::json;
 
 use super::{App, with_extension};
 use crate::audio_files::clip_path;
-use crate::export::Report;
+use crate::export::{Report, Stage};
+use crate::renders::RenderCache;
 
 /// What an agent's command hears while the window asks the user something.
 const ASKING: &str = "Musicable is waiting for the user to answer a question in its window. Try \
@@ -474,6 +477,76 @@ impl musicable_mcp::Window for Agent<'_> {
             rows,
             total: figures.total,
         }
+    }
+
+    fn status(&self) -> Status {
+        let app = &self.app;
+        let session = &app.session;
+        let heard = session.heard_position(app.output.latency());
+        let rate = session.engine_config().sample_rate;
+        let takes = (super::recordings(session).into_iter())
+            .map(|recording| (recording.track, recording.range))
+            .collect();
+        let question = (app.pending.as_ref()).map(|request| {
+            let before = match request {
+                Request::New | Request::NewDemo => " before starting a new project",
+                Request::Open(_) => " before opening another project",
+                Request::Quit => " before quitting",
+                _ => "",
+            };
+            format!("Save the changes to {}{before}?", app.name())
+        });
+        let export = (app.export.as_ref()).map(|export| {
+            let stage = export.stage();
+            let (name, pass, passes, speed) = match stage {
+                Stage::Preparing { pass, passes } => ("preparing", pass, passes, None),
+                Stage::Rendering {
+                    pass,
+                    passes,
+                    speed,
+                    ..
+                } => ("rendering", pass, passes, Some(speed)),
+                Stage::Normalising { pass, passes, .. } => ("normalising", pass, passes, None),
+                Stage::Finished => ("finished", 0, 0, None),
+            };
+            Exporting {
+                stage: name,
+                pass,
+                passes,
+                done: stage.fraction(),
+                speed,
+            }
+        });
+        let library = session.library();
+        let folders = |folders: Vec<(PathBuf, usize)>| {
+            (folders.into_iter())
+                .map(|(folder, files)| (folder.display().to_string(), files))
+                .collect()
+        };
+        Status {
+            playing: session.is_playing(),
+            recording: session.is_recording(),
+            playhead: session.beats_at(heard),
+            seconds: heard as f64 / f64::from(rate),
+            takes,
+            question,
+            analysing: app.analyses.analysing(),
+            rendering: RenderCache::global().pending(),
+            compiling: session.compiling(),
+            export,
+            scanning_plugins: app.plugin_scan.is_running(),
+            scanning_folders: folders(library.scanning()),
+            reading_folders: folders(library.reading()),
+            finding_presets: library.is_finding_presets(),
+        }
+    }
+
+    fn messages(&self) -> Vec<String> {
+        self.app.messages.clone()
+    }
+
+    fn clear_messages(&mut self) {
+        self.app.messages.clear();
     }
 
     fn run(&mut self, run: Run, reply: Reply) {

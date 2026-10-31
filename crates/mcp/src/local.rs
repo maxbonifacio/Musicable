@@ -1,7 +1,7 @@
 //! Tools the bridge runs itself, in its own process, rather than passing
-//! them on to Musicable: the app's audio commands, which work on files and
-//! need no window, so they work while Musicable is closed or doesn't let
-//! agents in. The app implements [`LocalTools`], so this crate needn't know
+//! them on to Musicable: the app's audio commands, and reading its log,
+//! which work on files and need no window, so they work while Musicable is
+//! closed or doesn't let agents in. The app implements [`LocalTools`], so this crate needn't know
 //! them.
 
 use serde_json::{Map, Value as Json};

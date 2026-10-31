@@ -1,7 +1,8 @@
 //! The tools agents call: a few general ones that cover every command, so
 //! a new command reaches agents with no change here, and reads of the
 //! project, a clip, a device, a modulator, a lane of automation, the
-//! editor's state, the undo history and what the project costs the CPU.
+//! editor's state, the undo history, what the project costs the CPU, what
+//! plays and what's under way, and the messages the window shows.
 //!
 //! A call's arguments are checked on the server's thread, against the
 //! commands' parameters for the commands it runs. The window then answers
@@ -38,6 +39,8 @@ pub const GET_AUTOMATION: &str = "get_automation";
 pub const GET_EDITOR: &str = "get_editor";
 pub const GET_HISTORY: &str = "get_history";
 pub const GET_PERFORMANCE: &str = "get_performance";
+pub const GET_STATUS: &str = "get_status";
+pub const GET_MESSAGES: &str = "get_messages";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -259,6 +262,42 @@ pub fn list() -> Vec<Tool> {
              ran out, which come before dropouts.",
             object(json!({}), &[]),
         ),
+        read(
+            GET_STATUS,
+            "Get Status",
+            "Reads what plays and what's under way: whether the transport plays and records, \
+             where the playhead is, in beats and seconds, the takes being recorded, the \
+             question the window waits for the user to answer, if it asks one, and the work \
+             that lands later, with nothing to wait on: audio files being analysed, segments \
+             still to render, a graph compiling, an export, with how much of it is done, and \
+             the plugins' and the library's scans. idle is true once none of that work is \
+             under way, so an agent can call it again until then.",
+            object(json!({}), &[]),
+        ),
+        tool(
+            GET_MESSAGES,
+            "Reads the messages the window shows the user, oldest first: errors and notices, \
+             such as a file or a plugin that's missing, a device that failed, or an export's \
+             problems. With clear, it clears them too, as Dismiss does, so the next call gives \
+             only those that came after.",
+            object(
+                json!({
+                    "clear": {
+                        "type": "boolean",
+                        "description": "Whether to clear the messages once read, as Dismiss does.",
+                    }
+                }),
+                &[],
+            ),
+        )
+        .with_title("Get Messages")
+        .annotate(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
     ]
 }
 
@@ -326,7 +365,8 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_DEVICE => &["device"],
         GET_MODULATOR => &["modulator"],
         GET_AUTOMATION => &["param"],
-        GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE => &[],
+        GET_MESSAGES => &["clear"],
+        GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
     };
     if let Some(unknown) = arguments
@@ -389,6 +429,10 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_EDITOR => Asked::Editor,
         GET_HISTORY => Asked::History,
         GET_PERFORMANCE => Asked::Performance,
+        GET_STATUS => Asked::Status,
+        GET_MESSAGES => Asked::Messages {
+            clear: flag(arguments, "clear")?,
+        },
         _ => unreachable!("every tool is matched above"),
     };
     Ok(asked)
@@ -439,6 +483,14 @@ fn optional_text(arguments: &JsonObject, name: &str) -> Result<Option<String>, R
     match arguments.get(name) {
         None | Some(Json::Null) => Ok(None),
         Some(_) => text(arguments, name).map(|text| Some(text.to_owned())),
+    }
+}
+
+fn flag(arguments: &JsonObject, name: &str) -> Result<bool, Refused> {
+    match arguments.get(name) {
+        None | Some(Json::Null) => Ok(false),
+        Some(Json::Bool(on)) => Ok(*on),
+        Some(_) => Err(Refused::Arguments(format!("{name} must be true or false."))),
     }
 }
 
@@ -669,6 +721,15 @@ mod tests {
         );
         assert_eq!(call(GET_HISTORY, json!({})), Ok(Asked::History));
         assert_eq!(call(GET_PERFORMANCE, json!({})), Ok(Asked::Performance));
+        assert_eq!(call(GET_STATUS, json!({})), Ok(Asked::Status));
+        assert_eq!(
+            call(GET_MESSAGES, json!({})),
+            Ok(Asked::Messages { clear: false })
+        );
+        assert_eq!(
+            call(GET_MESSAGES, json!({"clear": true})),
+            Ok(Asked::Messages { clear: true })
+        );
         assert_eq!(
             call("get_mood", json!({})),
             Err(Refused::NoTool("get_mood".into()))
@@ -678,7 +739,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 14);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

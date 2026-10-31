@@ -7,6 +7,7 @@ mod app;
 mod appearance_page;
 mod audio_files;
 mod audio_page;
+pub mod bridge_tools;
 pub mod export;
 mod export_window;
 mod frame_times;

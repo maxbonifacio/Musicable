@@ -5,8 +5,8 @@
 //! doesn't let agents in, the tools say so, and the bridge tries again at
 //! the next call, so the agent needn't start over once the user lets it in.
 //!
-//! Its [local tools](LocalTools), the audio commands, it runs itself, on
-//! threads of its own, whether Musicable is running or not. They tell the
+//! Its [local tools](LocalTools), such as the audio commands, it runs
+//! itself, on threads of its own, whether Musicable is running or not. They tell the
 //! agent how far they've got, if it asks, and stop when it cancels them.
 
 use std::cell::Cell;

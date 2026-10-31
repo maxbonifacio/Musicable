@@ -51,7 +51,8 @@ agent needn't start over.
 ## The tools
 
 A few tools cover every command, so a new command reaches agents with no
-change to them. The others read what the window shows.
+change to them. The others read what the window shows, but `get_log`, which
+the bridge runs itself.
 
 | Tool | Takes | Gives back |
 |---|---|---|
@@ -67,6 +68,9 @@ change to them. The others read what the window shows.
 | `get_editor` | nothing | What's selected, the selected track, which panel has the focus, the start marker, the grid, what's in sight, the piano roll's clip and selected notes, the Sample Editor's clip, selected warp markers and the parameter its lane shows, and the devices selected in the devices panel, of the selected track's, in the order they play |
 | `get_history` | nothing | Each step's name, oldest first, how many are done, and what Undo and Redo would change |
 | `get_performance` | nothing | What the project costs the CPU, as the Performance panel lists it, busiest first: each device's share of one core over the last second, `average`, whether it `renders` `ahead` of the device or `live`, and while live its longest block as a share of the buffer, `longest`, by its `device` id, `name` and `chain`, and the same for each channel's `clips`, `modulators` and `mixer`, and the `metronome`, in `rows`; the project's `total`; the transport bar's figures: whether an audio device is `playing`, the `audio` it plays, the audio thread's `load`, and the `dropouts`; and while Render Ahead is on, `render_ahead`: its `setting`, whether the project renders `ahead` now, how far ahead it was lately and aims to be, `lead_ms` and `target_ms`, the share of a core of what rendered ahead, `load`, and the blocks the audio thread had to render itself since the device started, `short_blocks`. Without an audio device, there are no rows, and `render_ahead` is null, as it is for the quarter of a second after the device starts or Render Ahead changes |
+| `get_status` | nothing | What plays: whether the transport is `playing`, from the moment Play is pressed, and `recording`, the `playhead` in beats and `playhead_seconds`, and the `takes` being recorded, each a `track` with the `start` and `end` it covers so far; the `question` the window waits for you to answer, such as whether to save your changes, or null; and the work that lands later, with nothing to wait on: the audio files being analysed for warping, `analysing`, by their names in the project, the `rendering_segments` left, whether a graph is `compiling`, the `export` under way, with its `stage` (`preparing`, `rendering`, `normalising`), `pass` of `passes`, the share `done` and while it renders its `speed`, times real time, `scanning_plugins`, and the `library`'s folders `scanning`, with the files `found`, and `reading`, with the files `left`, and whether it's `finding_presets`. `idle` is true once none of that work is under way, so an agent calls it again until it is |
+| `get_messages` | `clear`? | The status bar's `messages`, oldest first: errors and notices, such as a missing file or plugin, a device that failed, or an export's problems. With `clear`, it clears them too, as **Dismiss** does, so the next call gives only those that came after |
+| `get_log` | `lines`? (100, at most 1000), `level`? (`error`, `warn` or `info`), `since`?, a time in UTC such as `2026-10-31T05:00:00Z` | The latest `entries` of `musicable.log` and `musicable.old.log` in the config folder, oldest first, those as bad as `level` or worse, logged at `since` or after: each its `time`, `level`, `target`, such as `wgpu_hal` or `panic`, and `message`, a panic's over several lines with its calls; the `file`; and whether `earlier` entries were left out. The bridge reads the file itself, so it works while Musicable is closed, and after it stopped |
 
 What the tools give back is JSON, as text. A call that fails, such as one
 with arguments a command doesn't take, or a command that doesn't apply now,
@@ -228,7 +232,8 @@ read it to find their way around without a running Musicable.
   pipe, as the agent's client named itself. It connects as the client
   starts, so the status bar shows the agent at once, and again at a call
   after Musicable has closed or stopped letting agents in. The audio
-  tools' calls it runs itself.
+  tools' calls, and `get_log`'s, it runs itself
+  (`crates/app/src/bridge_tools.rs`).
 
 ### Testing
 
@@ -254,13 +259,13 @@ read it to find their way around without a running Musicable.
 - [`crates/app/src/app/controlled_by_agents.rs`](../crates/app/src/app/controlled_by_agents.rs)
   drives the whole window with `egui_kittest`: it lets agents in on the
   Agents page, checks the status bar, runs, undoes and batches commands,
-  saves and opens files, answers the question about unsaved changes, and
-  exports.
+  saves and opens files, answers the question about unsaved changes,
+  exports, and reads the status and the messages.
 - [`crates/app/tests/agents.rs`](../crates/app/tests/agents.rs) starts the
   real `musicable mcp`, as a client does, and speaks MCP with it, through
-  a real pipe to a session, and runs the audio tools with nothing
-  listening, on Windows, macOS and Linux in CI. It runs `musicable audio`
-  too, in text and in JSON, and checks its exit codes.
+  a real pipe to a session, and runs the audio tools and reads the log
+  with nothing listening, on Windows, macOS and Linux in CI. It runs
+  `musicable audio` too, in text and in JSON, and checks its exit codes.
 
 ## Not done yet
 

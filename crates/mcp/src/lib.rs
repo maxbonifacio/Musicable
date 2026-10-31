@@ -15,7 +15,7 @@
 //! over its standard input and output and passes each tool call on to the
 //! Musicable that's running, through the pipe. While none is, or it doesn't
 //! let agents in, the tools say so. The bridge runs [local tools](local)
-//! itself, the app's audio commands, which need no window.
+//! itself, the app's audio commands and the log, which need no window.
 //!
 //! `docs/agents.md` describes the tools, and what they take and give back.
 
@@ -28,6 +28,7 @@ use musicable_commands::{
 use musicable_model::clip::ClipId;
 use musicable_model::modulation::ModulatorId;
 use musicable_model::param::{ParamAddress, ParamSpec};
+use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Chain, DeviceId, Project, TrackId};
 use serde_json::{Map, Value as Json};
 use tokio::sync::oneshot;
@@ -69,6 +70,13 @@ enum Asked {
     History,
     /// What the project costs the CPU.
     Performance,
+    /// What plays, and what's under way.
+    Status,
+    /// The messages the window shows the user, and whether to clear them
+    /// once read.
+    Messages {
+        clear: bool,
+    },
     Run(Run),
 }
 
@@ -273,6 +281,58 @@ pub enum CpuPart {
     Metronome,
 }
 
+/// What plays, and what's under way that lands later, as the transport
+/// bar and the status bar show it: see [`Window::status`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Status {
+    /// Whether the transport plays, from the moment Play is pressed.
+    pub playing: bool,
+    /// Whether playing records the armed tracks.
+    pub recording: bool,
+    /// Where the playhead is in what's heard, in beats and in seconds from
+    /// the start of the song.
+    pub playhead: Beats,
+    pub seconds: f64,
+    /// The takes being recorded: each track's, and what it covers so far.
+    pub takes: Vec<(TrackId, BeatRange)>,
+    /// The question the window waits for the user to answer, if it asks
+    /// one, such as whether to save their changes.
+    pub question: Option<String>,
+    /// The audio files being analysed for warping, by their names in the
+    /// project.
+    pub analysing: Vec<String>,
+    /// The segments of clips still to render, such as Spectral's.
+    pub rendering: usize,
+    /// Whether a graph the window asked the engine for still compiles.
+    pub compiling: bool,
+    /// The export under way, if one is.
+    pub export: Option<Exporting>,
+    /// Whether the plugins are being scanned.
+    pub scanning_plugins: bool,
+    /// The library's folders being scanned, with the files found in each
+    /// so far.
+    pub scanning_folders: Vec<(String, usize)>,
+    /// The library's folders whose files are being read, with the files
+    /// left in each.
+    pub reading_folders: Vec<(String, usize)>,
+    /// Whether the library looks for presets.
+    pub finding_presets: bool,
+}
+
+/// How an export is going, as its window's progress bar shows it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Exporting {
+    /// What it does: "preparing", "rendering", "normalising" or "finished".
+    pub stage: &'static str,
+    /// The pass it's on, from 1, of how many.
+    pub pass: usize,
+    pub passes: usize,
+    /// How much of the whole export is done, from 0 to 1.
+    pub done: f32,
+    /// While it renders, how many times faster than real time.
+    pub speed: Option<f64>,
+}
+
 /// What the tools read and run, on the window's thread.
 pub trait Window {
     /// Every command, as the window runs them.
@@ -299,6 +359,20 @@ pub trait Window {
         Performance::default()
     }
 
+    /// What plays, and what's under way.
+    fn status(&self) -> Status {
+        Status::default()
+    }
+
+    /// The messages the window shows the user, oldest first: errors and
+    /// notices, such as a file that's missing.
+    fn messages(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Clears the messages, as Dismiss does.
+    fn clear_messages(&mut self) {}
+
     /// Runs `run`, as the agent `reply` names asked, and answers with
     /// [`Reply::ran`] or [`Reply::ran_batch`], at once or once it knows.
     fn run(&mut self, run: Run, reply: Reply);
@@ -324,6 +398,14 @@ pub fn answer(call: Call, window: &mut impl Window) {
         Asked::Editor => Ok(reads::editor(window)),
         Asked::History => Ok(reads::history(window)),
         Asked::Performance => Ok(reads::performance(window)),
+        Asked::Status => Ok(reads::status(window)),
+        Asked::Messages { clear } => {
+            let messages = window.messages();
+            if clear {
+                window.clear_messages();
+            }
+            Ok(serde_json::json!({ "messages": messages }))
+        }
     };
     reply.send(answer);
 }

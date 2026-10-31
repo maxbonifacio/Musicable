@@ -1,6 +1,7 @@
 //! What the read tools give back, as JSON: the commands, the project, a
 //! clip, a device, a modulator, a lane of automation, the editor's state,
-//! the undo history and what the project costs the CPU. Positions and
+//! the undo history, what the project costs the CPU, and what plays and
+//! what's under way. Positions and
 //! lengths are numbers of beats, gains are linear, and ids are whole
 //! numbers, as commands take them.
 
@@ -962,6 +963,57 @@ pub(crate) fn performance(window: &impl Window) -> Json {
         "render_ahead": ahead,
         "total": share(performance.total),
         "rows": rows,
+    })
+}
+
+/// What plays and what's under way, and whether nothing is.
+pub(crate) fn status(window: &impl Window) -> Json {
+    let status = window.status();
+    let takes: Vec<Json> = (status.takes.iter())
+        .map(|(track, range)| {
+            json!({ "track": track.0, "start": beats(range.start), "end": beats(range.end) })
+        })
+        .collect();
+    let export = (status.export.as_ref()).map(|export| {
+        json!({
+            "stage": export.stage,
+            "pass": export.pass,
+            "passes": export.passes,
+            "done": share(export.done),
+            "speed": export.speed.map(|speed| (speed * 10.0).round() / 10.0),
+        })
+    });
+    let folders = |folders: &[(String, usize)], count: &str| -> Json {
+        (folders.iter())
+            .map(|(folder, files)| json!({ "folder": folder, count: files }))
+            .collect()
+    };
+    let idle = status.analysing.is_empty()
+        && status.rendering == 0
+        && !status.compiling
+        && status.export.is_none()
+        && !status.scanning_plugins
+        && status.scanning_folders.is_empty()
+        && status.reading_folders.is_empty()
+        && !status.finding_presets;
+    json!({
+        "playing": status.playing,
+        "recording": status.recording,
+        "playhead": beats(status.playhead),
+        "playhead_seconds": (status.seconds * 1000.0).round() / 1000.0,
+        "takes": takes,
+        "question": status.question,
+        "idle": idle,
+        "analysing": status.analysing,
+        "rendering_segments": status.rendering,
+        "compiling": status.compiling,
+        "export": export,
+        "scanning_plugins": status.scanning_plugins,
+        "library": {
+            "scanning": folders(&status.scanning_folders, "found"),
+            "reading": folders(&status.reading_folders, "left"),
+            "finding_presets": status.finding_presets,
+        },
     })
 }
 

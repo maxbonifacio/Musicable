@@ -32,7 +32,8 @@ use crate::local::{LocalTool, LocalTools};
 use crate::pipe::Address;
 use crate::tools::{self, Agents, Link, Tools};
 use crate::{
-    Call, CpuPart, CpuRow, Host, Performance, RenderingAhead, Reply, Run, Window, answer, host,
+    Call, CpuPart, CpuRow, Exporting, Host, Performance, RenderingAhead, Reply, Run, Status,
+    Window, answer, host,
 };
 
 /// A transport that plays along, and does nothing else.
@@ -86,6 +87,10 @@ struct TestWindow {
     agents: Vec<String>,
     /// What the CPU figures say.
     performance: Performance,
+    /// What plays, and what's under way.
+    status: Status,
+    /// The messages the window shows.
+    messages: Vec<String>,
 }
 
 impl TestWindow {
@@ -100,6 +105,8 @@ impl TestWindow {
             requests: Vec::new(),
             agents: Vec::new(),
             performance: Performance::default(),
+            status: Status::default(),
+            messages: Vec::new(),
         }
     }
 }
@@ -135,6 +142,18 @@ impl Window for TestWindow {
 
     fn performance(&self) -> Performance {
         self.performance.clone()
+    }
+
+    fn status(&self) -> Status {
+        self.status.clone()
+    }
+
+    fn messages(&self) -> Vec<String> {
+        self.messages.clone()
+    }
+
+    fn clear_messages(&mut self) {
+        self.messages.clear();
     }
 
     fn run(&mut self, run: Run, reply: Reply) {
@@ -302,6 +321,8 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_editor",
             "get_history",
             "get_performance",
+            "get_status",
+            "get_messages",
         ]
     );
     let server = rig
@@ -1121,6 +1142,132 @@ fn the_performance_says_what_each_device_costs_the_cpu() {
 }
 
 #[test]
+fn the_status_says_what_plays_and_whats_under_way() {
+    let mut project = Project::new();
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let mut rig = Rig::new(project);
+    // A window with nothing under way is idle.
+    let status = rig.call("get_status", json!({})).unwrap();
+    assert_eq!(
+        status,
+        json!({
+            "playing": false,
+            "recording": false,
+            "playhead": 0,
+            "playhead_seconds": 0.0,
+            "takes": [],
+            "question": null,
+            "idle": true,
+            "analysing": [],
+            "rendering_segments": 0,
+            "compiling": false,
+            "export": null,
+            "scanning_plugins": false,
+            "library": {"scanning": [], "reading": [], "finding_presets": false},
+        })
+    );
+    rig.window.status = Status {
+        playing: true,
+        recording: true,
+        playhead: Beats::from_ratio(19, 2),
+        seconds: 4.750_02,
+        takes: vec![(
+            vocal,
+            BeatRange::new(Beats::new(8), Beats::from_ratio(19, 2)),
+        )],
+        question: Some("Save the changes to Song before quitting?".into()),
+        analysing: vec!["Samples/kick.wav".into()],
+        rendering: 3,
+        compiling: true,
+        export: Some(Exporting {
+            stage: "rendering",
+            pass: 1,
+            passes: 2,
+            done: 0.237_6,
+            speed: Some(12.345),
+        }),
+        scanning_plugins: true,
+        scanning_folders: vec![("/Samples".into(), 120)],
+        reading_folders: vec![("/Loops".into(), 7)],
+        finding_presets: true,
+    };
+    let status = rig.call("get_status", json!({})).unwrap();
+    assert_eq!(
+        status,
+        json!({
+            "playing": true,
+            "recording": true,
+            "playhead": 9.5,
+            "playhead_seconds": 4.75,
+            "takes": [{"track": vocal.0, "start": 8, "end": 9.5}],
+            "question": "Save the changes to Song before quitting?",
+            "idle": false,
+            "analysing": ["Samples/kick.wav"],
+            "rendering_segments": 3,
+            "compiling": true,
+            "export": {"stage": "rendering", "pass": 1, "passes": 2, "done": 0.238, "speed": 12.3},
+            "scanning_plugins": true,
+            "library": {
+                "scanning": [{"folder": "/Samples", "found": 120}],
+                "reading": [{"folder": "/Loops", "left": 7}],
+                "finding_presets": true,
+            },
+        })
+    );
+    // Each piece of work alone keeps it busy.
+    let busy: [fn(&mut Status); 8] = [
+        |status| status.analysing = vec!["a.wav".into()],
+        |status| status.rendering = 1,
+        |status| status.compiling = true,
+        |status| status.export = Some(Exporting::default()),
+        |status| status.scanning_plugins = true,
+        |status| status.scanning_folders = vec![("/Samples".into(), 0)],
+        |status| status.reading_folders = vec![("/Samples".into(), 1)],
+        |status| status.finding_presets = true,
+    ];
+    for make_busy in busy {
+        rig.window.status = Status::default();
+        make_busy(&mut rig.window.status);
+        let status = rig.call("get_status", json!({})).unwrap();
+        assert_eq!(status["idle"], false, "{status}");
+    }
+    assert_eq!(
+        rig.call("get_status", json!({"track": 1})),
+        Err("get_status takes no argument called track.".into())
+    );
+}
+
+#[test]
+fn agents_read_the_messages_and_clear_them() {
+    let mut rig = Rig::new(Project::new());
+    assert_eq!(
+        rig.call("get_messages", json!({})).unwrap(),
+        json!({"messages": []})
+    );
+    rig.window.messages = vec![
+        "Couldn't find the audio file kick.wav.".into(),
+        "The plugin Surge XT is missing.".into(),
+    ];
+    let messages = json!({"messages": [
+        "Couldn't find the audio file kick.wav.",
+        "The plugin Surge XT is missing.",
+    ]});
+    // Reading leaves them, until clear says to clear them.
+    assert_eq!(rig.call("get_messages", json!({})).unwrap(), messages);
+    let cleared = rig.call("get_messages", json!({"clear": true}));
+    assert_eq!(cleared.unwrap(), messages);
+    assert!(rig.window.messages.is_empty());
+    assert_eq!(
+        rig.call("get_messages", json!({"clear": false})).unwrap(),
+        json!({"messages": []})
+    );
+    assert_eq!(
+        rig.call("get_messages", json!({"clear": "yes"})),
+        Err("clear must be true or false.".into())
+    );
+}
+
+#[test]
 fn a_call_the_agent_gave_up_on_runs_nothing() {
     let mut window = TestWindow::new(Project::new());
     let (reply, answer_waiting) = Reply::new("tests".into());
@@ -1312,11 +1459,15 @@ fn the_bridge_runs_its_own_tools_with_musicable_closed() {
     // They come after the app's tools, as read-only as they are.
     let listed = runtime.block_on(client.list_all_tools()).unwrap();
     let names: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(names.len(), 14, "{names:?}");
-    assert_eq!(names[12..], ["audio_echo", "audio_wait"]);
+    let app = tools::list().len();
+    assert_eq!(names.len(), app + 2, "{names:?}");
+    assert_eq!(names[app..], ["audio_echo", "audio_wait"]);
     let read_only = |i: usize| (listed[i].annotations.as_ref()).and_then(|a| a.read_only_hint);
-    assert_eq!((read_only(12), read_only(13)), (Some(true), Some(false)));
-    assert!(listed[12].output_schema.is_some());
+    assert_eq!(
+        (read_only(app), read_only(app + 1)),
+        (Some(true), Some(false))
+    );
+    assert!(listed[app].output_schema.is_some());
     let server = client.peer_info().expect("the server introduced itself");
     let instructions = server.instructions.as_deref().unwrap_or_default();
     assert!(instructions.contains("undo"), "{instructions}");

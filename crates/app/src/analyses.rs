@@ -223,6 +223,11 @@ impl Analyses {
         self.shared.is_some() && (self.analysing.contains(file) || !self.asked.contains(file))
     }
 
+    /// The audio files being analysed, by their names in the project.
+    pub(crate) fn analysing(&self) -> Vec<String> {
+        self.analysing.iter().cloned().collect()
+    }
+
     /// What the status bar says while files are being analysed.
     pub(crate) fn status(&self) -> Option<String> {
         match self.analysing.len() {

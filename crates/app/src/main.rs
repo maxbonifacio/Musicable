@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
+use musicable_app::bridge_tools::BridgeTools;
 use musicable_app::export::{Bits, Export, ExportSettings, FileFormat, Job, Span};
 use musicable_app::null_test::{self, Player, Render};
 use musicable_app::{App, PLUGINS_FILE};
@@ -178,11 +179,12 @@ fn scan_plugin(library: Option<OsString>) -> ExitCode {
 
 /// `musicable mcp`: lets the agent whose client started it control the
 /// Musicable that's running, over MCP on the standard input and output,
-/// until the client goes, and use the audio commands, which it runs
-/// itself. See `docs/agents.md`.
+/// until the client goes, and use the audio commands and the log, which it
+/// runs itself. See `docs/agents.md`.
 fn mcp() -> ExitCode {
-    let audio = Arc::new(musicable_app::toolkit::Tools);
-    match musicable_mcp::bridge::run(musicable_app::config_dir().as_deref(), audio) {
+    let config_dir = musicable_app::config_dir();
+    let local = Arc::new(BridgeTools::new(config_dir.clone()));
+    match musicable_mcp::bridge::run(config_dir.as_deref(), local) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("musicable mcp: {error}");

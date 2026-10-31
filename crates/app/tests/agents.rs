@@ -328,6 +328,44 @@ fn the_real_bridge_runs_the_audio_tools_with_musicable_closed() {
     assert!(bridge.close());
 }
 
+#[test]
+fn the_real_bridge_reads_the_log_with_musicable_closed() {
+    let dir = TempDir::new("mcp-log");
+    let mut bridge = Bridge::start(&dir.0);
+    // Before Musicable has ever run, there's no log.
+    let log = bridge.call("get_log", json!({}), &mut || {}).unwrap();
+    assert_eq!(log["entries"], json!([]), "{log}");
+    assert_eq!(log["file"], json!(dir.0.join("musicable.log")), "{log}");
+
+    // A panic, and what came before it, after Musicable stopped.
+    std::fs::write(
+        dir.0.join("musicable.log"),
+        "2026-10-31T05:00:00.000Z INFO  musicable_app::log_file: Musicable 0.2.0 started\n\
+         2026-10-31T05:00:01.000Z ERROR panic: thread 'main' panicked at app.rs:1:\n\
+         boom\n",
+    )
+    .unwrap();
+    let errors = json!({"level": "error", "since": "2026-10-31T05:00:00Z"});
+    let log = bridge.call("get_log", errors, &mut || {}).unwrap();
+    assert_eq!(
+        log["entries"],
+        json!([{
+            "time": "2026-10-31T05:00:01.000Z",
+            "level": "error",
+            "target": "panic",
+            "message": "thread 'main' panicked at app.rs:1:\nboom",
+        }]),
+        "{log}"
+    );
+    assert_eq!(log["earlier"], false, "{log}");
+    let latest = bridge.call("get_log", json!({"lines": 1}), &mut || {});
+    assert_eq!(latest.unwrap()["earlier"], true);
+    let wrong = bridge.call("get_log", json!({"since": "yesterday"}), &mut || {});
+    let wrong = wrong.unwrap_err();
+    assert!(wrong.starts_with("since must be a time in UTC"), "{wrong}");
+    assert!(bridge.close());
+}
+
 /// Runs `musicable audio` with `words` in the folder `dir`, and gives back
 /// its exit code and what it wrote to its output and to its errors.
 fn audio(dir: &Path, words: &[&str]) -> (Option<i32>, String, String) {

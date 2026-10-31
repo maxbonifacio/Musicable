@@ -92,7 +92,8 @@ warnings and errors, the graphics card it draws with, the graphics device
 being lost, and crashes, with what led to them, each line with the time in
 UTC. Once the file grows past a megabyte, it moves to `musicable.old.log`,
 so the two hold the latest lines. The console Musicable was started from,
-if any, shows them too.
+if any, shows them too. Agents read it with `get_log`
+([The command line](command-line.md#agents)).
 
 ## Reporting a bug
 
