@@ -666,3 +666,72 @@ fn agents_clear_peaks_change_keys_name_workspaces_and_export_stems() {
     );
     assert_eq!(missing, Err("There's no track 9.".to_owned()));
 }
+
+#[test]
+fn agents_wait_for_the_work_under_way_and_for_the_user() {
+    let dir = TempDir::new("agents-wait");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let wait = |until: &str, timeout: f64| json!({"until": until, "timeout": timeout});
+    // Nothing is under way in a new window.
+    let idle = agent.call(&mut window, "wait_for", wait("idle", 10.0));
+    let idle = idle.unwrap();
+    assert_eq!(idle["met"], true, "{idle}");
+    let revision = idle["status"]["revision"].as_u64().unwrap();
+
+    // The user changes the project while the agent waits.
+    let call = agent.start("wait_for", wait("changed", 30.0));
+    for _ in 0..30 {
+        window.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !call.is_finished(),
+        "the wait is over before anything changed"
+    );
+    (window.state_mut().session)
+        .run(&musicable_commands::track::NEW_MIDI_TRACK)
+        .unwrap();
+    let changed = agent.answer(&mut window, call).unwrap();
+    assert_eq!(changed["met"], true, "{changed}");
+    let now = changed["status"]["revision"].as_u64().unwrap();
+    assert!(now > revision, "{changed}");
+    // Since a revision it has moved on from, it's over at once, and with
+    // nothing changing, it runs out of time.
+    let since = json!({"until": "changed", "since": revision});
+    let since = agent.call(&mut window, "wait_for", since).unwrap();
+    assert_eq!(since["met"], true, "{since}");
+    let still = agent.call(&mut window, "wait_for", wait("changed", 0.3));
+    let still = still.unwrap();
+    assert_eq!(still["met"], false, "{still}");
+    assert_eq!(still["status"]["revision"], now, "{still}");
+
+    // New asks the user whether to save the new track: the agent waits
+    // until they've answered.
+    let new = agent.start("run_command", json!({"id": "file.new"}));
+    wait_for(&mut window, "the question", |app| app.pending.is_some());
+    let call = agent.start("wait_for", wait("answered", 30.0));
+    for _ in 0..30 {
+        window.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !call.is_finished(),
+        "the wait is over before the user answered"
+    );
+    window.get_by_label("Cancel").click();
+    let answered = agent.answer(&mut window, call).unwrap();
+    assert_eq!(answered["met"], true, "{answered}");
+    assert_eq!(answered["status"]["question"], Json::Null, "{answered}");
+    assert!(agent.answer(&mut window, new).is_err());
+
+    assert_eq!(
+        agent.call(
+            &mut window,
+            "wait_for",
+            json!({"until": "idle", "since": 2})
+        ),
+        Err("since goes with until changed.".to_owned())
+    );
+}

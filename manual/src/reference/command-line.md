@@ -102,7 +102,10 @@ renders ([Render Ahead](../getting-started/audio.md#render-ahead)).
 They can read what plays and what's under way: whether the transport plays
 or records, where the playhead is, the takes being recorded, a question the
 window asks you, and work that finishes later, such as analysing audio files
-for warping, rendering, an export or a scan. They can read the messages in
+for warping, rendering, an export or a scan. They can wait for that work
+to finish, for the takes to land after you stop recording, for you to answer
+the window's question, or for you to change the project, then carry on,
+without asking you whether it's done. They can read the messages in
 the status bar, and clear them, as **Dismiss** (×) does. And they can read
 the [log file](troubleshooting.md#the-log-file), which `musicable mcp` reads
 itself, so they can see why Musicable stopped after it has.

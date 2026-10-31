@@ -41,6 +41,7 @@ mod reads;
 #[cfg(test)]
 mod tests;
 pub mod tools;
+mod waiting;
 
 pub use host::Host;
 pub use reads::catalogue;
@@ -330,6 +331,9 @@ pub struct Status {
     pub reading_folders: Vec<(String, usize)>,
     /// Whether the library looks for presets.
     pub finding_presets: bool,
+    /// Goes up with every change to the project, undone and redone ones
+    /// too, and when another project opens.
+    pub revision: u64,
 }
 
 /// How a plugin device's plugin is doing: see [`Window::plugin_state`].

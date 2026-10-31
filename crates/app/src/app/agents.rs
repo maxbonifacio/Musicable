@@ -578,6 +578,7 @@ impl musicable_mcp::Window for Agent<'_> {
             scanning_folders: folders(library.scanning()),
             reading_folders: folders(library.reading()),
             finding_presets: library.is_finding_presets(),
+            revision: session.revision(),
         }
     }
 

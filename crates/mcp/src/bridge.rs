@@ -232,7 +232,13 @@ impl ServerHandler for Bridge {
             Ok(app) => app,
             Err(why) => return Ok(failed(why).into()),
         };
-        match app.call_tool_once(request).await {
+        // Dropping the call when the agent cancels it cancels it in
+        // Musicable too, as a wait_for needs.
+        let answered = tokio::select! {
+            answered = app.call_tool_once(request) => answered,
+            () = context.ct.cancelled() => return Ok(failed("The call was cancelled.").into()),
+        };
+        match answered {
             Ok(response) => Ok(response),
             Err(ServiceError::McpError(error)) => Err(error),
             // The connection closed: Musicable closed, or stopped letting
