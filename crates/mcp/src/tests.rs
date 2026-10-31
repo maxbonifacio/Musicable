@@ -324,6 +324,9 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_status",
             "get_messages",
             "get_settings",
+            "get_plugins",
+            "get_layout",
+            "get_levels",
             "list_audio_devices",
         ]
     );
@@ -613,6 +616,18 @@ fn reads_give_clips_devices_automation_and_the_editor() {
         assert!(param["name"].as_str().is_some_and(|name| !name.is_empty()));
         assert!(param["value"].is_number() && param["shown"].is_string());
     }
+    // A filter keeps the parameters whose names hold it, in any case.
+    let name = params[0]["name"].as_str().unwrap().to_uppercase();
+    let filtered = rig.call("get_device", json!({"device": 0, "filter": name}));
+    let filtered = filtered.unwrap();
+    let kept = filtered["params"].as_array().unwrap();
+    assert!(!kept.is_empty() && kept.len() <= params.len());
+    assert!(kept.iter().all(|param| {
+        let held = param["name"].as_str().unwrap().to_uppercase();
+        held.contains(&name)
+    }));
+    let none = rig.call("get_device", json!({"device": 0, "filter": "no such knob"}));
+    assert_eq!(none.unwrap()["params"], json!([]));
 
     let lane = rig
         .call("get_automation", json!({"param": "track 0 volume"}))
@@ -636,6 +651,34 @@ fn reads_give_clips_devices_automation_and_the_editor() {
     assert_eq!(editor["selected_track"], json!({"track": 0}));
     assert_eq!(editor["focus"], "arrangement");
     assert_eq!(editor["piano_roll"]["clip"], 0);
+    assert_eq!(editor["take_lanes"], json!([]));
+    assert_eq!(
+        editor["clipboards"],
+        json!({"clips": null, "notes": null, "devices": null})
+    );
+    assert!(
+        editor["piano_roll"]["in_sight"]["end"].is_number(),
+        "{editor}"
+    );
+
+    // What's copied, and the lanes shown.
+    rig.call(
+        "run_commands",
+        json!({"name": "Look", "commands": [
+            {"id": "edit.copy"},
+            {"id": "automation.show_lane", "args": {"param": "track 0 volume"}},
+        ]}),
+    )
+    .unwrap();
+    let editor = rig.call("get_editor", json!({})).unwrap();
+    assert_eq!(
+        editor["clipboards"]["clips"],
+        json!({"clips": 1, "length": 4})
+    );
+    assert_eq!(
+        editor["automation_lanes"],
+        json!([{"chain": {"track": 0}, "params": ["track 0 volume"]}])
+    );
 }
 
 #[test]
@@ -1037,6 +1080,8 @@ fn an_audio_clip_gives_its_warp_with_each_mode_s_settings() {
         json!({"high_quality": false, "formants": 100.0, "envelope": 128.0})
     );
     assert_eq!(warp["slice"]["preserve"], "transients");
+    // None until analysis finds them.
+    assert_eq!(warp["transients"], Json::Null);
 }
 
 #[test]
