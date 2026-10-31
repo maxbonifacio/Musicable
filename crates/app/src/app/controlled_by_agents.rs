@@ -841,6 +841,7 @@ fn agents_list_the_windows_and_take_pictures_of_them() {
     assert!(in_sight.contains(&json!("arrangement")), "{windows}");
     // Letting agents in left Settings open, a dialog over the main window.
     assert_eq!(windows["dialogs"], json!(["Settings"]), "{windows}");
+    assert_eq!(windows["plugins"], json!([]), "{windows}");
 
     // The whole main window, saved to a file too.
     let file = dir.0.join("main.png");
@@ -909,8 +910,18 @@ fn agents_list_the_windows_and_take_pictures_of_them() {
         both.unwrap_err()
             .starts_with("Give the window or the panel")
     );
-    // A window of its own is listed, but egui takes no pictures of it, nor
-    // of the panels in it.
+    let closed = agent.call(&mut window, "get_screenshot", json!({"device": 99}));
+    assert_eq!(
+        closed,
+        Err(
+            "Device 99's plugin window isn't open: device.show_window opens it, and get_windows \
+             lists the ones that are."
+                .to_owned()
+        )
+    );
+    // A window of its own is listed. egui takes no pictures of it, nor of
+    // the panels in it: Windows does, of a window it has shown, which a
+    // test's isn't.
     window
         .state_mut()
         .shell
@@ -925,9 +936,11 @@ fn agents_list_the_windows_and_take_pictures_of_them() {
     for shot in [json!({"window": 1}), json!({"panel": "mixer"})] {
         let refused = agent.call(&mut window, "get_screenshot", shot);
         let why = refused.unwrap_err();
-        assert!(
-            why.starts_with("Musicable can't take pictures of the windows"),
-            "{why}"
-        );
+        let expected = if cfg!(windows) {
+            "Windows didn't say which window that is"
+        } else {
+            "Musicable takes pictures of the windows panels moved to only on Windows"
+        };
+        assert!(why.starts_with(expected), "{why}");
     }
 }

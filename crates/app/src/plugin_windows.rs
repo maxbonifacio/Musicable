@@ -78,6 +78,15 @@ impl PluginWindows {
         self.open.contains_key(&device)
     }
 
+    /// The plugin windows that are open: each one's device, with its
+    /// title, and the window's handle, Win32's `HWND`, where Musicable
+    /// knows it: not for a plugin's window of its own.
+    pub fn open_windows(&self, session: &Session) -> Vec<(DeviceId, String, Option<isize>)> {
+        (self.open.iter())
+            .map(|(&device, window)| (device, title(session, device), window.hwnd()))
+            .collect()
+    }
+
     /// Whether any plugin window is open.
     pub fn any_open(&self) -> bool {
         !self.open.is_empty()
@@ -139,6 +148,15 @@ impl PluginWindows {
 }
 
 impl Window {
+    /// Its handle, Win32's `HWND`, if Musicable knows it.
+    fn hwnd(&self) -> Option<isize> {
+        match self {
+            #[cfg(windows)]
+            Window::Embedded(frame) => Some(frame.hwnd() as isize),
+            Window::Floating => None,
+        }
+    }
+
     fn set_owner(&self, owner: isize) {
         match self {
             #[cfg(windows)]

@@ -355,6 +355,9 @@ pub struct Shot {
     pub window: Option<usize>,
     /// The panel, by its id, in place of a whole window.
     pub panel: Option<String>,
+    /// The plugin device whose plugin's window to take, in place of one of
+    /// Musicable's.
+    pub device: Option<DeviceId>,
     /// Where to save it as a PNG file too, if anywhere.
     pub file: Option<PathBuf>,
 }

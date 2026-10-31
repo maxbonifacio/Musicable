@@ -134,7 +134,8 @@ is open; which panels are in sight, in which window, with your workspace
 and profile; and the meters, as the [mixer](../window/mixer.md) shows them. They can
 list the windows, and take a picture of the main window or of a panel in
 it, which they see as an image, as it's drawn, even if another window
-covers it.
+covers it. On Windows, they can take pictures of the windows you moved
+panels to, and of plugins' windows, too.
 
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,

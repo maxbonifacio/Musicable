@@ -403,18 +403,20 @@ pub fn list() -> Vec<Tool> {
             "Lists Musicable's windows: the main window and the windows of their own that panels \
              moved to, each with its window, main or its number from 1, its title, where it is \
              and how big, in pixels on the desktop, whether it's minimized or has the focus, and \
-             the panels in sight in it; and the dialogs open over the main window, such as \
-             Settings.",
+             the panels in sight in it; the dialogs open over the main window, such as \
+             Settings; and the plugins' windows that are open, each with its device's id, its \
+             title and whether get_screenshot can take it.",
             object(json!({}), &[]),
         ),
         read(
             GET_SCREENSHOT,
             "Get Screenshot",
-            "Takes a picture of a window, the main window unless window says, or of a panel, as \
-             it's drawn, whatever covers it or wherever it is, and gives it as an image after \
-             the window, the panel and its size in pixels. With file, it saves it there as a PNG \
-             too. A minimized window can't be taken, and a panel only while it's in sight, as \
-             get_layout says.",
+            "Takes a picture of a window, the main window unless window says, of a panel, or of \
+             a plugin device's window, as it's drawn, whatever covers it or wherever it is, and \
+             gives it as an image after the window, the panel or the device, and its size in \
+             pixels. With file, it saves it there as a PNG too. A minimized window can't be \
+             taken, and a panel only while it's in sight, as get_layout says. The windows \
+             panels moved to, and plugins' windows, are taken only on Windows so far.",
             object(
                 json!({
                     "window": {
@@ -429,6 +431,11 @@ pub fn list() -> Vec<Tool> {
                         "type": "string",
                         "description": "A panel's id, as get_layout gives it, such as mixer, to \
                                         take only it.",
+                    },
+                    "device": {
+                        "type": "integer",
+                        "description": "A plugin device's id, to take its plugin's window, \
+                                        which get_windows lists while it's open.",
                     },
                     "file": {
                         "type": "string",
@@ -555,7 +562,7 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_AUTOMATION => &["param"],
         GET_MESSAGES => &["clear"],
         GET_COMMAND_LOG => &["since", "last"],
-        GET_SCREENSHOT => &["window", "panel", "file"],
+        GET_SCREENSHOT => &["window", "panel", "device", "file"],
         GET_WINDOWS => &[],
         GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
         | LIST_AUDIO_DEVICES | GET_LAYOUT | GET_LEVELS => &[],
@@ -725,6 +732,16 @@ fn shot(arguments: &JsonObject) -> Result<Shot, Refused> {
                        window.";
         return Err(Refused::Arguments(problem.into()));
     }
+    let device = match arguments.get("device") {
+        None | Some(Json::Null) => None,
+        Some(_) => Some(DeviceId(id(arguments, "device")?)),
+    };
+    let given = |name: &str| arguments.get(name).is_some_and(|value| !value.is_null());
+    if device.is_some() && (given("window") || given("panel")) {
+        let problem = "Give the device, the window or the panel, not more than one: a plugin's \
+                       window is a window of its own.";
+        return Err(Refused::Arguments(problem.into()));
+    }
     let file = optional_text(arguments, "file")?.map(std::path::PathBuf::from);
     if let Some(file) = &file {
         if !file.is_absolute() {
@@ -739,6 +756,7 @@ fn shot(arguments: &JsonObject) -> Result<Shot, Refused> {
     Ok(Shot {
         window,
         panel,
+        device,
         file,
     })
 }
@@ -1036,8 +1054,30 @@ mod tests {
             Ok(Asked::Screenshot(Shot {
                 window: None,
                 panel: Some("mixer".into()),
+                device: None,
                 file: Some(file.into()),
             }))
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"device": 7})),
+            Ok(Asked::Screenshot(Shot {
+                device: Some(DeviceId(7)),
+                ..Shot::default()
+            }))
+        );
+        let one = "Give the device, the window or the panel, not more than one: a plugin's \
+                   window is a window of its own.";
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"device": 7, "window": 1})),
+            refused(one)
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"device": 7, "panel": "mixer"})),
+            refused(one)
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"device": "eq"})),
+            refused("device must be an id: a whole number.")
         );
         assert_eq!(
             call(GET_SCREENSHOT, json!({"window": 2})),
