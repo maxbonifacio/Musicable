@@ -57,6 +57,11 @@ impl ExportWindow {
         }
     }
 
+    /// Whether the window is open.
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
     /// Opens the window with `settings`, on `project` with `editor`'s
     /// selection, every track ticked. While an export runs, it opens on
     /// that.

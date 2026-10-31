@@ -825,6 +825,36 @@ impl Shell {
         self.windows.len()
     }
 
+    /// The viewport of the window `window`: the main window's with `None`,
+    /// or else that of the window of its own `window`, counted from 0, if
+    /// there's one.
+    pub fn window_viewport(&self, window: Option<usize>) -> Option<egui::ViewportId> {
+        match window {
+            None => Some(egui::ViewportId::ROOT),
+            Some(index) => self.windows.get(index).map(|window| window.id),
+        }
+    }
+
+    /// The title of the window of its own `index`, counted from 0, as its
+    /// title bar shows it, if there's one.
+    pub fn window_title(&self, index: usize, name: &str) -> Option<String> {
+        (self.windows.get(index)).map(|window| title(&window.dock, &self.registry, name))
+    }
+
+    /// Where the panel with id `id` is, while it's in sight: the window
+    /// it's in, as [`window_viewport`] counts them, and its place in it as
+    /// last drawn, with its tab bar, in points.
+    ///
+    /// [`window_viewport`]: Self::window_viewport
+    pub fn panel_rect(&self, id: &str) -> Option<(Option<usize>, egui::Rect)> {
+        if !self.panel_shown(id) {
+            return None;
+        }
+        let window = self.window_of(id);
+        let dock = window.map_or(&self.dock, |index| &self.windows[index].dock);
+        Some((window, dock.panel_rect(id, &self.theme)?))
+    }
+
     /// Where each panel is, as agents read it: in which window, and
     /// whether it's hidden or in sight, in the order the View menu lists
     /// them; and each window of its own's place, with its panels.

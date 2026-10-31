@@ -2274,6 +2274,7 @@ mod plugins_on_tracks;
 mod reading_for_agents;
 #[cfg(test)]
 mod remapping;
+mod seeing_for_agents;
 #[cfg(test)]
 mod switching_profiles;
 #[cfg(test)]

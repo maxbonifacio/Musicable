@@ -635,6 +635,14 @@ impl musicable_mcp::Window for Agent<'_> {
     fn run(&mut self, run: Run, reply: Reply) {
         self.app.run_for_agent(run, reply, self.ctx, self.frame);
     }
+
+    fn windows(&self) -> serde_json::Value {
+        self.app.windows_for_agent(self.ctx)
+    }
+
+    fn screenshot(&mut self, shot: musicable_mcp::Shot, reply: Reply) {
+        self.app.screenshot_for_agent(shot, reply, self.ctx);
+    }
 }
 
 /// Whether the app answers the agent whose command made `request`, rather

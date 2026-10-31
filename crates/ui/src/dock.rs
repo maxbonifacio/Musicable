@@ -582,6 +582,16 @@ impl Dock {
         Some(rect.size() + vec2(0.0, theme.dock.tab_bar))
     }
 
+    /// Where the panel with id `id` was as last drawn, with its tab bar,
+    /// in points in its window.
+    pub fn panel_rect(&self, id: &str, theme: &Theme) -> Option<Rect> {
+        let rect = self.tree.tiles.rect(self.find(id)?)?;
+        Some(Rect::from_min_max(
+            rect.min - vec2(0.0, theme.dock.tab_bar),
+            rect.max,
+        ))
+    }
+
     /// The panel a mouse button went down in this frame, where nothing such
     /// as a menu or a window was over it, or else the panel the keyboard
     /// focus moved into, as Tab moves it.

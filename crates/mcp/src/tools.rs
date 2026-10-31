@@ -26,7 +26,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::{Map, Value as Json, json};
 
 use crate::waiting::{self, Until};
-use crate::{Asked, Call, Reply, Run, reads};
+use crate::{Asked, Call, Reply, Run, Shot, reads};
 
 pub const LIST_COMMANDS: &str = "list_commands";
 pub const DESCRIBE_COMMAND: &str = "describe_command";
@@ -49,6 +49,8 @@ pub const GET_LAYOUT: &str = "get_layout";
 pub const GET_LEVELS: &str = "get_levels";
 pub const WAIT_FOR: &str = "wait_for";
 pub const GET_COMMAND_LOG: &str = "get_command_log";
+pub const GET_WINDOWS: &str = "get_windows";
+pub const GET_SCREENSHOT: &str = "get_screenshot";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -396,6 +398,47 @@ pub fn list() -> Vec<Tool> {
             object(json!({}), &[]),
         ),
         read(
+            GET_WINDOWS,
+            "Get Windows",
+            "Lists Musicable's windows: the main window and the windows of their own that panels \
+             moved to, each with its window, main or its number from 1, its title, where it is \
+             and how big, in pixels on the desktop, whether it's minimized or has the focus, and \
+             the panels in sight in it; and the dialogs open over the main window, such as \
+             Settings.",
+            object(json!({}), &[]),
+        ),
+        read(
+            GET_SCREENSHOT,
+            "Get Screenshot",
+            "Takes a picture of a window, the main window unless window says, or of a panel, as \
+             it's drawn, whatever covers it or wherever it is, and gives it as an image after \
+             the window, the panel and its size in pixels. With file, it saves it there as a PNG \
+             too. A minimized window can't be taken, and a panel only while it's in sight, as \
+             get_layout says.",
+            object(
+                json!({
+                    "window": {
+                        "description": "main, or a window of its own's number from 1, as \
+                                        get_windows gives it.",
+                        "anyOf": [
+                            { "type": "string", "enum": ["main"] },
+                            { "type": "integer", "minimum": 1 },
+                        ],
+                    },
+                    "panel": {
+                        "type": "string",
+                        "description": "A panel's id, as get_layout gives it, such as mixer, to \
+                                        take only it.",
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "A full path to a .png file to save it to.",
+                    },
+                }),
+                &[],
+            ),
+        ),
+        read(
             GET_LEVELS,
             "Get Levels",
             "Reads the meters, as the mixer shows them: each track's and the master's peak \
@@ -512,6 +555,8 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_AUTOMATION => &["param"],
         GET_MESSAGES => &["clear"],
         GET_COMMAND_LOG => &["since", "last"],
+        GET_SCREENSHOT => &["window", "panel", "file"],
+        GET_WINDOWS => &[],
         GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
         | LIST_AUDIO_DEVICES | GET_LAYOUT | GET_LEVELS => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
@@ -567,6 +612,8 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_PLUGINS => Asked::Plugins(optional_text(arguments, "filter")?),
         GET_LAYOUT => Asked::Layout,
         GET_LEVELS => Asked::Levels,
+        GET_WINDOWS => Asked::Windows,
+        GET_SCREENSHOT => Asked::Screenshot(shot(arguments)?),
         GET_COMMAND_LOG => Asked::CommandLog {
             since: optional_number(arguments, "since", u64::MAX)?,
             last: optional_number(arguments, "last", LONGEST_LOG)?
@@ -654,6 +701,48 @@ fn flag(arguments: &JsonObject, name: &str) -> Result<bool, Refused> {
     }
 }
 
+/// What `get_screenshot`'s `arguments` ask a picture of.
+fn shot(arguments: &JsonObject) -> Result<Shot, Refused> {
+    let window = match arguments.get("window") {
+        None | Some(Json::Null) => None,
+        Some(Json::String(main)) if main == "main" => None,
+        Some(window) => match window.as_u64() {
+            Some(window @ 1..) => Some(window as usize - 1),
+            _ => {
+                let problem = "window is main, or a window of its own's number from 1, as \
+                               get_windows gives it.";
+                return Err(Refused::Arguments(problem.into()));
+            }
+        },
+    };
+    let panel = optional_text(arguments, "panel")?;
+    if panel.is_some()
+        && arguments
+            .get("window")
+            .is_some_and(|window| !window.is_null())
+    {
+        let problem = "Give the window or the panel, not both: a panel's picture comes from its \
+                       window.";
+        return Err(Refused::Arguments(problem.into()));
+    }
+    let file = optional_text(arguments, "file")?.map(std::path::PathBuf::from);
+    if let Some(file) = &file {
+        if !file.is_absolute() {
+            let problem = "file must be a full path.";
+            return Err(Refused::Arguments(problem.into()));
+        }
+        if !(file.extension()).is_some_and(|extension| extension.eq_ignore_ascii_case("png")) {
+            let problem = "file must be a .png file.";
+            return Err(Refused::Arguments(problem.into()));
+        }
+    }
+    Ok(Shot {
+        window,
+        panel,
+        file,
+    })
+}
+
 /// How many entries of the command log `get_command_log` gives unless it
 /// says, and the most it can say.
 const LOG: usize = 100;
@@ -682,6 +771,18 @@ fn id(arguments: &JsonObject, name: &str) -> Result<u32, Refused> {
             "{name} must be an id: a whole number."
         ))),
     }
+}
+
+/// What the window answered, as the agent reads it: its JSON as text, and
+/// a picture it took, its `png`, as an image after it.
+fn content(mut json: Json) -> Vec<ContentBlock> {
+    let png = match json.as_object_mut().and_then(|json| json.remove("png")) {
+        Some(Json::String(png)) => Some(png),
+        _ => None,
+    };
+    let mut content = vec![ContentBlock::text(json.to_string())];
+    content.extend(png.map(|png| ContentBlock::image(png, "image/png")));
+    content
 }
 
 /// A failed call's result, saying why for the agent to read.
@@ -761,7 +862,7 @@ impl ServerHandler for Tools {
             Err(Refused::Arguments(why)) => return Ok(failed(why).into()),
         };
         let result = match self.ask(&agent, asked).await {
-            Ok(json) => CallToolResult::success(vec![ContentBlock::text(json.to_string())]),
+            Ok(json) => CallToolResult::success(content(json)),
             Err(why) => failed(why),
         };
         Ok(result.into())
@@ -920,6 +1021,61 @@ mod tests {
         assert_eq!(call(GET_SETTINGS, json!({})), Ok(Asked::Settings));
         assert_eq!(call(GET_LAYOUT, json!({})), Ok(Asked::Layout));
         assert_eq!(call(GET_LEVELS, json!({})), Ok(Asked::Levels));
+        assert_eq!(call(GET_WINDOWS, json!({})), Ok(Asked::Windows));
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({})),
+            Ok(Asked::Screenshot(Shot::default()))
+        );
+        let file = if cfg!(windows) {
+            "C:\\shots\\mixer.PNG"
+        } else {
+            "/shots/mixer.PNG"
+        };
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"panel": "mixer", "file": file})),
+            Ok(Asked::Screenshot(Shot {
+                window: None,
+                panel: Some("mixer".into()),
+                file: Some(file.into()),
+            }))
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"window": 2})),
+            Ok(Asked::Screenshot(Shot {
+                window: Some(1),
+                ..Shot::default()
+            }))
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"window": "main"})),
+            Ok(Asked::Screenshot(Shot::default()))
+        );
+        let window = "window is main, or a window of its own's number from 1, as get_windows \
+                      gives it.";
+        assert_eq!(call(GET_SCREENSHOT, json!({"window": 0})), refused(window));
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"window": "side"})),
+            refused(window)
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"window": 1, "panel": "mixer"})),
+            refused(
+                "Give the window or the panel, not both: a panel's picture comes from its window."
+            )
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"file": "mixer.png"})),
+            refused("file must be a full path.")
+        );
+        let jpeg = if cfg!(windows) {
+            "C:\\mixer.jpg"
+        } else {
+            "/mixer.jpg"
+        };
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"file": jpeg})),
+            refused("file must be a .png file.")
+        );
         assert_eq!(
             call(GET_COMMAND_LOG, json!({})),
             Ok(Asked::CommandLog {
@@ -969,9 +1125,22 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_comes_after_the_answer_as_an_image() {
+        let answer = content(json!({"window": "main", "png": "iVBORw0KGgo="}));
+        assert_eq!(answer.len(), 2);
+        assert_eq!(answer[0].as_text().unwrap().text, r#"{"window":"main"}"#);
+        let image = answer[1].as_image().unwrap();
+        assert_eq!(
+            (image.data.as_str(), image.mime_type.as_str()),
+            ("iVBORw0KGgo=", "image/png")
+        );
+        assert_eq!(content(json!({"window": "main"})).len(), 1);
+    }
+
+    #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 23);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());
