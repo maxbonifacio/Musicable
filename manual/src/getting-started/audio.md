@@ -83,8 +83,9 @@ render live whatever its input, with what it plays into: for a plugin
 whose window has to keep time with what you hear, such as an analyser, or
 knobs you want to hear at once. Each track that renders live while the
 rest renders ahead has a **LIVE** mark at the end of its name, and its
-tooltip says why, such as "Live: fed by the armed track Vocal". The
-project keeps it, and Undo takes it back.
+tooltip says why, such as "Live: fed by the armed track Vocal". With
+Render Ahead off, everything renders live, together, and no track has the
+mark. The project keeps Always Live, and Undo takes it back.
 
 A plugin that says it must render live, as one that talks to hardware
 does, renders live too, with what it plays into, and so does one set to

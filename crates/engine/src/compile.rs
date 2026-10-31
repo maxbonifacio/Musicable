@@ -876,13 +876,6 @@ fn build(
             tail: head,
         };
         let taps = strip.channel(Channel::Track(track), devices, media, &mut stages, cut);
-        // Its modulators and macros too, which nothing live reaches on an
-        // audio track, so its knobs answer at once as well.
-        if track.always_live
-            && let Some(modulation) = strip.graph.find(keys::modulation(Chain::Track(track.id)))
-        {
-            (strip.graph.set_live(modulation)).expect("the node was just added");
-        }
         // The cut follows the monitor's arming a block on, so the two
         // render on the same side of the engine, live or ahead, and so
         // does everything between.
@@ -1080,6 +1073,14 @@ fn build(
         }
     }
     modulate(project, meters, &instrument_notes, &mut graph);
+    // A track set to Always Live has its modulators and macros render live
+    // too, which nothing live reaches on an audio track, so its knobs
+    // answer at once as well.
+    for track in project.tracks.iter().filter(|track| track.always_live) {
+        if let Some(modulation) = graph.find(keys::modulation(Chain::Track(track.id))) {
+            graph.set_live(modulation).expect("the node was just added");
+        }
+    }
 
     // A parameter whose node isn't in the graph, such as a missing
     // plugin's, has nothing to automate.
@@ -1546,6 +1547,8 @@ pub struct Compiler {
 struct Job {
     number: u64,
     config: EngineConfig,
+    /// Prepare the graph whole ([`Graph::prepare_whole`]).
+    whole: bool,
     build: Box<dyn FnOnce() -> Graph + Send>,
 }
 
@@ -1575,7 +1578,11 @@ impl Compiler {
                     while let Ok(newer) = job_rx.try_recv() {
                         job = newer;
                     }
-                    let graph = (job.build)().prepare(&job.config);
+                    let graph = (job.build)();
+                    let graph = match job.whole {
+                        true => graph.prepare_whole(&job.config),
+                        false => graph.prepare(&job.config),
+                    };
                     let compiled = Compiled {
                         job: job.number,
                         graph,
@@ -1603,10 +1610,31 @@ impl Compiler {
         config: EngineConfig,
         build: impl FnOnce() -> Graph + Send + 'static,
     ) -> u64 {
+        self.queue(config, false, build)
+    }
+
+    /// Like [`compile`](Self::compile), preparing the graph whole
+    /// ([`Graph::prepare_whole`]): for an engine that renders nothing
+    /// ahead.
+    pub fn compile_whole(
+        &mut self,
+        config: EngineConfig,
+        build: impl FnOnce() -> Graph + Send + 'static,
+    ) -> u64 {
+        self.queue(config, true, build)
+    }
+
+    fn queue(
+        &mut self,
+        config: EngineConfig,
+        whole: bool,
+        build: impl FnOnce() -> Graph + Send + 'static,
+    ) -> u64 {
         self.last_job += 1;
         let job = Job {
             number: self.last_job,
             config,
+            whole,
             build: Box::new(build),
         };
         if let Some(jobs) = &self.jobs {
@@ -3923,6 +3951,34 @@ mod tests {
             .unwrap();
         play(&mut engine, 200);
         assert_eq!(drain(&mut kept), [0.0; 200]);
+    }
+
+    #[test]
+    fn a_track_set_always_live_has_its_modulators_render_live() {
+        // Its macro moves its own volume, which nothing live would reach
+        // the macro from.
+        let (mut p, drums, bass) = two_tones();
+        knob_on(&mut p, Chain::Track(drums), drums, 0.5);
+        knob_on(&mut p, Chain::Track(bass), bass, 0.5);
+        p.track_mut(drums).unwrap().always_live = true;
+        let graph = compile(&p).prepare(&CONFIG).unwrap();
+        assert!(graph.renders_live(keys::modulation(Chain::Track(drums))));
+        assert!(!graph.renders_live(keys::modulation(Chain::Track(bass))));
+    }
+
+    #[test]
+    fn a_job_can_keep_its_graph_whole() {
+        let mut p = project();
+        p.tracks[0].always_live = true;
+        let key = keys::track_clips(p.tracks[0].id);
+        let mut compiler = Compiler::spawn();
+        let split = p.clone();
+        compiler.compile(CONFIG, move || compile(&split));
+        assert!(compiler.recv().graph.unwrap().renders_live(key));
+        compiler.compile_whole(CONFIG, move || compile(&p));
+        let whole = compiler.recv().graph.unwrap();
+        assert!(!whole.renders_live(key));
+        assert!(whole.contains(key));
     }
 
     #[test]

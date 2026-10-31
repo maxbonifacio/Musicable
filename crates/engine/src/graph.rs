@@ -475,6 +475,18 @@ impl Graph {
         self.prepare_split(config, true)
     }
 
+    /// [`prepare`](Graph::prepare), keeping the graph whole, without a live
+    /// half: for an engine that renders nothing ahead, with the lead off
+    /// ([`EngineHandle::set_lead`](crate::EngineHandle::set_lead)) or for
+    /// an offline render. Every node renders as the device asks, in one
+    /// block, so the nodes that would render live run alongside the rest
+    /// rather than after them, and a pipelined block has them too. It
+    /// renders the same, sample for sample. With the lead on, a whole
+    /// graph with a live source renders nothing ahead.
+    pub fn prepare_whole(self, config: &EngineConfig) -> Result<PreparedGraph, GraphError> {
+        self.prepare_split(config, false)
+    }
+
     /// [`prepare`](Graph::prepare), keeping the graph whole if `split` is
     /// false: for a test's reference, which renders every node as the
     /// device asks.

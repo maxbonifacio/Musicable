@@ -1313,7 +1313,15 @@ uses it, as does Capture.
 Short, Normal or Long, `audio.render_ahead` in the settings file, Normal
 when it's left out (`settings::RenderAhead`). It applies at once, with no
 Apply, and the session keeps it (`Session::set_lead`) to set on every
-engine that takes over.
+engine that takes over. Turned off or on, it has the session compile the
+graph again: whole with it off (`Graph::prepare_whole`), so what would
+render live renders in the same block as the rest, alongside it rather
+than after it, and split with it on, so the rest renders ahead. Between
+Short, Normal and Long the graph stays as it is. The session's first
+graph is split, as the window sets the lead from the settings once it's
+open; an export's are whole, as its engine renders nothing ahead, so the
+master pipelines with the rest whatever renders live
+([Exporting audio](#exporting-audio)).
 
 ### Meters
 

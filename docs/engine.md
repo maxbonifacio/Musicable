@@ -1954,7 +1954,14 @@ notes and modulation. A live block can span several blocks rendered
 ahead, with more notes or modulation than a block has room for: what it
 hasn't room for waits in the queue for the next live block, late, rather
 than go. A graph without live sources is one half, which
-renders ahead. The compiler sets a track's clip player, input monitor,
+renders ahead. `Graph::prepare_whole` keeps any graph whole, for an
+engine that renders nothing ahead: with the lead off, every node renders
+as the device asks, so a split graph would render its two halves one
+after the other, each a block of its own, where a whole one renders them
+in the same block, alongside each other, and pipelined together in an
+export. The two render the same. `Compiler::compile_whole` prepares a
+job's graph that way. With the lead on, a whole graph with a live source
+renders nothing ahead. The compiler sets a track's clip player, input monitor,
 bus and modulation live when the track is set to Always Live
 (`Track::always_live`), so the whole of its strip renders live, its
 modulators and macros too, while what feeds a group or a return
