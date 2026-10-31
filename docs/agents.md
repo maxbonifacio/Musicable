@@ -175,6 +175,37 @@ The code is in
 [`crates/app/src/app/changing_settings.rs`](../crates/app/src/app/changing_settings.rs)
 and [`changing_keys.rs`](../crates/app/src/app/changing_keys.rs).
 
+### Checking Musicable
+
+These commands are for the PC checks, and answer when they're done.
+
+- `debug.record_output` (`file`) records every frame Musicable hands the
+  audio device to a WAV file, a full path, with a timeline of what the
+  engine applied beside it ([engine.md](engine.md)), until
+  `debug.stop_recording_output`.
+- `debug.measure_response` (`device`, `level_dbfs`?, `at`?) plays a known
+  signal through a copy of a device that takes audio, offline, and answers
+  with its response, measured against the same signal with no device:
+  - `delay_frames`: how late it is once its latency is made up for, 0
+    unless it reports the wrong latency.
+  - `frequency`, from white noise at `level_dbfs` (-18 unless asked, an RMS
+    level): the gain, phase and coherence in each third octave (`bands`)
+    and at each frequency in `at`, and the `lowest` and `highest` gain bin
+    by bin from 20 Hz to 20 kHz, about 3 Hz apart, which is how the EQ's
+    0.2 dB bar is checked. Coherence near 1 says the output is the input
+    filtered; it falls with distortion, noise or a gain that moves.
+  - `dynamics`, from a 1 kHz sine: the gain at peaks from -60 to 0 dBFS in
+    6 dB steps (`curve`, each step's `in_dbfs` and `out_dbfs` RMS levels),
+    and a `jump` from -40 to -10 dBFS and back, with the gain before,
+    during and after, and the `attack_ms` and `release_ms`: how long the
+    gain takes to get 90% of the way. They're null for a gain that moves
+    less than 0.5 dB.
+
+  The copy has the device's settings, but none of its wires, a sidechain's
+  among them, or of what modulates or automates it, and the project isn't
+  changed. [app.md](app.md#measuring-a-devices-response) says how it's
+  done.
+
 ### One step for several commands
 
 `run_commands` runs commands in order, as one step in the undo history

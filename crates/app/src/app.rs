@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use musicable_audio::InputKind;
 use musicable_commands::{
-    Args, CommandError, ExportOptions, Focus, Keymap, Request, arrange, browser, device,
+    Args, CommandError, ExportOptions, Focus, Keymap, Probing, Request, arrange, browser, device,
 };
 use musicable_engine::{EngineHandle, Lead, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
@@ -44,6 +44,7 @@ use crate::plugin_windows::PluginWindows;
 use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
 use crate::profiles_page::Asked as ProfilesAsked;
 use crate::renders::RenderCache;
+use crate::response::{self, Probe};
 use crate::settings::{
     self, ANALYSIS_FOLDER, KEYMAP_FILE, MOUSE_FILE, PluginsSettings, ProfileSettings,
     RENDER_FOLDER, SETTINGS_FILE, Settings, THEMES_FOLDER,
@@ -100,6 +101,8 @@ pub struct App {
     export_window: ExportWindow,
     /// The export under way, if one is.
     export: Option<Export>,
+    /// The device response being measured, if one is.
+    probe: Option<Probe>,
     /// Where the last export went, where the next one's dialog starts.
     export_folder: Option<PathBuf>,
     /// The project's file, once it has one.
@@ -284,6 +287,7 @@ impl App {
             settings_window: SettingsWindow::new(),
             export_window: ExportWindow::new(),
             export: None,
+            probe: None,
             export_folder: None,
             path,
             folder,
@@ -959,6 +963,11 @@ impl App {
                     self.messages.push(error);
                 }
             }
+            Request::MeasureResponse(probing) => {
+                if let Err(error) = self.measure_response(probing, ctx) {
+                    self.messages.push(error);
+                }
+            }
             Request::StopRecordingOutput => match self.session.stop_recording_output() {
                 Ok(done) => self.messages.push(format!(
                     "The output recording is in {}, and its timeline in {}.",
@@ -1373,6 +1382,52 @@ impl App {
         };
         self.export = Some(Export::start(job)?);
         Ok(())
+    }
+
+    /// Starts measuring a device's response, as `probing` asks, unless a
+    /// measurement is under way.
+    fn measure_response(&mut self, probing: Probing, ctx: &egui::Context) -> Result<(), String> {
+        if let Some(probe) = &self.probe {
+            return Err(format!(
+                "Musicable is still measuring {}'s response.",
+                probe.device().1
+            ));
+        }
+        let asked = response::Asked {
+            device: probing.device,
+            level: probing.level_dbfs.unwrap_or(response::LEVEL),
+            at: probing.at,
+        };
+        let project = self.session.saved_project();
+        let probe = Probe::start(
+            &project,
+            asked,
+            self.session.engine_config(),
+            self.session.installed_plugins().to_vec(),
+            Some(waker(ctx)),
+        )?;
+        self.probe = Some(probe);
+        Ok(())
+    }
+
+    /// Carries the measurement under way on, and once it's done, answers
+    /// the agent that asked for it, or says how it went.
+    fn tick_probe(&mut self) {
+        let Some(probe) = &mut self.probe else {
+            return;
+        };
+        let Some(result) = probe.tick() else {
+            return;
+        };
+        let name = probe.device().1.to_owned();
+        self.probe = None;
+        if self.measured_for_agent(&result) {
+            return;
+        }
+        self.messages.push(match result {
+            Ok(result) => response::summary(&name, &result),
+            Err(why) => why,
+        });
     }
 
     /// Carries the export under way on, and once it's finished, says how it
@@ -1798,6 +1853,7 @@ impl eframe::App for App {
         self.follow_plugin_marks();
         self.plugin_windows.tick(&mut self.session);
         self.tick_export();
+        self.tick_probe();
         self.messages.extend(self.session.take_problems());
         self.output.tick(&mut self.session, &mut self.messages);
         self.follow_inputs();

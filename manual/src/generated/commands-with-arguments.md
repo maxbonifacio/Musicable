@@ -50,6 +50,7 @@
 
 | Command | Id |
 |---|---|
+| Measure Device Response | `debug.measure_response` |
 | Record Output | `debug.record_output` |
 
 ### Device

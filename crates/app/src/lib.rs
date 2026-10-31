@@ -30,6 +30,7 @@ mod profiles;
 mod profiles_page;
 mod recorder;
 mod renders;
+mod response;
 mod session;
 mod settings;
 mod settings_window;

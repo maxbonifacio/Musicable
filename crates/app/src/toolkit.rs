@@ -38,7 +38,7 @@ mod manual;
 mod matching;
 mod resample;
 mod schema;
-mod spectra;
+pub(crate) mod spectra;
 mod spectrum;
 #[cfg(test)]
 mod tests;

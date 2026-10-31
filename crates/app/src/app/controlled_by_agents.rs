@@ -23,7 +23,7 @@ use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceKind, PluginFormat, Project, TrackKind};
 use musicable_plugins::scan::{self, Outcome, ScanCache};
 use musicable_test_plugins::testing::Library;
-use musicable_test_plugins::{LOAD_ID, POSITION};
+use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, LOAD_ID, POSITION};
 use musicable_ui::PluginEntry;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
@@ -1305,16 +1305,23 @@ fn agents_record_what_the_device_plays_with_a_timeline() {
     assert_eq!(not, Err("Musicable isn't recording its output.".into()));
 }
 
-#[test]
-fn agents_read_what_a_plugin_says_as_it_plays() {
-    let dir = TempDir::new("agents-readouts");
-    let folder = TempDir::new("agents-readouts-song");
-    let library = Library::copy(&folder.0, "test-plugins");
+/// Copies the test plugins to `folder`, and keeps what a scan of them
+/// finds in `config`, as if Musicable had scanned them.
+fn test_plugins(config: &Path, folder: &Path) -> Library {
+    let library = Library::copy(folder, "test-plugins");
     let mut cache = ScanCache::default();
     cache.update(&[library.path().to_owned()], false, |path| {
         Outcome::Found(scan::scan_here(path).unwrap())
     });
-    cache.write(&dir.0.join(PLUGINS_FILE)).unwrap();
+    cache.write(&config.join(PLUGINS_FILE)).unwrap();
+    library
+}
+
+#[test]
+fn agents_read_what_a_plugin_says_as_it_plays() {
+    let dir = TempDir::new("agents-readouts");
+    let folder = TempDir::new("agents-readouts-song");
+    let _library = test_plugins(&dir.0, &folder.0);
     let mut song = Project::new();
     let bass = song.add_track("Bass", TrackKind::Audio);
     let load = song.new_device(DeviceKind::Plugin(PluginDevice {
@@ -1361,4 +1368,75 @@ fn agents_read_what_a_plugin_says_as_it_plays() {
     let (_, _, device) = project.find_device(id).unwrap();
     assert_eq!(device.kind.plugin().unwrap().settings.param(POSITION), None);
     assert!(!window.state().session.is_modified());
+}
+
+#[test]
+fn agents_measure_a_devices_response() {
+    let dir = TempDir::new("agents-response");
+    let folder = TempDir::new("agents-response-song");
+    let _library = test_plugins(&dir.0, &folder.0);
+    // Test Gain at half, 100 frames late, which the mix makes up for.
+    let mut song = song();
+    let mut settings = PluginSettings::default();
+    settings.set_param(GAIN, Some(0.5));
+    settings.set_param(LATENCY, Some(100.0));
+    let gain = song.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: GAIN_ID.to_str().unwrap().into(),
+        name: "Test Gain".into(),
+        kind: PluginKind::AudioEffect,
+        inputs: Vec::new(),
+        note_output: false,
+        settings,
+    }));
+    let id = gain.id;
+    let instrument = song.tracks[0].devices[0].id;
+    song.master.devices.push(gain);
+    let file = folder.0.join("Song.musicable");
+    project::save(&file, &song).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let run = |window: &mut Window, args: Json| {
+        let args = json!({"id": "debug.measure_response", "args": args});
+        agent.call(window, "run_command", args)
+    };
+
+    let measured = run(&mut window, json!({"device": id.0, "at": [100, 10000]}));
+    let result = measured.unwrap()["result"].clone();
+    assert_eq!(result["name"], "Test Gain", "{result}");
+    assert_eq!(result["delay_frames"], 0, "{result}");
+    let half = 20.0 * 0.5f64.log10();
+    let near = |value: &Json| (value.as_f64().unwrap() - half).abs() < 0.01;
+    let frequency = &result["frequency"];
+    assert!(near(&frequency["lowest"]["gain_db"]), "{frequency}");
+    assert!(near(&frequency["highest"]["gain_db"]), "{frequency}");
+    for at in frequency["at"].as_array().unwrap() {
+        assert!(near(&at["gain_db"]), "{at}");
+        assert!(at["phase_degrees"].as_f64().unwrap().abs() < 0.1, "{at}");
+    }
+    assert_eq!(frequency["bands"].as_array().unwrap().len(), 31);
+    let dynamics = &result["dynamics"];
+    for step in dynamics["curve"].as_array().unwrap() {
+        assert!(near(&step["gain_db"]), "{step}");
+    }
+    assert_eq!(dynamics["jump"]["attack_ms"], Json::Null, "{dynamics}");
+    // The project's own Test Gain wasn't touched.
+    assert!(!window.state().session.is_modified());
+
+    // An instrument has no response, and the level has its limits.
+    let refused = run(&mut window, json!({"device": instrument.0}));
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("plays notes")),
+        "{refused:?}"
+    );
+    let refused = run(&mut window, json!({"device": id.0, "level_dbfs": 0}));
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("level_dbfs")),
+        "{refused:?}"
+    );
 }

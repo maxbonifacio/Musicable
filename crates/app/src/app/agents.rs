@@ -41,6 +41,8 @@ pub(super) struct Agents {
     asking: Option<Reply>,
     /// The agent's export that's under way.
     exporting: Option<Reply>,
+    /// The agent's measurement of a device's response that's under way.
+    measuring: Option<Reply>,
     /// The command that adds Musicable to Claude Code.
     claude_command: String,
 }
@@ -53,6 +55,7 @@ impl Agents {
             change: None,
             asking: None,
             exporting: None,
+            measuring: None,
             claude_command: claude_command(),
         }
     }
@@ -139,6 +142,7 @@ impl App {
             agents.change = None;
             agents.asking = None;
             agents.exporting = None;
+            agents.measuring = None;
             return;
         }
         if agents.host.is_some() {
@@ -292,6 +296,13 @@ impl App {
             )),
             Request::RecordOutput(file) => self.session.record_output(&file),
             Request::StopRecordingOutput => self.session.stop_recording_output(),
+            Request::MeasureResponse(probing) => {
+                match self.measure_response(probing, ctx) {
+                    Ok(()) => self.agents.measuring = Some(reply),
+                    Err(why) => reply.failed(full_stop(why)),
+                }
+                return;
+            }
             Request::SetAudioDevice(device) => self.set_audio_device(device),
             Request::SetKeys { command, keys } => self.set_keys(&command, keys),
             Request::ResetKeys(command) => self.reset_keys(&command),
@@ -427,6 +438,23 @@ impl App {
             Ok(()) => self.agents.exporting = Some(reply),
             Err(why) => reply.failed(why),
         }
+    }
+
+    /// Answers the agent whose measurement of a device's response just
+    /// finished with `result`, if an agent asked for it. Returns whether
+    /// one did.
+    pub(super) fn measured_for_agent(
+        &mut self,
+        result: &Result<serde_json::Value, String>,
+    ) -> bool {
+        let Some(reply) = self.agents.measuring.take() else {
+            return false;
+        };
+        match result {
+            Ok(result) => reply.done(json!({ "result": result })),
+            Err(why) => reply.failed(full_stop(why.clone())),
+        }
+        true
     }
 
     /// Answers the agent whose export just finished, as `report` says it
@@ -733,6 +761,7 @@ fn answers(request: &Request) -> bool {
             | Request::RenameWorkspace(_)
             | Request::RecordOutput(_)
             | Request::StopRecordingOutput
+            | Request::MeasureResponse(_)
     )
 }
 

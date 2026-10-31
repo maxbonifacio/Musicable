@@ -1229,6 +1229,36 @@ its track soloed, the tail is the release the live render plays, and
 normalised, 16-bit, AIFF, FLAC and 96 kHz files hold the same samples,
 scaled or rounded. A cancelled or failed export leaves no files behind.
 
+## Measuring a device's response
+
+`debug.measure_response` ([agents.md](agents.md#checking-musicable)) plays
+a known signal through a copy of a device, offline, and measures what comes
+out (`crates/app/src/response.rs`). The signal is a stereo float WAV file
+in a folder of its own in the temp folder, played by two audio tracks of a
+project made for it, Dry, with no devices, and Wet, with the copy. An
+export renders the two as stems, so the probe plays as the app does, with
+latency made up for and instances of its own of plugins, and the device in
+the project isn't disturbed. Measuring Wet against Dry takes out
+everything but the device, such as the faders. The folder goes once the
+measurement is done.
+
+The signal has three parts, about 14 seconds in all:
+
+- **Noise**, 4 seconds of white noise at the level asked for. The first
+  half second is left out while the device settles. The transfer function
+  (H1: the cross-spectrum over the dry spectrum, averaged over Hann windows
+  of about 0.3 s that overlap by half, and over the channels) gives the gain,
+  phase and coherence at each frequency. The peak of its impulse response
+  gives any delay left once latency is made up for, which the second pass
+  takes out.
+- **Steps** of a 1 kHz sine, its peak from -60 to 0 dBFS in 6 dB steps of
+  half a second, each measured over its last 0.2 s.
+- **A jump** of the sine from -40 to -10 dBFS for a second and back for two.
+  The gain, measured every 2 ms, gives the attack and release: how long it
+  takes to stay within 10% of the way to where it settles.
+
+The status bar says how it went when you run it from the command palette.
+
 ## Settings and your keymap
 
 The app keeps its settings, the user's keymap, mouse map, themes, workspaces

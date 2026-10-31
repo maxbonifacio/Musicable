@@ -30,15 +30,15 @@ pub(super) const OCTAVES: [f64; 10] = [
 
 /// A band of a spectrum, by its nominal centre and its edges, in hertz.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct Band {
-    pub(super) centre: f64,
-    pub(super) from: f64,
-    pub(super) to: f64,
+pub(crate) struct Band {
+    pub(crate) centre: f64,
+    pub(crate) from: f64,
+    pub(crate) to: f64,
 }
 
 /// The third octaves, or with `octaves` the octaves, whose centres are
 /// below `nyquist`, their top edges no higher.
-pub(super) fn bands(octaves: bool, nyquist: f64) -> Vec<Band> {
+pub(crate) fn bands(octaves: bool, nyquist: f64) -> Vec<Band> {
     let (nominal, step, first): (&[f64], f64, f64) = match octaves {
         true => (&OCTAVES, 0.3, -5.0),
         false => (&THIRD_OCTAVES, 0.1, -17.0),
