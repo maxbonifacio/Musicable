@@ -1128,15 +1128,16 @@ fn agents_use_the_mouse_and_keys_while_the_user_lets_them() {
     let nodes = every_node(&found["nodes"]);
     let node = labelled(&nodes, "BPM").unwrap();
     let bpm = node["id"].clone();
-    let [x, y] = [
-        node["at"][0].as_f64().unwrap(),
-        node["at"][1].as_f64().unwrap(),
-    ];
+    // Straight up from its middle: a drag value goes up as the pointer
+    // goes right or up, so going left would take some of it back.
+    let [x, y] = [0, 1].map(|axis| {
+        node["at"][axis].as_f64().unwrap() + node["size"][axis].as_f64().unwrap() / 2.0
+    });
     let done = use_hands(
         &agent,
         &mut window,
         json!({
-            "steps": [{"drag": bpm, "to": [x + 10.0, (y - 30.0).max(0.0)], "seconds": 0.2}],
+            "steps": [{"drag": bpm, "to": [x, (y - 40.0).max(0.0)], "seconds": 0.2}],
             "watch": {"filter": "BPM"},
         }),
         None,
