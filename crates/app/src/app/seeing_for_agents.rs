@@ -1,15 +1,16 @@
 //! What agents see of the windows: which there are, and pictures of them,
-//! or of a panel, as they're drawn. egui takes a window's picture as it
-//! paints it, so a covered window, or one on another monitor, comes out
-//! whole.
+//! or of a panel, as they're drawn. egui takes the main window's picture as
+//! it paints it, and Windows the rest's, so a covered window, or one on
+//! another monitor, comes out whole.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
 use eframe::egui::{self, ColorImage, Rect, ScreenshotCallback, ViewportCommand};
 use musicable_mcp::{Reply, Shot};
+use musicable_model::DeviceId;
 use serde_json::{Value as Json, json};
 
 use super::App;
@@ -66,15 +67,28 @@ impl App {
         if self.pending.is_some() {
             dialogs.push("Save Changes");
         }
+        let plugins: Vec<Json> = (self.plugin_windows.open_windows(&self.session).into_iter())
+            .map(|(device, title, hwnd)| {
+                json!({
+                    "device": device.0,
+                    "title": title,
+                    "can_screenshot": cfg!(windows) && hwnd.is_some(),
+                })
+            })
+            .collect();
         json!({
             "windows": main.into_iter().chain(own).collect::<Vec<_>>(),
             "dialogs": dialogs,
+            "plugins": plugins,
         })
     }
 
     /// Takes a picture of the window or the panel `shot` names, as it's
     /// next drawn, and answers `reply` with it, or says why it can't.
     pub(super) fn screenshot_for_agent(&mut self, shot: Shot, reply: Reply, ctx: &egui::Context) {
+        if let Some(device) = shot.device {
+            return self.plugin_screenshot(device, shot.file, reply);
+        }
         let (window, crop) = match &shot.panel {
             Some(panel) => {
                 if !self
@@ -106,15 +120,6 @@ impl App {
                 window.map_or(0, |index| index + 1)
             ));
         };
-        // eframe paints the windows of their own as egui draws them, and
-        // takes no pictures of those.
-        if window.is_some() {
-            return reply.failed(
-                "Musicable can't take pictures of the windows panels moved to yet, only of the \
-                 main window and the panels in it. view.move_to_main_window brings the panel \
-                 with the focus back.",
-            );
-        }
         let minimized = ctx.input_for(viewport, |input| input.viewport().minimized);
         if minimized == Some(true) {
             return reply.failed("The window is minimized, so it isn't drawn.");
@@ -125,6 +130,20 @@ impl App {
             "panel": shot.panel,
         });
         let file = shot.file;
+        // eframe paints the windows of their own as egui draws them, and
+        // takes no pictures of those, so Windows takes them.
+        if window.is_some() {
+            let Some(hwnd) = super::window_of(ctx, viewport) else {
+                return reply.failed(if cfg!(windows) {
+                    "Windows didn't say which window that is: try again once it's shown."
+                } else {
+                    "Musicable takes pictures of the windows panels moved to only on Windows so \
+                     far, and of the main window and the panels in it everywhere. \
+                     view.move_to_main_window brings the panel with the focus back."
+                });
+            };
+            return captured(hwnd, crop.map(|rect| (rect, scale)), name, file, reply);
+        }
         let taken = ScreenshotCallback::new(move |image: Arc<ColorImage>| {
             // Off the window's thread: encoding a big window takes a while.
             std::thread::spawn(move || {
@@ -141,6 +160,56 @@ impl App {
         ctx.send_viewport_cmd_to(viewport, ViewportCommand::Screenshot(taken));
         ctx.request_repaint_of(viewport);
     }
+}
+
+impl App {
+    /// Takes a picture of the device `device`'s plugin window, and answers
+    /// `reply` with it, saved to `file` too if it's given, or says why it
+    /// can't.
+    fn plugin_screenshot(&self, device: DeviceId, file: Option<PathBuf>, reply: Reply) {
+        let open = self.plugin_windows.open_windows(&self.session);
+        let Some((_, title, hwnd)) = open.into_iter().find(|(open, ..)| *open == device) else {
+            return reply.failed(format!(
+                "Device {}'s plugin window isn't open: device.show_window opens it, and \
+                 get_windows lists the ones that are.",
+                device.0
+            ));
+        };
+        let Some(hwnd) = hwnd.filter(|_| cfg!(windows)) else {
+            return reply.failed(if cfg!(windows) {
+                "The plugin opened a window of its own, which Musicable can't take pictures of."
+            } else {
+                "Musicable takes pictures of plugins' windows only on Windows so far."
+            });
+        };
+        let name = json!({"device": device.0, "title": title});
+        captured(hwnd, None, name, file, reply);
+    }
+}
+
+/// Has Windows take a picture of the window `hwnd`, Win32's `HWND`, or of
+/// the part of it `crop` gives, in points at so many pixels a point, off
+/// the window's thread, and answers `reply` with it as [`picture`] does.
+fn captured(
+    hwnd: isize,
+    crop: Option<(Rect, f32)>,
+    name: Json,
+    file: Option<PathBuf>,
+    reply: Reply,
+) {
+    std::thread::spawn(move || {
+        let answer = crate::window_capture::capture(hwnd).and_then(|image| {
+            let image = match crop {
+                Some((rect, scale)) => cropped(&image, rect, scale),
+                None => image,
+            };
+            picture(&image, name, file.as_deref())
+        });
+        match answer {
+            Ok(answer) => reply.done(answer),
+            Err(why) => reply.failed(why),
+        }
+    });
 }
 
 /// The part of `image` in `rect`, in points, at `scale` pixels a point.

@@ -33,6 +33,7 @@ mod settings;
 mod settings_window;
 mod theme_file;
 pub mod toolkit;
+mod window_capture;
 mod workspaces;
 
 pub use app::App;
