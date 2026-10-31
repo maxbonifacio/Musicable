@@ -17,8 +17,10 @@ use musicable_io::project;
 use musicable_mcp::bridge::{self, Bridge};
 use musicable_mcp::pipe::Address;
 use musicable_model::clip::{ClipContent, MidiClip};
+use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{DeviceKind, Project, TrackKind};
+use musicable_model::{DeviceKind, PluginFormat, Project, TrackKind};
+use musicable_ui::PluginEntry;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
 };
@@ -464,4 +466,99 @@ fn agents_change_settings_and_hear_what_they_were() {
         agent.call(&mut window, "run_command", reset),
         Ok(json!({"result": null}))
     );
+}
+
+#[test]
+fn agents_read_the_plugins_the_layout_and_the_meters() {
+    let dir = TempDir::new("agents-reads");
+    let file = dir.0.join("Song.musicable");
+    let mut song = song();
+    // A plugin this computer hasn't got.
+    let missing = song.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: "org.example.missing".into(),
+        name: "Missing".into(),
+        kind: PluginKind::AudioEffect,
+        inputs: Vec::new(),
+        note_output: false,
+        settings: PluginSettings::default(),
+    }));
+    let missing_id = missing.id.0;
+    song.tracks[0].devices.push(missing);
+    project::save(&file, &song).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+
+    // The plugins the browser lists, all of them or those a filter finds.
+    let entry = |name: &str, vendor: &str, kind| PluginEntry {
+        format: PluginFormat::Clap,
+        id: format!("org.{}.{}", vendor.to_lowercase(), name.to_lowercase()),
+        name: name.into(),
+        vendor: vendor.into(),
+        kind,
+        never_ahead: false,
+    };
+    window.state_mut().plugin_entries = vec![
+        entry("Surge", "Surge", PluginKind::Instrument),
+        PluginEntry {
+            never_ahead: true,
+            ..entry("Delay", "Acme", PluginKind::AudioEffect)
+        },
+    ];
+    let plugins = agent.call(&mut window, "get_plugins", json!({})).unwrap();
+    assert_eq!(plugins["installed"], 2, "{plugins}");
+    assert_eq!(plugins["scanning"], false, "{plugins}");
+    let found = agent.call(&mut window, "get_plugins", json!({"filter": "ACME"}));
+    assert_eq!(
+        found.unwrap()["plugins"],
+        json!([{
+            "format": "clap",
+            "id": "org.acme.delay",
+            "name": "Delay",
+            "vendor": "Acme",
+            "kind": "audio_effect",
+            "render_ahead": "never",
+        }])
+    );
+
+    // A plugin device says whether it plays, and why not: here nothing
+    // tries to load it, with the plugins never scanned.
+    let device = agent.call(&mut window, "get_device", json!({"device": missing_id}));
+    let device = device.unwrap();
+    assert_eq!(device["loaded"], false, "{device}");
+    assert_eq!(device.get("problem"), Some(&Json::Null), "{device}");
+    assert_eq!(device["window_open"], false, "{device}");
+
+    // Where the panels are, and which are in sight.
+    let layout = agent.call(&mut window, "get_layout", json!({})).unwrap();
+    assert_eq!(layout["workspace"], "Default", "{layout}");
+    assert_eq!(layout["profile"], "Default", "{layout}");
+    assert_eq!(layout["windows"], json!([]), "{layout}");
+    let panels = layout["panels"].as_array().unwrap();
+    let mixer = |layout: &Json| {
+        let panels = layout["panels"].as_array().unwrap();
+        (panels.iter())
+            .find(|panel| panel["title"] == "Mixer")
+            .cloned()
+            .unwrap()
+    };
+    assert!(
+        panels.iter().all(|panel| panel["window"] == "main"),
+        "{layout}"
+    );
+    let shown = mixer(&layout)["in_sight"].as_bool().unwrap();
+    let toggle = json!({"id": "view.toggle_mixer"});
+    agent.call(&mut window, "run_command", toggle).unwrap();
+    let layout = agent.call(&mut window, "get_layout", json!({})).unwrap();
+    assert_eq!(mixer(&layout)["in_sight"], !shown, "{layout}");
+    assert_eq!(mixer(&layout)["hidden"], shown, "{layout}");
+
+    // The meters, silent with no audio device playing.
+    let levels = agent.call(&mut window, "get_levels", json!({})).unwrap();
+    assert_eq!(levels["playing"], false, "{levels}");
+    let silent = json!({"peak": [null, null], "rms": [null, null], "highest": null});
+    assert_eq!(levels["master"], silent, "{levels}");
+    assert_eq!(levels["tracks"][0]["name"], "Keys", "{levels}");
+    assert_eq!(levels["tracks"][0]["peak"], silent["peak"], "{levels}");
 }

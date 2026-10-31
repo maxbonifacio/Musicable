@@ -43,6 +43,9 @@ pub const GET_STATUS: &str = "get_status";
 pub const GET_MESSAGES: &str = "get_messages";
 pub const GET_SETTINGS: &str = "get_settings";
 pub const LIST_AUDIO_DEVICES: &str = "list_audio_devices";
+pub const GET_PLUGINS: &str = "get_plugins";
+pub const GET_LAYOUT: &str = "get_layout";
+pub const GET_LEVELS: &str = "get_levels";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -183,7 +186,8 @@ pub fn list() -> Vec<Tool> {
             "Reads one clip: where it is, and its notes, with their expression, and its \
              controllers' curves, in the clip's own time, or its audio file, with its warp \
              (its markers, mode, transpose, detune, and Slice's, Spectral's and Granular's \
-             settings) and its curves, by parameter, if it has them.",
+             settings, and the transients analysis found, once it has) and its curves, by \
+             parameter, if it has them.",
             object(json!({ "clip": id_number("The clip's id.") }), &["clip"]),
         ),
         read(
@@ -195,9 +199,17 @@ pub fn list() -> Vec<Tool> {
              param 2\" and its Bypass as \"device 4 bypass\", and its ports, with the wires \
              into each: a Compressor's or a Gate's Sidechain, or a plugin's side inputs, by the \
              plugin's ids and names for them, and an instrument's or a MIDI effect's note \
-             input, last, as wire.connect takes them.",
+             input, last, as wire.connect takes them. A plugin's says whether it loaded, why \
+             it plays nothing if it doesn't, and whether its window is open. filter keeps the \
+             parameters whose names hold it, for a plugin with thousands.",
             object(
-                json!({ "device": id_number("The device's id.") }),
+                json!({
+                    "device": id_number("The device's id."),
+                    "filter": {
+                        "type": "string",
+                        "description": "Text the parameters' names hold, in any case.",
+                    },
+                }),
                 &["device"],
             ),
         ),
@@ -237,7 +249,9 @@ pub fn list() -> Vec<Tool> {
             "Reads the editor's state: what's selected, the selected track, which panel has \
              the focus, where the start marker is, the grid, what's in sight, the clip the \
              piano roll shows and its selected notes, and the devices selected in the devices \
-             panel, which shows the selected track's, in the order they play.",
+             panel, which shows the selected track's, in the order they play; what the piano \
+             roll and the Sample Editor have in sight, the tracks' heights, take and \
+             automation lanes, and what's on the clipboards.",
             object(json!({}), &[]),
         ),
         read(
@@ -310,6 +324,44 @@ pub fn list() -> Vec<Tool> {
              and driver type, sample rate, buffer, latency and inputs, or null when nothing \
              does; and the recording offset of the device playing, in frames. Settings aren't \
              steps in the undo history: an agent that changes one puts it back when it's done.",
+            object(json!({}), &[]),
+        ),
+        read(
+            GET_PLUGINS,
+            "Get Plugins",
+            "Lists the plugins installed, as the browser does, for device.add_plugin: each \
+             one's format, id, name, vendor, kind (instrument, midi_effect or audio_effect) \
+             and Render Ahead (auto, or never if it always renders live), and whether the \
+             plugins are being scanned. A filter keeps those whose names, vendors or ids \
+             hold it.",
+            object(
+                json!({
+                    "filter": {
+                        "type": "string",
+                        "description": "Text the name, the vendor or the id holds, in any case.",
+                    }
+                }),
+                &[],
+            ),
+        ),
+        read(
+            GET_LAYOUT,
+            "Get Layout",
+            "Reads how the window is laid out: each panel's id and title, which window it's \
+             in, the main one or a window of its own, whether it's hidden, and whether it's \
+             in sight, rather than hidden or behind another tab; each window of its own's \
+             place, size and panels; the monitors; and the workspace and the profile in use. \
+             view.toggle_* commands show and hide panels by these ids.",
+            object(json!({}), &[]),
+        ),
+        read(
+            GET_LEVELS,
+            "Get Levels",
+            "Reads the meters, as the mixer shows them: each track's and the master's peak \
+             and RMS, left and right, and the highest sample since the peaks were cleared, in \
+             dBFS, null for silence; where each modulator's outputs are now; and how far the \
+             routings move each parameter they move. The meters move only while an audio \
+             device plays, and fall back for a few seconds after the music stops.",
             object(json!({}), &[]),
         ),
         read(
@@ -386,12 +438,13 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         RUN_COMMAND => &["id", "args"],
         RUN_COMMANDS => &["name", "commands"],
         GET_CLIP => &["clip"],
-        GET_DEVICE => &["device"],
+        GET_DEVICE => &["device", "filter"],
+        GET_PLUGINS => &["filter"],
         GET_MODULATOR => &["modulator"],
         GET_AUTOMATION => &["param"],
         GET_MESSAGES => &["clear"],
         GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
-        | LIST_AUDIO_DEVICES => &[],
+        | LIST_AUDIO_DEVICES | GET_LAYOUT | GET_LEVELS => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
     };
     if let Some(unknown) = arguments
@@ -438,7 +491,13 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         }
         GET_PROJECT => Asked::Project,
         GET_CLIP => Asked::Clip(ClipId(id(arguments, "clip")?)),
-        GET_DEVICE => Asked::Device(DeviceId(id(arguments, "device")?)),
+        GET_DEVICE => Asked::Device(
+            DeviceId(id(arguments, "device")?),
+            optional_text(arguments, "filter")?,
+        ),
+        GET_PLUGINS => Asked::Plugins(optional_text(arguments, "filter")?),
+        GET_LAYOUT => Asked::Layout,
+        GET_LEVELS => Asked::Levels,
         GET_MODULATOR => Asked::Modulator(ModulatorId(id(arguments, "modulator")?)),
         GET_AUTOMATION => {
             let param = text(arguments, "param")?;
@@ -750,6 +809,16 @@ mod tests {
         assert_eq!(call(GET_PERFORMANCE, json!({})), Ok(Asked::Performance));
         assert_eq!(call(GET_STATUS, json!({})), Ok(Asked::Status));
         assert_eq!(call(GET_SETTINGS, json!({})), Ok(Asked::Settings));
+        assert_eq!(call(GET_LAYOUT, json!({})), Ok(Asked::Layout));
+        assert_eq!(call(GET_LEVELS, json!({})), Ok(Asked::Levels));
+        assert_eq!(
+            call(GET_PLUGINS, json!({"filter": "surge"})),
+            Ok(Asked::Plugins(Some("surge".into())))
+        );
+        assert_eq!(
+            call(GET_DEVICE, json!({"device": 4, "filter": "cutoff"})),
+            Ok(Asked::Device(DeviceId(4), Some("cutoff".into())))
+        );
         assert_eq!(call(LIST_AUDIO_DEVICES, json!({})), Ok(Asked::AudioDevices));
         assert_eq!(
             call(GET_MESSAGES, json!({})),
@@ -768,7 +837,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 19);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

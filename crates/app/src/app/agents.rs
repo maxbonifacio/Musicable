@@ -9,7 +9,7 @@ use musicable_commands::{Args, Editor, Keymap, Registry, Request, Steps, arrange
 use musicable_engine::Lead;
 use musicable_mcp::pipe::Address;
 use musicable_mcp::{
-    CpuPart, CpuRow, Exporting, Host, Performance, RenderingAhead, Reply, Run, Status,
+    CpuPart, CpuRow, Exporting, Host, Performance, PluginState, RenderingAhead, Reply, Run, Status,
 };
 use musicable_model::param::ParamSpec;
 use musicable_model::time::Beats;
@@ -559,6 +559,28 @@ impl musicable_mcp::Window for Agent<'_> {
             reading_folders: folders(library.reading()),
             finding_presets: library.is_finding_presets(),
         }
+    }
+
+    fn plugin_state(&self, device: DeviceId) -> Option<PluginState> {
+        let status = self.app.plugin_status.get(&device)?;
+        Some(PluginState {
+            loaded: status.loaded,
+            problem: status.problem.clone(),
+            has_window: status.has_window,
+            window_open: status.window_open,
+        })
+    }
+
+    fn plugins(&self, filter: Option<&str>) -> serde_json::Value {
+        self.app.plugins_for_agent(filter)
+    }
+
+    fn layout(&self) -> serde_json::Value {
+        self.app.layout_for_agent()
+    }
+
+    fn levels(&self) -> serde_json::Value {
+        self.app.levels_for_agent()
     }
 
     fn settings(&self) -> serde_json::Value {

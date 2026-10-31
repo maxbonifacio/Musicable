@@ -62,7 +62,9 @@ enum Asked {
     Command(CommandId),
     Project,
     Clip(ClipId),
-    Device(DeviceId),
+    /// A device, with only the parameters whose names hold the text, if
+    /// there is one.
+    Device(DeviceId, Option<String>),
     Modulator(ModulatorId),
     /// A parameter's automation.
     Automation(ParamAddress),
@@ -76,6 +78,13 @@ enum Asked {
     Settings,
     /// The audio devices there are.
     AudioDevices,
+    /// The plugins installed, or those whose names, vendors or ids hold
+    /// the text.
+    Plugins(Option<String>),
+    /// How the panels and windows are laid out.
+    Layout,
+    /// The meters.
+    Levels,
     /// The messages the window shows the user, and whether to clear them
     /// once read.
     Messages {
@@ -323,6 +332,18 @@ pub struct Status {
     pub finding_presets: bool,
 }
 
+/// How a plugin device's plugin is doing: see [`Window::plugin_state`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginState {
+    /// Its plugin loaded, and plays.
+    pub loaded: bool,
+    /// Why it plays nothing, if it doesn't, such as the plugin missing.
+    pub problem: Option<String>,
+    /// It has a window of its own, and whether that's open.
+    pub has_window: bool,
+    pub window_open: bool,
+}
+
 /// How an export is going, as its window's progress bar shows it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Exporting {
@@ -368,6 +389,28 @@ pub trait Window {
         Status::default()
     }
 
+    /// How the plugin device `device`'s plugin is doing, or `None` if the
+    /// window doesn't know.
+    fn plugin_state(&self, _device: DeviceId) -> Option<PluginState> {
+        None
+    }
+
+    /// The plugins installed, as the browser lists them, or those whose
+    /// names, vendors or ids hold `filter`, as JSON.
+    fn plugins(&self, _filter: Option<&str>) -> Json {
+        Json::Object(Map::new())
+    }
+
+    /// How the panels and the windows of their own are laid out, as JSON.
+    fn layout(&self) -> Json {
+        Json::Object(Map::new())
+    }
+
+    /// What the meters read, as JSON.
+    fn levels(&self) -> Json {
+        Json::Object(Map::new())
+    }
+
     /// The settings, as the settings file has them, with the profile in
     /// use's, and what plays, as JSON.
     fn settings(&self) -> Json {
@@ -408,7 +451,7 @@ pub fn answer(call: Call, window: &mut impl Window) {
         Asked::Command(id) => reads::command(window, &id),
         Asked::Project => Ok(reads::project(window)),
         Asked::Clip(clip) => reads::clip(window, clip),
-        Asked::Device(device) => reads::device(window, device),
+        Asked::Device(device, filter) => reads::device(window, device, filter.as_deref()),
         Asked::Modulator(modulator) => reads::modulator(window, modulator),
         Asked::Automation(param) => reads::automation(window, param),
         Asked::Editor => Ok(reads::editor(window)),
@@ -417,6 +460,9 @@ pub fn answer(call: Call, window: &mut impl Window) {
         Asked::Status => Ok(reads::status(window)),
         Asked::Settings => Ok(window.settings()),
         Asked::AudioDevices => Ok(window.audio_devices()),
+        Asked::Plugins(filter) => Ok(window.plugins(filter.as_deref())),
+        Asked::Layout => Ok(window.layout()),
+        Asked::Levels => Ok(window.levels()),
         Asked::Messages { clear } => {
             let messages = window.messages();
             if clear {

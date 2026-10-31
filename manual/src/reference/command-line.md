@@ -116,6 +116,11 @@ agent did, and the agent hears what the setting was, to put it back when
 it's done. Agents can't change the theme, your workspaces or profiles, or
 whether they're let in.
 
+They can also read the plugins the browser lists, to add one by its id;
+whether a plugin device's plugin loaded, or why not, and whether its window
+is open; which panels are in sight, in which window, with your workspace
+and profile; and the meters, as the [mixer](../window/mixer.md) shows them.
+
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,
 so they work while Musicable is closed or doesn't let agents in, and they
