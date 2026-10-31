@@ -21,11 +21,11 @@ use crate::timeline::{self, Timeline};
 /// notes doesn't fill its height with them.
 const MIN_KEYS: u8 = 12;
 
-/// The lanes: each track's clips over the grid, and its takes' and its
-/// automation lanes under it if it shows them, with what the tracks are
-/// recording, the loop region, the time selection, the start marker and the
-/// playhead, and where `plan` would put things; and the master's under
-/// them.
+/// The lanes: each track's clips over the grid and the bars' shades, and
+/// its takes' and its automation lanes under it if it shows them, with what
+/// the tracks are recording, the loop region, the time selection, the start
+/// marker and the playhead, and where `plan` would put things; and the
+/// master's under them.
 pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let theme = scene.theme;
     let layout = &scene.layout;
@@ -58,6 +58,7 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     }
     let bottom = layout.bottom().clamp(lanes.top(), part.bottom());
     let tracks = Rect::from_x_y_ranges(lanes.x_range(), lanes.top()..=bottom);
+    timeline::bar_shades(painter, theme, &self::timeline(scene), tracks);
     if project.looping {
         let region = project.loop_region;
         let x = layout.x_of(region.start)..=layout.x_of(region.end);
@@ -100,10 +101,10 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
 }
 
 /// The master's part of the lanes: its row, lit while it's selected, and
-/// its automation lanes under it, with the grid and the loop region over
-/// them, the time selection over its row if it's on the master, and a line
-/// along its top that sets it apart from the tracks. Returns where its row
-/// and lanes are.
+/// its automation lanes under it, with the bars' shades, the grid and the
+/// loop region over them, the time selection over its row if it's on the
+/// master, and a line along its top that sets it apart from the tracks.
+/// Returns where its row and lanes are.
 fn master(painter: &Painter, scene: &Scene<'_>) -> Rect {
     let theme = scene.theme;
     let layout = &scene.layout;
@@ -127,6 +128,7 @@ fn master(painter: &Painter, scene: &Scene<'_>) -> Rect {
     }
     let bottom = (layout.master_automation.last()).map_or(row.bottom(), AutoRow::bottom);
     let filled = Rect::from_x_y_ranges(across, row.top..=bottom);
+    timeline::bar_shades(painter, theme, &self::timeline(scene), filled);
     let project = scene.project();
     if project.looping {
         let region = project.loop_region;

@@ -80,6 +80,11 @@ pub struct Theme {
     /// Below the last track.
     #[serde(with = "values::colour")]
     pub empty: Color32,
+    /// Laid over every other group of bars in the lanes, so groups of 1, 2,
+    /// 4, 8 or more bars stand apart, as many as the zoom fits in
+    /// `bar_shade_width`.
+    #[serde(with = "values::colour")]
+    pub bar_shade: Color32,
     /// The grid's lines: at bars, at beats and between.
     #[serde(with = "values::colour")]
     pub grid_bar: Color32,
@@ -239,6 +244,8 @@ pub struct Theme {
     pub height_grab: f32,
     /// The least room between the ruler's bar numbers.
     pub label_spacing: f32,
+    /// The least width of a group of bars the lanes shade.
+    pub bar_shade_width: f32,
     /// The start marker's and the locators' triangles.
     pub marker: f32,
     /// Room around what's in a track's header.
@@ -599,6 +606,7 @@ impl Theme {
             lane_alternate: Color32::from_gray(42),
             lane_selected: Color32::from_gray(52),
             empty: Color32::from_gray(30),
+            bar_shade: Color32::from_rgba_unmultiplied(255, 255, 255, 10),
             grid_bar: Color32::from_gray(78),
             grid_beat: Color32::from_gray(58),
             grid_step: Color32::from_gray(48),
@@ -670,6 +678,7 @@ impl Theme {
             fade_handle: 7.0,
             height_grab: 4.0,
             label_spacing: 44.0,
+            bar_shade_width: 96.0,
             marker: 7.0,
             padding: 4.0,
             colour_strip: 4.0,

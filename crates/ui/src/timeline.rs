@@ -59,6 +59,42 @@ pub(crate) fn grid(
     }
 }
 
+/// Every other group of bars over `area` shaded, counting from the song's
+/// start, so the groups stand apart: each as many bars, 1, 2, 4, 8 or more,
+/// as fill the theme's `bar_shade_width` at the zoom. Groups start at the
+/// ruler's numbers, and like them, take the length of the first bar in
+/// sight across the view, so they don't change size along it when the time
+/// signature does.
+pub(crate) fn bar_shades(painter: &Painter, theme: &Theme, timeline: &Timeline<'_>, area: Rect) {
+    let tempo = timeline.tempo;
+    let visible = timeline.viewport.visible();
+    let first = tempo.bar_at(visible.start).bar;
+    let last = tempo.bar_at(visible.end).bar;
+    let group = bars_in(tempo, timeline.viewport.zoom, first, theme.bar_shade_width);
+    // The first group is left as it is, the second shaded, and so on.
+    let mut bar = first - first.rem_euclid(2 * group) + group;
+    while bar <= last {
+        let start = timeline.x_of(tempo.bar_start(bar));
+        let end = timeline.x_of(tempo.bar_start(bar + group));
+        let shade = Rect::from_x_y_ranges(start..=end, area.y_range()).intersect(area);
+        if shade.is_positive() {
+            painter.rect_filled(shade, 0.0, theme.bar_shade);
+        }
+        bar += 2 * group;
+    }
+}
+
+/// How many bars, 1, 2, 4, 8 or more, are at least `least` points wide at
+/// `zoom`, as long as `bar` is.
+pub(crate) fn bars_in(tempo: &TempoMap, zoom: f64, bar: i64, least: f32) -> i64 {
+    let width = (tempo.bar_start(bar + 1) - tempo.bar_start(bar)).to_f64() * zoom;
+    let mut bars: i64 = 1;
+    while width * (bars as f64) < f64::from(least) && bars < 1 << 20 {
+        bars *= 2;
+    }
+    bars
+}
+
 /// A ruler's bar numbers, below `top` in `ruler`, every bar or every few so
 /// they don't crowd, with ticks at the bars and at the beats when there's
 /// room.
@@ -74,12 +110,8 @@ pub(crate) fn bars(
     let visible = timeline.viewport.visible();
     let first = tempo.bar_at(visible.start).bar;
     let last = tempo.bar_at(visible.end).bar;
-    let width = |bar: i64| (tempo.bar_start(bar + 1) - tempo.bar_start(bar)).to_f64() * zoom;
     // A label every bar, or every 2, 4, 8... bars.
-    let mut every: i64 = 1;
-    while (width(first) * every as f64) < f64::from(theme.label_spacing) && every < 1 << 20 {
-        every *= 2;
-    }
+    let every = bars_in(tempo, zoom, first, theme.label_spacing);
     let tick = Stroke::new(1.0, theme.grid_bar);
     let mut bar = first - first.rem_euclid(every);
     while bar <= last {
@@ -126,4 +158,30 @@ pub(crate) fn start_marker(painter: &Painter, theme: &Theme, x: f32, ruler: Rect
 pub(crate) fn playhead(playback: &Playback, start_marker: Beats) -> Option<Beats> {
     let shown = playback.playing || playback.playhead != start_marker;
     shown.then_some(playback.playhead)
+}
+
+#[cfg(test)]
+mod tests {
+    use musicable_model::time::{TempoMap, TimeSignature};
+
+    use super::*;
+
+    #[test]
+    fn groups_of_bars_double_as_the_zoom_narrows_them() {
+        let tempo = TempoMap::default();
+        // A bar of 4/4 is 4 beats: 64 points at 16 points a beat.
+        assert_eq!(bars_in(&tempo, 16.0, 0, 64.0), 1);
+        assert_eq!(bars_in(&tempo, 16.0, 0, 65.0), 2);
+        assert_eq!(bars_in(&tempo, 16.0, 0, 96.0), 2);
+        assert_eq!(bars_in(&tempo, 2.0, 0, 96.0), 16);
+        assert_eq!(bars_in(&tempo, 400.0, 0, 96.0), 1);
+        // Zoomed all the way out, they stop growing.
+        assert_eq!(bars_in(&tempo, 1e-9, 0, 96.0), 1 << 20);
+        // From bar 9, bars of 3/4 are 48 points.
+        let mut tempo = tempo;
+        tempo.insert_signature(8, TimeSignature::new(3, 4).unwrap());
+        assert_eq!(bars_in(&tempo, 16.0, 7, 96.0), 2);
+        assert_eq!(bars_in(&tempo, 16.0, 8, 96.0), 2);
+        assert_eq!(bars_in(&tempo, 16.0, 8, 97.0), 4);
+    }
 }
