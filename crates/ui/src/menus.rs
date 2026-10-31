@@ -149,6 +149,8 @@ const MENUS: [MenuSpec; 8] = [
             None,
             Some(transport::TEMPO_UP),
             Some(transport::TEMPO_DOWN),
+            None,
+            Some(transport::RESET_DROPOUTS),
         ],
     ),
 ];

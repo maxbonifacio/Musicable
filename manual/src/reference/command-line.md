@@ -107,6 +107,15 @@ the status bar, and clear them, as **Dismiss** (×) does. And they can read
 the [log file](troubleshooting.md#the-log-file), which `musicable mcp` reads
 itself, so they can see why Musicable stopped after it has.
 
+Agents can read your settings and the audio devices there are, and change
+the settings the Settings window has, such as the audio device, its buffer
+size and [Render Ahead](../getting-started/audio.md#render-ahead), with the
+commands Change Setting, Set Audio Device and Set Render Ahead. Changing a
+setting isn't a step in the undo history, so the status bar says when an
+agent did, and the agent hears what the setting was, to put it back when
+it's done. Agents can't change the theme, your workspaces or profiles, or
+whether they're let in.
+
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,
 so they work while Musicable is closed or doesn't let agents in, and they

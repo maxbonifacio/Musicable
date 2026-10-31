@@ -1350,6 +1350,23 @@ fn examples() -> Vec<Example> {
         leaves(options::PROFILES, bare),
         leaves(options::RESCAN_PLUGINS, bare),
         leaves(options::SETTINGS, bare),
+        leaves(options::SET, |_| {
+            Some(
+                Args::new()
+                    .with("key", "recording.capture_minutes")
+                    .with("value", "10"),
+            )
+        }),
+        leaves(options::SET_AUDIO_DEVICE, |_| {
+            Some(
+                Args::new()
+                    .with("driver_type", "asio")
+                    .with("buffer", 64_i64),
+            )
+        }),
+        leaves(options::SET_RENDER_AHEAD, |_| {
+            Some(Args::new().with("render_ahead", "long"))
+        }),
         edits(take::COMP, |s| {
             let take = find_take(s, |_| true)?;
             let clip = pick(s, take.clips.iter())?;
@@ -1434,6 +1451,7 @@ fn examples() -> Vec<Example> {
             Some(Args::new())
         }),
         leaves(transport::CAPTURE, bare),
+        leaves(transport::RESET_DROPOUTS, bare),
         leaves(transport::GO_TO_START, bare),
         leaves(transport::LOCATE, |_| {
             Some(Args::new().with("at", Beats::new(8)))

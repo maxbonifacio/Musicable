@@ -115,6 +115,9 @@ pub struct Command {
     /// the undo history ([`Registry::run_batch`]): it opens, saves or
     /// replaces the project, or steps through the undo history.
     pub alone: bool,
+    /// Whether it needs at least one of its arguments, though each of them
+    /// is optional: see [`needs_arguments`](Self::needs_arguments).
+    pub some_arguments: bool,
 }
 
 impl Command {
@@ -127,6 +130,7 @@ impl Command {
             when: When::Always,
             agents: true,
             alone: false,
+            some_arguments: false,
         }
     }
 
@@ -152,10 +156,17 @@ impl Command {
         self
     }
 
+    /// Runs it with some of its arguments only: see
+    /// [`some_arguments`](Self::some_arguments).
+    pub fn with_some_arguments(mut self) -> Self {
+        self.some_arguments = true;
+        self
+    }
+
     /// Whether it can only run with arguments: menus, keys and the command
     /// palette, which have none to give, leave it out.
     pub fn needs_arguments(&self) -> bool {
-        self.params.iter().any(|param| !param.optional)
+        self.some_arguments || self.params.iter().any(|param| !param.optional)
     }
 }
 
@@ -401,6 +412,35 @@ pub enum Request {
     DeleteWorkspace,
     /// Lay the panels of the workspace in use out as at first.
     ResetWorkspace,
+    /// Change a setting, as the Settings window does: `key` names it as
+    /// the settings file does, such as `audio.render_ahead`, and `value` is
+    /// what to make it, as text, such as `long`.
+    SetSetting {
+        key: String,
+        value: String,
+    },
+    /// Play through another audio device, or through the same one with other
+    /// settings. What's `None` stays as it is.
+    SetAudioDevice(AudioDevice),
+    /// Count dropouts from zero again.
+    ResetDropouts,
+}
+
+/// The audio device to play through, and how, as
+/// [`options::SET_AUDIO_DEVICE`] asks for it. What's `None` stays as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioDevice {
+    /// `system` or `asio`.
+    pub driver_type: Option<String>,
+    /// The device's id or name. Without one, a new driver type plays
+    /// through its first device, or the system's default output.
+    pub device: Option<String>,
+    /// Frames per buffer.
+    pub buffer: Option<u32>,
+    pub sample_rate: Option<u32>,
+    /// Whether to take the device for Musicable alone, WASAPI's exclusive
+    /// mode.
+    pub exclusive: Option<bool>,
 }
 
 impl Request {

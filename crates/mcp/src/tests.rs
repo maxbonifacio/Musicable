@@ -323,6 +323,8 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_performance",
             "get_status",
             "get_messages",
+            "get_settings",
+            "list_audio_devices",
         ]
     );
     let server = rig

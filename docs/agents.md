@@ -70,6 +70,8 @@ the bridge runs itself.
 | `get_performance` | nothing | What the project costs the CPU, as the Performance panel lists it, busiest first: each device's share of one core over the last second, `average`, whether it `renders` `ahead` of the device or `live`, and while live its longest block as a share of the buffer, `longest`, by its `device` id, `name` and `chain`, and the same for each channel's `clips`, `modulators` and `mixer`, and the `metronome`, in `rows`; the project's `total`; the transport bar's figures: whether an audio device is `playing`, the `audio` it plays, the audio thread's `load`, and the `dropouts`; and while Render Ahead is on, `render_ahead`: its `setting`, whether the project renders `ahead` now, how far ahead it was lately and aims to be, `lead_ms` and `target_ms`, the share of a core of what rendered ahead, `load`, and the blocks the audio thread had to render itself since the device started, `short_blocks`. Without an audio device, there are no rows, and `render_ahead` is null, as it is for the quarter of a second after the device starts or Render Ahead changes |
 | `get_status` | nothing | What plays: whether the transport is `playing`, from the moment Play is pressed, and `recording`, the `playhead` in beats and `playhead_seconds`, and the `takes` being recorded, each a `track` with the `start` and `end` it covers so far; the `question` the window waits for you to answer, such as whether to save your changes, or null; and the work that lands later, with nothing to wait on: the audio files being analysed for warping, `analysing`, by their names in the project, the `rendering_segments` left, whether a graph is `compiling`, the `export` under way, with its `stage` (`preparing`, `rendering`, `normalising`), `pass` of `passes`, the share `done` and while it renders its `speed`, times real time, `scanning_plugins`, and the `library`'s folders `scanning`, with the files `found`, and `reading`, with the files `left`, and whether it's `finding_presets`. `idle` is true once none of that work is under way, so an agent calls it again until it is |
 | `get_messages` | `clear`? | The status bar's `messages`, oldest first: errors and notices, such as a missing file or plugin, a device that failed, or an export's problems. With `clear`, it clears them too, as **Dismiss** does, so the next call gives only those that came after |
+| `get_settings` | nothing | The `settings` as `settings.toml` has them, by section, with the profile in use's `behaviour`, `appearance` and `workspaces`; the keys `options.set` can change, in `changeable`; the `profile` in use; the settings `file`; what's `playing`: its `device` id and `name`, `driver_type` (`system` or `asio`), `api`, `sample_rate`, `buffer`, `latency_ms` and `inputs`, or null; and the `recording_offset_frames` of the device playing |
+| `list_audio_devices` | nothing | Lists the devices again: the `driver_types` this build plays through, the `outputs`, each with its `id`, `name`, `driver_type`, whether it's the system's `default` and whether it's `playing`, for `options.set_audio_device`, and the audio `inputs`, with their `channels`, and `midi_inputs`, by the ids `mixer.set_input` takes |
 | `get_log` | `lines`? (100, at most 1000), `level`? (`error`, `warn` or `info`), `since`?, a time in UTC such as `2026-10-31T05:00:00Z` | The latest `entries` of `musicable.log` and `musicable.old.log` in the config folder, oldest first, those as bad as `level` or worse, logged at `since` or after: each its `time`, `level`, `target`, such as `wgpu_hal` or `panic`, and `message`, a panic's over several lines with its calls; the `file`; and whether `earlier` entries were left out. The bridge reads the file itself, so it works while Musicable is closed, and after it stopped |
 
 What the tools give back is JSON, as text. A call that fails, such as one
@@ -114,6 +116,36 @@ where Musicable was started from, and skip the dialogs:
   `wav`, `aiff` or `flac`, from what the window starts out with: the time
   selection, or else the song. The call waits for the export, and gives
   back the file; your export settings stay as they were.
+
+### Settings
+
+Settings aren't steps in the undo history, so an agent that changes one
+puts it back when it's done. The commands that change them run alone, and
+answer with the setting's `key`, what it `was` and what it is `now`; the
+status bar says an agent changed it, as for its other commands.
+
+- `options.set` (`key`, `value`) changes a setting by its name in
+  `settings.toml`, such as `audio.render_ahead`, `recording.capture_minutes`,
+  `analysis.fast`, `behaviour.play_from` or `export.bits`, to `value`, as
+  text: `long`, `true`, `10`, or `none` to empty one that can be. It goes
+  through the same code as the Settings window, and checks the value as
+  reading the file would. `get_settings` lists those it can change, in
+  `changeable`: not the theme, the workspaces, the profiles, the agents'
+  switch or the plugins' marks, which are yours.
+- `options.set_render_ahead` (`render_ahead`: `off`, `short`, `normal` or
+  `long`) is `options.set` for Render Ahead.
+- `options.set_audio_device` (`driver_type`?, `device`?, `buffer`?,
+  `sample_rate`?, `exclusive`?) plays through another device, by its id or
+  name from `list_audio_devices`, or the same one with another buffer, rate
+  or mode, as the Audio page's Apply does. A new driver type without a
+  device takes the system's default output, or the first ASIO driver. If
+  the device won't open, the one before plays on, and the call fails saying
+  why. An ASIO driver's buffer is set in its own panel.
+- `transport.reset_dropouts` counts dropouts from zero again, as clicking
+  **Dropouts** does.
+
+The code is in
+[`crates/app/src/app/changing_settings.rs`](../crates/app/src/app/changing_settings.rs).
 
 ### One step for several commands
 

@@ -72,6 +72,10 @@ enum Asked {
     Performance,
     /// What plays, and what's under way.
     Status,
+    /// The settings, and what plays.
+    Settings,
+    /// The audio devices there are.
+    AudioDevices,
     /// The messages the window shows the user, and whether to clear them
     /// once read.
     Messages {
@@ -364,6 +368,18 @@ pub trait Window {
         Status::default()
     }
 
+    /// The settings, as the settings file has them, with the profile in
+    /// use's, and what plays, as JSON.
+    fn settings(&self) -> Json {
+        Json::Object(Map::new())
+    }
+
+    /// The audio devices there are to play through and record from, listed
+    /// again, as JSON.
+    fn audio_devices(&mut self) -> Json {
+        Json::Object(Map::new())
+    }
+
     /// The messages the window shows the user, oldest first: errors and
     /// notices, such as a file that's missing.
     fn messages(&self) -> Vec<String> {
@@ -399,6 +415,8 @@ pub fn answer(call: Call, window: &mut impl Window) {
         Asked::History => Ok(reads::history(window)),
         Asked::Performance => Ok(reads::performance(window)),
         Asked::Status => Ok(reads::status(window)),
+        Asked::Settings => Ok(window.settings()),
+        Asked::AudioDevices => Ok(window.audio_devices()),
         Asked::Messages { clear } => {
             let messages = window.messages();
             if clear {
