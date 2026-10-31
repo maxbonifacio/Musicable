@@ -52,7 +52,9 @@ and a whole drag is one step in the undo history.
   header's menu ([Automation](../using/automation.md)).
 - **The grid** follows the zoom, its lines at least 16 points apart, unless
   it's fixed (Ctrl+5), and Ctrl+1 and Ctrl+2 make it finer or coarser.
-  Gestures snap to it while Snap to Grid is on (Ctrl+4).
+  Gestures snap to it while Snap to Grid is on (Ctrl+4). Its lines are
+  dashed while nothing snaps to them, as in Live: with Snap to Grid off,
+  and while a drag keeps off the grid, as one does while Alt is held.
 - **Groups of bars** alternate between two shades across the lanes, so
   that 2, 4, 8 or 16 bars can be counted at a glance. A group is 1, 2, 4,
   8 or more bars, as many as are at least 96 points wide at the zoom, so

@@ -34,7 +34,7 @@ use egui::{
     Color32, CursorIcon, Event, Id, Key, MouseWheelUnit, Popup, Pos2, Rangef, Rect, Response,
     RichText, Role, ScrollArea, Sense, SetOpenCommand, Ui, WidgetInfo, pos2, vec2,
 };
-use musicable_commands::editor::Viewport;
+use musicable_commands::editor::{Grid, Viewport};
 use musicable_commands::{
     Args, CommandId, Editor, Modifiers, arrange, automation, edit, locator, notes, param_text,
     take as takes, transport, view as views, warp,
@@ -809,6 +809,8 @@ struct Scene<'s> {
     /// Where the pointer is, if it's over the arrangement and nothing's in
     /// the way.
     pointer: Option<Pos2>,
+    /// Whether a drag is keeping off the grid, as Alt does.
+    free: bool,
 }
 
 impl Scene<'_> {
@@ -818,6 +820,16 @@ impl Scene<'_> {
 
     fn editor(&self) -> &Editor {
         self.view.editor
+    }
+
+    /// The grid as it's drawn: as if snapping were off while a drag
+    /// keeps off it, so its lines are dashed then too.
+    fn drawn_grid(&self) -> Grid {
+        let grid = self.editor().grid;
+        Grid {
+            snap: grid.snap && !self.free,
+            ..grid
+        }
     }
 
     /// `at`, snapped to the grid unless `free` or snapping is off.
@@ -1863,6 +1875,7 @@ impl Arrangement {
             parts,
             layout,
             pointer,
+            free: false,
         };
         // The timeline's width, for the commands that zoom to fit, and the
         // scrolling, kept within the tracks.
@@ -1907,6 +1920,7 @@ impl Arrangement {
             scene.layout = Layout::new(rect, theme, view.project, editor, viewport, scroll);
         }
         self.master_scroll = scene.layout.master_scroll;
+        scene.free = self.drag.as_ref().is_some_and(|drag| drag.free);
         let plan = self.drag.as_ref().and_then(|drag| scene.plan(drag));
         self.cursor(ui, &scene, plan.as_ref());
         let plan = plan.or(self.landed.take());

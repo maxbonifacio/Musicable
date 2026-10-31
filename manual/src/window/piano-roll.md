@@ -5,7 +5,8 @@ does: rows of keys beside a keyboard, under a ruler, over a lane of the
 notes' velocities or a controller's curve. It shows the MIDI clip selected
 last in the arrangement, or opened with a double-click. Across, it shows
 song positions, as the arrangement does, so the start marker, the playhead
-and the grid line up with it; its zoom and scrolling are its own.
+and the grid line up with it, its lines dashed while nothing snaps to
+them; its zoom and scrolling are its own.
 Everything you do in it can be undone, and a whole drag is one step in the
 undo history.
 

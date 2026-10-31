@@ -924,6 +924,59 @@ fn every_other_group_of_bars_is_shaded_and_groups_grow_as_bars_narrow() {
 }
 
 #[test]
+fn the_grid_s_lines_are_dashed_while_nothing_snaps_to_them() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let bar = harness.state().theme.grid_bar;
+    // Solid lines, or dashes in a mesh, of the bars' colour in the lanes.
+    let lines = |harness: &Harness<'_, State>| {
+        let solid = painted(harness).iter().any(|shape| match shape {
+            Shape::LineSegment { points, stroke } => {
+                stroke.color == bar && points.iter().all(|&at| lanes.contains(at))
+            }
+            _ => false,
+        });
+        (solid, meshed(harness, bar, lanes))
+    };
+    assert_eq!(lines(&harness), (true, false));
+    harness.state_mut().document.editor_mut().grid.snap = false;
+    harness.run();
+    assert_eq!(lines(&harness), (false, true));
+    harness.state_mut().document.editor_mut().grid.snap = true;
+    harness.run();
+    assert_eq!(lines(&harness), (true, false));
+    // While Alt keeps a drag off the grid, part of the way through.
+    let rect = harness.get_by_label("Clip Kick").rect();
+    let from = pos2(rect.right() - 2.0, rect.center().y);
+    let press = |harness: &mut Harness<'_, State>, pos, pressed| {
+        harness.event(Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run();
+    };
+    harness.hover_at(from);
+    harness.run();
+    press(&mut harness, from, true);
+    harness.hover_at(from + vec2(30.0, 0.0));
+    harness.run();
+    assert_eq!(lines(&harness), (true, false));
+    harness.event(Event::ModifiersChanged(Modifiers::ALT));
+    harness.hover_at(from + vec2(40.0, 0.0));
+    harness.run();
+    assert_eq!(lines(&harness), (false, true));
+    harness.event(Event::ModifiersChanged(Modifiers::NONE));
+    harness.hover_at(from + vec2(50.0, 0.0));
+    harness.run();
+    assert_eq!(lines(&harness), (true, false));
+    press(&mut harness, from + vec2(50.0, 0.0), false);
+    assert_eq!(lines(&harness), (true, false));
+}
+
+#[test]
 fn header_buttons_mute_solo_and_arm() {
     let (project, ids) = project();
     let mut harness = harness(project);

@@ -108,7 +108,7 @@ pub(super) fn wave(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>, ps
         painter.rect_filled(file, 0.0, theme.clip(scene.index));
         painter.rect_filled(file, 0.0, theme.clip_body);
     }
-    timeline::grid(painter, theme, &timeline(scene), scene.editor().grid, wave);
+    timeline::grid(painter, theme, &timeline(scene), scene.drawn_grid(), wave);
     waveform(painter, scene, audio);
     time_selected(painter, scene);
     outside_clip(painter, scene, wave);
@@ -342,7 +342,7 @@ pub(super) fn lane(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let layout = &scene.layout;
     let lane = layout.lane;
     painter.rect_filled(lane, 0.0, theme.automation_lane);
-    timeline::grid(painter, theme, &timeline(scene), scene.editor().grid, lane);
+    timeline::grid(painter, theme, &timeline(scene), scene.drawn_grid(), lane);
     let planned = match plan {
         Some(Plan::Points(points)) => Some(&points[..]),
         _ => None,

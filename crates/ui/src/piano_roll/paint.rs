@@ -72,7 +72,7 @@ pub(super) fn rows(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         let y = painter.round_to_pixel_center(row.bottom() - 0.5);
         painter.hline(rows.x_range(), y, Stroke::new(1.0, colour));
     }
-    timeline::grid(painter, theme, &timeline(scene), scene.editor().grid, rows);
+    timeline::grid(painter, theme, &timeline(scene), scene.drawn_grid(), rows);
     notes(painter, scene, plan);
     // Notes outside the clip don't play.
     outside_clip(painter, scene, rows);
@@ -264,7 +264,7 @@ pub(super) fn lane(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
     let theme = scene.theme;
     let lane = scene.layout.lane;
     painter.rect_filled(lane, 0.0, theme.empty);
-    timeline::grid(painter, theme, &timeline(scene), scene.editor().grid, lane);
+    timeline::grid(painter, theme, &timeline(scene), scene.drawn_grid(), lane);
     match scene.controller() {
         Some(controller) => curve(painter, scene, controller, plan),
         None => velocities(painter, scene, plan),
