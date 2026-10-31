@@ -954,6 +954,19 @@ impl App {
                 }
             }
             Request::ResetDropouts => self.output.reset_dropouts(),
+            Request::RecordOutput(file) => {
+                if let Err(error) = self.session.record_output(&file) {
+                    self.messages.push(error);
+                }
+            }
+            Request::StopRecordingOutput => match self.session.stop_recording_output() {
+                Ok(done) => self.messages.push(format!(
+                    "The output recording is in {}, and its timeline in {}.",
+                    done["file"].as_str().unwrap_or_default(),
+                    done["timeline"].as_str().unwrap_or_default(),
+                )),
+                Err(error) => self.messages.push(error),
+            },
             Request::ClearPeaks => self.session.meters().clear_highest(),
             Request::SetKeys { command, keys } => {
                 if let Err(error) = self.set_keys(&command, keys) {

@@ -186,3 +186,9 @@
 | Switch to Next Profile |  | `options.next_profile` |
 | Rescan Plugins |  | `options.rescan_plugins` |
 
+### Debug
+
+| Command | Keys | Id |
+|---|---|---|
+| Stop Recording Output |  | `debug.stop_recording_output` |
+

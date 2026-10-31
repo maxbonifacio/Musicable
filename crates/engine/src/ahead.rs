@@ -56,6 +56,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use crate::buffer::source_channel;
 use crate::engine::{CoreGarbage, CoreMessage, Counters, EVENT_CAPACITY, MAX_WRITERS, messages};
 use crate::graph::take_over;
+use crate::output_recording::{self, EventLog};
 use crate::parallel::{CachePadded, Failure};
 use crate::timeline::{Segment, TimelineWriter};
 use crate::transport::Transport;
@@ -718,6 +719,8 @@ pub(crate) struct Core {
     /// nodes that rendered live up to there and render ahead from there:
     /// it neither takes in what's sent nor renders until then.
     draining: bool,
+    /// Where it logs what it applies, while an output recording is on.
+    log: Option<Box<EventLog>>,
     /// What it applied, and at what time, once a test asks for it
     /// ([`Core::keep_log`]).
     #[cfg(test)]
@@ -752,6 +755,7 @@ impl Core {
             writers: Vec::with_capacity(MAX_WRITERS),
             to_live,
             draining: false,
+            log: None,
             #[cfg(test)]
             applied: None,
         }
@@ -810,12 +814,12 @@ impl Core {
             self.receive(shared);
         }
         self.apply_transport(self.time);
-        #[cfg(test)]
         let jumps = self.transport.state().jumps;
         self.transport.wrap();
-        #[cfg(test)]
         if self.transport.state().jumps != jumps {
+            #[cfg(test)]
             log(&mut self.applied, self.time, Applied::Wrap);
+            self.output_log(self.time, output_recording::Applied::Wrap);
         }
         self.aim(shared)
     }
@@ -942,6 +946,9 @@ impl Core {
                 p.time.max(start),
                 Applied::Event(p.event),
             );
+            if let Some(log) = &mut self.log {
+                log.log(p.time.max(start), output_recording::Applied::Event(p.event));
+            }
             let (was_late, found) = p.route(graph.as_deref_mut(), start);
             late += u64::from(was_late);
             unmatched += u64::from(!found);
@@ -1058,6 +1065,7 @@ impl Core {
                     }
                     #[cfg(test)]
                     log(&mut self.applied, start, Applied::Event(p.event));
+                    self.output_log(start, output_recording::Applied::Event(p.event));
                     self.transport.apply(command);
                 }
                 _ => {
@@ -1077,7 +1085,9 @@ impl Core {
             match self.messages.peek() {
                 // Hold a swap until there is room to hand back what it replaces.
                 Ok(CoreMessage::Swap(_)) if self.graph.is_some() && self.garbage.is_full() => break,
-                Ok(CoreMessage::Tempo(..) | CoreMessage::Writer(..)) if self.garbage.is_full() => {
+                Ok(CoreMessage::Tempo(..) | CoreMessage::Writer(..) | CoreMessage::Log(..))
+                    if self.garbage.is_full() =>
+                {
                     break;
                 }
                 // And a graph or a tempo map until the live side has room for
@@ -1097,11 +1107,13 @@ impl Core {
                 Ok(CoreMessage::Swap(graph)) => {
                     #[cfg(test)]
                     log(&mut self.applied, self.time, Applied::Swap);
+                    self.output_log(self.time, output_recording::Applied::Graph);
                     self.install(shared, graph);
                 }
                 Ok(CoreMessage::Tempo(tempo, live)) => {
                     #[cfg(test)]
                     log(&mut self.applied, self.time, Applied::Tempo);
+                    self.output_log(self.time, output_recording::Applied::Tempo);
                     let old = self.transport.set_tempo(tempo);
                     // `receive` checked there is room.
                     let returned = self.garbage.push(CoreGarbage::Tempo(old));
@@ -1124,6 +1136,14 @@ impl Core {
                     self.schedule(time.map_or(self.time, |t| t.max(self.time)), event);
                 }
                 Ok(CoreMessage::Writer(key, writer)) => self.take_writer(key, writer),
+                Ok(CoreMessage::Log(log)) => {
+                    if let Some(gone) = std::mem::replace(&mut self.log, log) {
+                        gone.end();
+                        // `receive` checked there is room.
+                        let returned = self.garbage.push(CoreGarbage::Log(gone));
+                        debug_assert!(returned.is_ok(), "the garbage queue has room");
+                    }
+                }
                 Err(_) => break,
             }
         }
@@ -1160,6 +1180,14 @@ impl Core {
         shared.live_debt.fetch_add(1, Relaxed);
         let pushed = self.to_live.push(sent);
         debug_assert!(pushed.is_ok(), "the queue to the live side has room");
+    }
+
+    /// Logs `applied` at engine time `time`, while an output recording is
+    /// on.
+    fn output_log(&mut self, time: u64, applied: output_recording::Applied) {
+        if let Some(log) = &mut self.log {
+            log.log(time, applied);
+        }
     }
 
     /// Starts keeping a record of what it applies, for a test.

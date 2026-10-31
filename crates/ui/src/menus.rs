@@ -3,8 +3,8 @@
 
 use egui::{Button, Ui};
 use musicable_commands::{
-    Args, Command, CommandId, Registry, arrange, automation, browser, controllers, edit, file,
-    locator, notes, options, rewarp, track, transient, transport, view, warp, workspace,
+    Args, Command, CommandId, Registry, arrange, automation, browser, controllers, debug, edit,
+    file, locator, notes, options, rewarp, track, transient, transport, view, warp, workspace,
 };
 
 use crate::shell::{Action, View, toggled_for, with_keys};
@@ -157,7 +157,7 @@ const MENUS: [MenuSpec; 8] = [
 ];
 
 /// The menus that come last, after those for other areas.
-const LAST_MENUS: [MenuSpec; 4] = [
+const LAST_MENUS: [MenuSpec; 5] = [
     (
         "Browser",
         "browser",
@@ -241,6 +241,8 @@ const LAST_MENUS: [MenuSpec; 4] = [
             Some(options::RESCAN_PLUGINS),
         ],
     ),
+    // Last, as it's for checking Musicable rather than making music.
+    ("Debug", "debug", &[Some(debug::STOP_RECORDING_OUTPUT)]),
 ];
 
 /// A menu of commands.
@@ -406,7 +408,8 @@ mod tests {
                 "Browser",
                 "View",
                 "Workspaces",
-                "Options"
+                "Options",
+                "Debug"
             ]
         );
         let listed: Vec<_> = menus

@@ -10,7 +10,8 @@ and the Routing and Performance panels beside the mixer once you show them.
 
 The menu bar lists the commands with their keys, under File, Edit, Track,
 Clip, Notes, Automation, Locator, Transport, Device, Browser, View,
-Workspaces and Options. [Every command](../reference/commands.md) lists them all.
+Workspaces and Options, and last, Debug, for checking Musicable itself.
+[Every command](../reference/commands.md) lists them all.
 
 Undo and Redo name the change they would make, as in "Undo Set Tempo", and
 are greyed out when there's nothing to undo or redo, as is any command that

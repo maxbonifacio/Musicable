@@ -46,6 +46,12 @@
 | Erase Controller | `controllers.erase` |
 | Show Controller | `controllers.show` |
 
+### Debug
+
+| Command | Id |
+|---|---|
+| Record Output | `debug.record_output` |
+
 ### Device
 
 | Command | Id |

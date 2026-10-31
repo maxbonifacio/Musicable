@@ -22,6 +22,7 @@ use crate::ahead::{
     ToLive,
 };
 use crate::graph::take_over;
+use crate::output_recording::{Applied, Callback, EventLog, OutputRecording, OutputTap};
 use crate::preview::{Preview, Previews};
 use crate::timeline::Timeline;
 use crate::{
@@ -87,6 +88,9 @@ pub(crate) enum CoreMessage {
     /// The ahead side's end of the queues for the writer of the record taps
     /// with this key, or `None` to stop writing them.
     Writer(NodeKey, Option<CoreWriter>),
+    /// A log of what it applies, for an output recording, or `None` to
+    /// stop logging.
+    Log(Option<Box<EventLog>>),
 }
 
 /// What the control thread sends the live side.
@@ -98,6 +102,9 @@ enum LiveMessage {
     Writer(NodeKey, Box<dyn TapWriter>, Option<LiveQueue>),
     /// Stop writing the record taps with this key.
     RemoveWriter(NodeKey),
+    /// Keep what it plays, and log what it applies, for an output
+    /// recording, or `None` to stop.
+    Record(Option<Box<OutputTap>>),
 }
 
 /// What the ahead side hands back to be dropped off the audio thread.
@@ -105,6 +112,7 @@ pub(crate) enum CoreGarbage {
     Graph(Box<PreparedGraph>),
     Tempo(Box<TempoMap>),
     Writer(CoreWriter),
+    Log(Box<EventLog>),
 }
 
 /// What the live side hands back.
@@ -115,6 +123,7 @@ enum LiveGarbage {
     /// A graph's live half, and a tempo map the live side's replaced.
     Graph(Box<PreparedGraph>),
     Tempo(Box<TempoMap>),
+    Record(Box<OutputTap>),
 }
 
 #[derive(Default)]
@@ -304,6 +313,9 @@ struct Live {
     /// What it's replaced and couldn't hand back yet, as the garbage queue
     /// was full: at most [`LIVE_DEBT`], as the ahead side sends no more.
     stash: Vec<LiveGarbage>,
+    /// Where it keeps what it plays and logs what it applies, while an
+    /// output recording is on.
+    recording: Option<Box<OutputTap>>,
     /// What it applied, and at what time, once a test asks for it.
     #[cfg(test)]
     pub(crate) applied: Option<Vec<(u64, ahead::Applied)>>,
@@ -402,6 +414,7 @@ impl Engine {
                 orphans: Vec::with_capacity(EVENT_CAPACITY),
                 tempo: Box::default(),
                 stash: Vec::with_capacity(LIVE_DEBT),
+                recording: None,
                 #[cfg(test)]
                 applied: None,
             },
@@ -417,6 +430,7 @@ impl Engine {
             params: BTreeMap::new(),
             timeline: Some(timeline_reader),
             writers: Vec::new(),
+            sent: None,
         };
         (engine, handle)
     }
@@ -474,6 +488,7 @@ impl Engine {
         output: &mut AudioMut<'_>,
     ) {
         rt::scope(|| {
+            let time = self.live.time;
             self.run(input, midi, output.frames(), |start, frames, played| {
                 let mut part = output.range_mut(start..start + frames);
                 match played.output {
@@ -484,6 +499,10 @@ impl Engine {
                     part.add_from(audio);
                 }
             });
+            if let Some(callback) = self.live.callback(time, output.frames(), output.channels()) {
+                let recording = self.live.recording.as_mut().expect("a recording");
+                recording.planar(callback, output.view());
+            }
         });
     }
 
@@ -563,6 +582,7 @@ impl Engine {
         );
         rt::scope(|| {
             let frames = output.len() / channels;
+            let time = self.live.time;
             self.run(input, midi, frames, |start, frames, played| {
                 let part = &mut output[start * channels..(start + frames) * channels];
                 match played.output {
@@ -573,6 +593,10 @@ impl Engine {
                     audio.add_interleaved(part, channels);
                 }
             });
+            if let Some(callback) = self.live.callback(time, frames, channels) {
+                let recording = self.live.recording.as_mut().expect("a recording");
+                recording.interleaved(callback, output);
+            }
         });
     }
 
@@ -732,6 +756,23 @@ fn live_first<'a, T>(
 }
 
 impl Live {
+    /// The note of a callback of `frames` frames in `channels` channels
+    /// from engine time `time`, which just played, while an output
+    /// recording is on.
+    fn callback(&self, time: u64, frames: usize, channels: usize) -> Option<Callback> {
+        self.recording.as_ref()?;
+        let counters = &self.counters;
+        Some(Callback {
+            time,
+            frames: frames as u32,
+            channels: channels as u16,
+            kept: true,
+            xruns: counters.xruns.load(Relaxed),
+            short_blocks: counters.short_blocks.load(Relaxed),
+            lead: counters.lead.load(Relaxed),
+        })
+    }
+
     /// Takes everything the control thread has sent the live side.
     fn receive(&mut self) {
         loop {
@@ -748,6 +789,13 @@ impl Live {
                     gone.map(|gone| gone.map(LiveGarbage::Preview))
                 }
                 Ok(LiveMessage::Writer(key, writer, queue)) => self.add_writer(key, writer, queue),
+                Ok(LiveMessage::Record(tap)) => {
+                    let gone = std::mem::replace(&mut self.recording, tap);
+                    if let Some(gone) = &gone {
+                        gone.log.end();
+                    }
+                    [gone.map(LiveGarbage::Record), None]
+                }
                 Ok(LiveMessage::RemoveWriter(key)) => {
                     match self.writers.iter().position(|w| w.key == key) {
                         Some(at) => {
@@ -971,6 +1019,9 @@ impl Live {
                 p.time.max(start),
                 ahead::Applied::Event(p.event),
             );
+            if let Some(recording) = &mut self.recording {
+                (recording.log).log(p.time.max(start), Applied::Event(p.event));
+            }
             let (was_late, found) = p.route(self.half.as_deref_mut(), start);
             late += u64::from(was_late);
             unmatched += u64::from(!found);
@@ -1235,6 +1286,18 @@ pub struct EngineHandle {
     timeline: Option<Timeline>,
     /// The keys of the writers sent, and not removed since.
     writers: Vec<NodeKey>,
+    /// The events sent while an output recording is on.
+    sent: Option<Vec<Sent>>,
+}
+
+/// An event sent while an output recording was on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sent {
+    /// The engine time playing as it was sent: see [`Stats::time`].
+    pub time: u64,
+    /// The time it was sent for, or `None` for as soon as possible.
+    pub at: Option<u64>,
+    pub event: Event,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1285,6 +1348,45 @@ impl EngineHandle {
         self.timeline.take()
     }
 
+    /// Starts recording what the engine hands the audio device, from its
+    /// next callback on, and what each side of it applies, for a thread to
+    /// read from the [`OutputRecording`] it returns, every few milliseconds
+    /// or it loses frames: see [`output_recording`](crate::output_recording).
+    /// It also keeps the events sent from now on, which
+    /// [`stop_recording_output`](Self::stop_recording_output) returns. A
+    /// recording already on stops. `None` if the message queues are full.
+    pub fn record_output(&mut self) -> Option<OutputRecording> {
+        if self.core.slots() < 1 || self.live.slots() < 1 {
+            return None;
+        }
+        let (tap, log, reader) = crate::output_recording::output_recording(self.config.sample_rate);
+        let sent = self
+            .core
+            .push(CoreMessage::Log(Some(Box::new(log))))
+            .is_ok()
+            && self
+                .live
+                .push(LiveMessage::Record(Some(Box::new(tap))))
+                .is_ok();
+        debug_assert!(sent, "both queues had room");
+        self.sent = Some(Vec::new());
+        Some(reader)
+    }
+
+    /// Stops the output recording, if one is on, from the engine's next
+    /// callback, and returns the events sent while it was. Its
+    /// [`OutputRecording`] says when the engine has stopped writing to it.
+    /// `None` if none is on, or the message queues are full.
+    pub fn stop_recording_output(&mut self) -> Option<Vec<Sent>> {
+        if self.sent.is_none() || self.core.slots() < 1 || self.live.slots() < 1 {
+            return None;
+        }
+        let sent = self.core.push(CoreMessage::Log(None)).is_ok()
+            && self.live.push(LiveMessage::Record(None)).is_ok();
+        debug_assert!(sent, "both queues had room");
+        self.sent.take()
+    }
+
     /// Sends an event to apply at the start of the engine's next block: the
     /// next `process` call's, or past what it has rendered ahead.
     pub fn send(&mut self, event: Event) -> Result<(), QueueFull<Event>> {
@@ -1301,6 +1403,13 @@ impl EngineHandle {
     fn push_event(&mut self, time: Option<u64>, event: Event) -> Result<(), QueueFull<Event>> {
         if self.core.push(CoreMessage::Event { time, event }).is_err() {
             return Err(QueueFull(event));
+        }
+        if let Some(sent) = &mut self.sent {
+            sent.push(Sent {
+                time: self.counters.time.load(Relaxed),
+                at: time,
+                event,
+            });
         }
         if let Event::Param { node, param, value } = event {
             // The value sent last isn't always the one that applies last: one
@@ -1472,6 +1581,7 @@ impl EngineHandle {
                     drop(queues);
                     continue;
                 }
+                CoreGarbage::Log(log) => drop(log),
             }
             dropped += 1;
         }
@@ -1492,6 +1602,7 @@ impl EngineHandle {
                     drop(tempo);
                     continue;
                 }
+                LiveGarbage::Record(tap) => drop(tap),
             }
             dropped += 1;
         }
@@ -1515,6 +1626,7 @@ mod tests {
 
     use super::*;
     use crate::nodes::Constant;
+    use crate::output_recording::AppliedAt;
     use crate::{Graph, Inputs, Node, NodeEventKind, ParamId, ProcessContext, TransportCommand};
 
     const CONFIG: EngineConfig = EngineConfig {
@@ -1734,6 +1846,60 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn an_output_recording_keeps_what_played_and_when_events_applied() {
+        let (mut engine, mut handle) = Engine::new(CONFIG);
+        handle.swap_graph(gain_stage()).unwrap();
+        render(&mut engine, 100, &[100]);
+        let mut reader = handle.record_output().unwrap();
+        render(&mut engine, 64, &[64]);
+        handle.send(gain(0.5)).unwrap();
+        handle
+            .send(Event::Transport(TransportCommand::Play))
+            .unwrap();
+        engine.record_xrun();
+        let played = render(&mut engine, 64, &[32]);
+        let sent = handle.stop_recording_output().unwrap();
+        // Past the stop, nothing is kept.
+        render(&mut engine, 64, &[64]);
+        let (mut samples, mut callbacks, mut applied) = (Vec::new(), Vec::new(), Vec::new());
+        let read = reader.read(&mut samples, &mut callbacks, &mut applied);
+        assert!(read.ended, "{read:?}");
+        let times: Vec<(u64, u32, u64)> = callbacks
+            .iter()
+            .map(|c| (c.time, c.frames, c.xruns))
+            .collect();
+        assert_eq!(times, [(100, 64, 0), (164, 32, 1), (196, 32, 1)]);
+        assert!(callbacks.iter().all(|c| c.kept && c.channels == 1));
+        assert_eq!(samples.len(), 128);
+        assert_eq!(&samples[64..], &played[..]);
+        assert!(samples[..64].iter().all(|&s| s == 1.0));
+        assert!(played.iter().all(|&s| s == 0.5));
+        // Each applied at the start of the next block, which played next.
+        assert_eq!(
+            applied,
+            [
+                AppliedAt {
+                    time: 164,
+                    applied: Applied::Event(Event::Transport(TransportCommand::Play))
+                },
+                AppliedAt {
+                    time: 164,
+                    applied: Applied::Event(gain(0.5))
+                },
+            ]
+        );
+        assert_eq!(
+            sent.iter().map(|s| (s.time, s.event)).collect::<Vec<_>>(),
+            [
+                (164, gain(0.5)),
+                (164, Event::Transport(TransportCommand::Play))
+            ]
+        );
+        assert!(handle.stop_recording_output().is_none());
+        handle.collect_garbage();
     }
 
     #[test]

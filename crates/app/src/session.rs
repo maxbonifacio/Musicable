@@ -36,6 +36,7 @@ use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 use crate::command_log::{CommandLog, Ran};
 use crate::library::{Library, LibraryLink, ToEngine};
 use crate::media::{MediaPool, follows_pitch};
+use crate::output_recorder::OutputRecorder;
 use crate::plugins::{Change, Plugins};
 use crate::recorder::{
     self, Armed, Buffers, Place, Recorder, Recording, Report, TapInput, TapNotes, Taps,
@@ -121,6 +122,8 @@ pub struct Session {
     lead: Lead,
     /// The commands run this session.
     command_log: CommandLog,
+    /// A recording of what the audio device plays, while one is on.
+    output_recorder: Option<OutputRecorder>,
 }
 
 impl Session {
@@ -285,6 +288,7 @@ impl Session {
             preview_gain: 1.0,
             lead: Lead::Off,
             command_log: CommandLog::default(),
+            output_recorder: None,
         };
         session.arm();
         session
@@ -607,6 +611,40 @@ impl Session {
             self.engine.push(Message::Writer(key, None));
         }
         self.taps = Taps::default();
+    }
+
+    /// Starts recording what the audio device plays to `file`, a WAV file,
+    /// with a timeline beside it once it stops: see [`OutputRecorder`].
+    /// Says where it records, or why it can't.
+    pub fn record_output(&mut self, file: &Path) -> Result<serde_json::Value, String> {
+        if let Some(recording) = &self.output_recorder {
+            return Err(format!(
+                "Musicable is recording its output to {} already: stop that first.",
+                recording.file().display()
+            ));
+        }
+        let recorder = OutputRecorder::start(&mut self.engine.handle, file)?;
+        self.output_recorder = Some(recorder);
+        Ok(serde_json::json!({
+            "file": file,
+            "timeline": crate::output_recorder::timeline_path(file),
+        }))
+    }
+
+    /// Stops recording what the audio device plays, and writes the
+    /// timeline: what it wrote, or why it couldn't.
+    pub fn stop_recording_output(&mut self) -> Result<serde_json::Value, String> {
+        let recorder = self
+            .output_recorder
+            .take()
+            .ok_or("Musicable isn't recording its output.")?;
+        let project = self.document.project();
+        recorder.stop(&mut self.engine.handle, project)
+    }
+
+    /// The file the output records to, while it does.
+    pub fn recording_output(&self) -> Option<&Path> {
+        self.output_recorder.as_ref().map(OutputRecorder::file)
     }
 
     pub fn project(&self) -> &Project {
