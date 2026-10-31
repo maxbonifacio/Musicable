@@ -259,6 +259,10 @@ struct Drag {
     area: Area,
     action: MouseAction,
     hit: Hit,
+    /// Whether it keeps off the grid now, as the modifiers held say, and
+    /// whether it did as it started, which where it started keeps.
+    free: bool,
+    started_free: bool,
     /// Where it started, and where the pointer is now.
     from: Pos2,
     to: Pos2,
@@ -276,11 +280,13 @@ struct Drag {
 }
 
 /// What a drag drew on an automation lane: a value for each step of the
-/// grid it crossed, by where the step starts, or drawn freely, a value for
-/// each place the pointer was.
+/// grid it crossed, by where the step starts, or drawn freely, off the
+/// grid, a value for each place the pointer was.
 #[derive(Debug, Clone, Default)]
 struct Drawn {
-    values: BTreeMap<Beats, f64>,
+    /// The values, and whether each holds for a step of the grid: a drag
+    /// goes off the grid and back as Alt is pressed and let go.
+    values: BTreeMap<Beats, (f64, bool)>,
     /// Where the pointer was when it last drew.
     last: Option<Pos2>,
 }
@@ -830,6 +836,13 @@ impl Scene<'_> {
         self.snap(self.layout.beats_at(x), false).max(Beats::ZERO)
     }
 
+    /// The song positions where `drag` started and where the pointer is
+    /// now, each snapped to the grid unless the drag kept off it then.
+    fn ends(&self, drag: &Drag) -> (Beats, Beats) {
+        let at = |x, free| self.snap(self.layout.beats_at(x), free).max(Beats::ZERO);
+        (at(drag.from.x, drag.started_free), at(drag.to.x, drag.free))
+    }
+
     /// Where something dragged from the browser or the devices panel goes
     /// if it's let go at `pos`: on the track there, from the time there over
     /// the lanes, on a new track under the tracks, or on the master.
@@ -1134,9 +1147,9 @@ impl Scene<'_> {
         self.editor().grid.cell(&self.project().tempo, at, zoom)
     }
 
-    /// Whether `drag` draws a step of the grid at a time.
+    /// Whether `drag` draws a step of the grid at a time, now.
     fn draws_steps(&self, drag: &Drag) -> bool {
-        drag.action == MouseAction::Draw && self.editor().grid.snap
+        !drag.free && self.editor().grid.snap
     }
 
     /// Draws on the automation lane `drag` started on, from where the
@@ -1166,13 +1179,15 @@ impl Scene<'_> {
         let values = &mut drag.drawn.values;
         if steps {
             // Each step crossed takes the value where the pointer crossed
-            // its middle, or came nearest it.
+            // its middle, or came nearest it, in place of what was drawn
+            // in it off the grid.
             let end = beats(right);
             let mut at = beats(left);
             loop {
                 let cell = self.cell(at);
                 let middle = (layout.x_of(cell.start) + layout.x_of(cell.end)) / 2.0;
-                values.insert(cell.start, value(middle.clamp(left, right)));
+                values.retain(|&drawn, _| drawn <= cell.start || drawn >= cell.end);
+                values.insert(cell.start, (value(middle.clamp(left, right)), true));
                 if cell.end > end || cell.end <= at {
                     break;
                 }
@@ -1182,8 +1197,8 @@ impl Scene<'_> {
             // What was drawn between goes, so going back draws over it.
             let (start, end) = (beats(left), beats(right));
             values.retain(|&at, _| at <= start || at >= end);
-            values.insert(beats(from.x), value(from.x));
-            values.insert(beats(to.x), value(to.x));
+            values.insert(beats(from.x), (value(from.x), false));
+            values.insert(beats(to.x), (value(to.x), false));
         }
         drag.drawn.last = Some(to);
     }
@@ -1192,10 +1207,10 @@ impl Scene<'_> {
     /// takes the place of what was there: a step at either end of it, from
     /// the line as it was, or the parameter's own value, to what was drawn
     /// and back.
-    fn drawn_points(&self, param: ParamAddress, drawn: &Drawn, steps: bool) -> Option<Vec<Point>> {
+    fn drawn_points(&self, param: ParamAddress, drawn: &Drawn) -> Option<Vec<Point>> {
         let (&start, _) = drawn.values.first_key_value()?;
-        let (&last, _) = drawn.values.last_key_value()?;
-        let end = if steps { self.cell(last).end } else { last };
+        let (&last, &(_, step)) = drawn.values.last_key_value()?;
+        let end = if step { self.cell(last).end } else { last };
         let project = self.project();
         let scale = self.spec(param).scale;
         let lane = project.lane(param);
@@ -1206,9 +1221,9 @@ impl Scene<'_> {
         let mut points: Vec<Point> = old.iter().filter(|p| p.at < start).copied().collect();
         points.extend(before.map(|value| Point::new(start, value)));
         let mut values = drawn.values.iter().peekable();
-        while let Some((&at, &value)) = values.next() {
+        while let Some((&at, &(value, step))) = values.next() {
             points.push(Point::new(at, value));
-            if steps {
+            if step {
                 let next = values.peek().map_or(end, |&(&next, _)| next);
                 points.push(Point::new(next, value));
             }
@@ -1251,23 +1266,24 @@ impl Scene<'_> {
         (at != edge).then_some(Plan::Trim { clip, side, at })
     }
 
-    /// Stretching the warped clip `clip`'s `side` by `moved`, on the grid:
-    /// its tempo changes so the audio it plays fills it, as far as its
-    /// tempo's range goes. A clip that isn't warped trims instead.
-    fn stretch(&self, clip: ClipId, side: Side, moved: Beats) -> Option<Plan> {
+    /// Stretching the warped clip `clip`'s `side` by `moved`, on the grid
+    /// unless `free`: its tempo changes so the audio it plays fills it, as
+    /// far as its tempo's range goes. A clip that isn't warped trims
+    /// instead.
+    fn stretch(&self, clip: ClipId, side: Side, moved: Beats, free: bool) -> Option<Plan> {
         let (_, c) = find(self.project(), clip)?;
         let warped = match &c.content {
             ClipContent::Audio(audio) => audio.warp.as_ref().map(|warp| (audio, warp)),
             ClipContent::Midi(_) => None,
         };
         let Some((audio, warp)) = warped else {
-            return self.trim(clip, side, moved, false);
+            return self.trim(clip, side, moved, free);
         };
         let edge = match side {
             Side::Start => c.start,
             Side::End => c.end(),
         };
-        let at = self.room(c, side, self.snap(edge + moved, false));
+        let at = self.room(c, side, self.snap(edge + moved, free));
         let length = match side {
             Side::Start => c.end() - at,
             Side::End => at - c.start,
@@ -1298,14 +1314,14 @@ impl Scene<'_> {
                 Hit::Clip { clip, .. },
             ) => {
                 let (index, grabbed) = find(project, clip)?;
-                let free = drag.action == MouseAction::MoveFree;
                 let moving: Vec<(usize, &Clip)> = drag
                     .clips
                     .iter()
                     .filter_map(|&c| find(project, c))
                     .collect();
                 let earliest = moving.iter().map(|(_, c)| c.start).min()?;
-                let by = (self.snap(grabbed.start + moved, free) - grabbed.start).max(-earliest);
+                let by =
+                    (self.snap(grabbed.start + moved, drag.free) - grabbed.start).max(-earliest);
                 let to = layout.nearest_index(drag.to.y)?;
                 let mut tracks = to as i64 - index as i64;
                 // As the command does: all of them move to other tracks, or
@@ -1333,7 +1349,7 @@ impl Scene<'_> {
                     part: Part::Edge(side),
                     ..
                 },
-            ) => self.trim(clip, side, moved, drag.action == MouseAction::TrimFree),
+            ) => self.trim(clip, side, moved, drag.free),
             (
                 MouseAction::Stretch,
                 Hit::Clip {
@@ -1341,7 +1357,7 @@ impl Scene<'_> {
                     part: Part::Edge(side),
                     ..
                 },
-            ) => self.stretch(clip, side, moved),
+            ) => self.stretch(clip, side, moved, drag.free),
             (
                 MouseAction::Fade,
                 Hit::Clip {
@@ -1379,7 +1395,7 @@ impl Scene<'_> {
                     false => layout.nearest_index(drag.to.y).unwrap_or(master),
                 };
                 let (top, bottom) = (from.min(to), from.max(to));
-                let (start, end) = (self.snapped(drag.from.x), self.snapped(drag.to.x));
+                let (start, end) = self.ends(drag);
                 Some(Plan::Time {
                     start: start.min(end),
                     end: start.max(end),
@@ -1402,7 +1418,7 @@ impl Scene<'_> {
                 Some(Plan::Viewport(viewport))
             }
             (MouseAction::DrawLoop, _) => {
-                let (start, end) = (self.snapped(drag.from.x), self.snapped(drag.to.x));
+                let (start, end) = self.ends(drag);
                 (start != end).then_some(Plan::Loop {
                     start: start.min(end),
                     end: start.max(end),
@@ -1411,7 +1427,7 @@ impl Scene<'_> {
             }
             (MouseAction::MoveLoop, _) => {
                 let region = project.loop_region;
-                let start = self.snap(region.start + moved, false).max(Beats::ZERO);
+                let start = self.snap(region.start + moved, drag.free).max(Beats::ZERO);
                 (start != region.start).then_some(Plan::Loop {
                     start,
                     end: start + region.len(),
@@ -1421,8 +1437,8 @@ impl Scene<'_> {
             (MouseAction::ResizeLoop, Hit::LoopEdge(side)) => {
                 let region = project.loop_region;
                 let (start, end) = match side {
-                    Side::Start => (self.snap(region.start + moved, false), region.end),
-                    Side::End => (region.start, self.snap(region.end + moved, false)),
+                    Side::Start => (self.snap(region.start + moved, drag.free), region.end),
+                    Side::End => (region.start, self.snap(region.end + moved, drag.free)),
                 };
                 let (start, end) = (
                     start.min(end).max(Beats::ZERO),
@@ -1436,7 +1452,7 @@ impl Scene<'_> {
             }
             (MouseAction::MoveLocator, Hit::Locator(id)) => {
                 let locator = project.locator(id)?;
-                let at = self.snap(locator.at + moved, false).max(Beats::ZERO);
+                let at = self.snap(locator.at + moved, drag.free).max(Beats::ZERO);
                 (at != locator.at).then_some(Plan::Locator { locator: id, at })
             }
             (MouseAction::ResizeTrack, Hit::TrackEdge(track)) => Some(Plan::Height {
@@ -1455,9 +1471,7 @@ impl Scene<'_> {
                 })
             }
             (MouseAction::Comp | MouseAction::CompFree, Hit::Take { track, take, .. }) => {
-                let free = drag.action == MouseAction::CompFree;
-                let at = |x| self.snap(layout.beats_at(x), free).max(Beats::ZERO);
-                let (start, end) = (at(drag.from.x), at(drag.to.x));
+                let (start, end) = self.ends(drag);
                 (start != end).then_some(Plan::Comp {
                     track,
                     take,
@@ -1478,11 +1492,10 @@ impl Scene<'_> {
                 let point = *old.get(i)?;
                 let spec = self.spec(param);
                 // It stays between the points either side.
-                let free = drag.action == MouseAction::MovePointFree;
                 let earliest = i
                     .checked_sub(1)
                     .map_or(Beats::ZERO, |before| old[before].at);
-                let mut at = self.snap(point.at + moved, free).max(earliest);
+                let mut at = self.snap(point.at + moved, drag.free).max(earliest);
                 if let Some(next) = old.get(i + 1) {
                     at = at.min(next.at);
                 }
@@ -1512,7 +1525,7 @@ impl Scene<'_> {
                 (points != *old).then_some(Plan::Points { param, points })
             }
             (MouseAction::Draw | MouseAction::DrawFree, Hit::Automation { param, .. }) => {
-                let points = self.drawn_points(param, &drag.drawn, self.draws_steps(drag))?;
+                let points = self.drawn_points(param, &drag.drawn)?;
                 let old = project.lane(param).map(|lane| &lane.points);
                 (old != Some(&points)).then_some(Plan::Points { param, points })
             }
@@ -2012,23 +2025,11 @@ impl Arrangement {
             if let Some(pos) = response.interact_pointer_pos() {
                 drag.to = pos;
             }
+            // Pressing Ctrl or Alt part of the way through copies clips or
+            // keeps off the grid, until it's let go.
+            (drag.action, drag.free) = scene.mouse.during(drag.hit.target(), drag.action, mods);
             if matches!(drag.action, MouseAction::Draw | MouseAction::DrawFree) {
                 scene.draw(drag);
-            }
-            // Holding Ctrl or Alt part of the way through a drag of clips
-            // copies them or stops snapping.
-            if let Hit::Clip {
-                part: Part::Title, ..
-            } = drag.hit
-                && matches!(
-                    drag.action,
-                    MouseAction::Move | MouseAction::Copy | MouseAction::MoveFree
-                )
-                && let Some(
-                    action @ (MouseAction::Move | MouseAction::Copy | MouseAction::MoveFree),
-                ) = scene.mouse.action(Target::ClipTitle, Gesture::Drag, mods)
-            {
-                drag.action = action;
             }
             // Selections, scrolling and heights change as the drag goes.
             if matches!(
@@ -2272,10 +2273,13 @@ impl Arrangement {
             self.drag = None;
             return;
         };
+        let (action, free) = scene.mouse.during(hit.target(), action, mods);
         let mut drag = Drag {
             area,
             action,
             hit,
+            free,
+            started_free: free,
             from,
             to: from,
             clips: Vec::new(),

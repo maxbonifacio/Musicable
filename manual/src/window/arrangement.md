@@ -89,7 +89,17 @@ changes it ([The mouse](../customising/mouse.md)):
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 
-Escape cancels a drag.
+Modifiers count while a drag goes, not only as it starts. **Alt** keeps
+any drag that snaps to the grid off it while it's held, from whenever it's
+pressed: moving, copying, trimming or stretching clips, the loop, a
+locator, a time selection, comping and automation, as in Live. Where the
+drag started stays where it was put, so a time selection's first edge
+stays on the grid if Alt was pressed after it. **Ctrl** pressed part of
+the way through a drag of clips copies them, and letting go of it moves
+them again; held with Alt, it copies them off the grid. **Shift** pressed
+part of the way through dragging a clip's edge stretches it rather than
+trimming it, from the edge's place as the drag started, and letting go of
+it trims it again. Escape cancels a drag.
 
 ## Right-click menus
 

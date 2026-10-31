@@ -101,7 +101,10 @@ changes it ([The mouse](../customising/mouse.md)):
 | Anywhere | Wheel; Ctrl-wheel | Scrolls sideways; zooms around the pointer |
 
 A marker can't pass the markers either side, nor squeeze or spread the
-audio between them past 5 or 999 BPM. Escape cancels a drag.
+audio between them past 5 or 999 BPM. Alt keeps any drag that snaps to
+the grid off it while it's held, from whenever it's pressed: moving
+markers, selecting time, and the lane's points and drawing. Escape cancels
+a drag.
 
 ## The keys
 

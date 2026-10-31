@@ -43,12 +43,13 @@ it has one, follows the device's, so it has no lane of its own
 
 - **Drag** across a lane to draw a value for each step of the grid crossed,
   as Live's Draw Mode does, or **Alt-drag** to draw freely, off the grid, as
-  it does with Snap to Grid off.
+  it does with Snap to Grid off. Pressing Alt or letting go of it part of
+  the way through switches from there on.
 - **Double-click** a lane to add a point there, or **click** its line to add
   one on the line, on the grid.
 - **Drag** a point to move it, on the grid and between the points either
-  side, or Alt-drag it to move it off the grid. **Click** a point to delete
-  it.
+  side, or Alt-drag it, or press Alt part of the way, to move it off the
+  grid. **Click** a point to delete it.
 - **Drag the line** between two points to move that stretch of it, with its
   points, up or down.
 

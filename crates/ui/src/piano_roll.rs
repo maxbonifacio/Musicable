@@ -135,6 +135,10 @@ struct Drag {
     area: Area,
     action: MouseAction,
     hit: Hit,
+    /// Where it started, for the mouse map: Draw Mode can change as it goes.
+    target: Target,
+    /// Whether it keeps off the grid now, as the modifiers held say.
+    free: bool,
     /// Where it started, and where the pointer is now.
     from: Pos2,
     to: Pos2,
@@ -477,8 +481,8 @@ impl Scene<'_> {
             (MouseAction::Move | MouseAction::Copy, Hit::Note { note, .. }) => {
                 let grabbed = self.song(self.midi.note(note)?.start);
                 let earliest = self.notes(&drag.notes).map(|n| self.song(n.start)).min()?;
-                let by =
-                    (self.snap(grabbed + moved, false) - grabbed).max(-earliest.max(Beats::ZERO));
+                let by = (self.snap(grabbed + moved, drag.free) - grabbed)
+                    .max(-earliest.max(Beats::ZERO));
                 let (low, high) = self
                     .notes(&drag.notes)
                     .fold((Note::MAX_KEY, 0), |(low, high), n| {
@@ -506,7 +510,7 @@ impl Scene<'_> {
                     Side::Start => start,
                     Side::End => start + grabbed.length,
                 };
-                let at = self.snap(edge + moved, drag.action == MouseAction::TrimFree);
+                let at = self.snap(edge + moved, drag.free);
                 (at != edge).then(|| Plan::Trim {
                     notes: drag.notes.clone(),
                     side,
@@ -812,14 +816,11 @@ impl PianoRoll {
             if let Some(pos) = response.interact_pointer_pos() {
                 drag.to = pos;
             }
-            // Holding Ctrl part of the way through a drag of notes copies
-            // them.
-            if matches!(drag.action, MouseAction::Move | MouseAction::Copy)
-                && let Some(action @ (MouseAction::Move | MouseAction::Copy)) =
-                    scene.mouse.action(Target::Note, Gesture::Drag, mods)
-            {
-                drag.action = action;
-            }
+            // Pressing Ctrl part of the way through a drag of notes copies
+            // them, and Alt keeps them off the grid, until it's let go, as
+            // in Live, though Alt held as the drag starts changes their
+            // velocity.
+            (drag.action, drag.free) = scene.mouse.during(drag.target, drag.action, mods);
             match drag.action {
                 MouseAction::DrawNotes => draw_along(scene, drag),
                 MouseAction::DrawController | MouseAction::EraseController => {
@@ -873,15 +874,18 @@ impl PianoRoll {
         actions: &mut Vec<Action>,
     ) {
         let hit = scene.hit(area, from);
-        let draw = scene.editor().piano_roll.draw;
-        let Some(action) = scene.mouse.action(hit.target(draw), Gesture::Drag, mods) else {
+        let target = hit.target(scene.editor().piano_roll.draw);
+        let Some(action) = scene.mouse.action(target, Gesture::Drag, mods) else {
             self.drag = None;
             return;
         };
+        let (action, free) = scene.mouse.during(target, action, mods);
         let mut drag = Drag {
             area,
             action,
             hit,
+            target,
+            free,
             from,
             to: from,
             notes: Vec::new(),

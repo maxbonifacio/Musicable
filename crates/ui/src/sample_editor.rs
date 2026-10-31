@@ -153,6 +153,10 @@ struct Drag {
     area: Area,
     action: MouseAction,
     hit: Hit,
+    /// Whether it keeps off the grid now, as the modifiers held say, and
+    /// whether it did as it started, which where it started keeps.
+    free: bool,
+    started_free: bool,
     /// Where it started, and where the pointer is now.
     from: Pos2,
     to: Pos2,
@@ -164,8 +168,10 @@ struct Drag {
     sent: Option<Plan>,
     /// What a drag that draws on the lane drew so far: a value for
     /// each step of the grid it crossed, by the song position the step
-    /// starts at, or drawn freely, a value for each place the pointer was.
-    drawn: BTreeMap<Beats, f64>,
+    /// starts at, or drawn freely, off the grid, a value for each place the
+    /// pointer was, and whether each holds for a step: a drag goes off the
+    /// grid and back as Alt is pressed and let go.
+    drawn: BTreeMap<Beats, (f64, bool)>,
     /// Where the pointer was when it last drew.
     last: Option<Pos2>,
 }
@@ -484,6 +490,13 @@ impl Scene<'_> {
         self.snap(self.layout.beats_at(x), false).max(Beats::ZERO)
     }
 
+    /// The song positions where `drag` started and where the pointer is
+    /// now, each snapped to the grid unless the drag kept off it then.
+    fn ends(&self, drag: &Drag) -> (Beats, Beats) {
+        let at = |x, free| self.snap(self.layout.beats_at(x), free).max(Beats::ZERO);
+        (at(drag.from.x, drag.started_free), at(drag.to.x, drag.free))
+    }
+
     /// The lane's value at `y`.
     fn value_at(&self, y: f32) -> f64 {
         let spec = self.spec();
@@ -596,9 +609,9 @@ impl Scene<'_> {
             .map_or(Envelope::Lane, |(_, from, to)| Envelope::Line { from, to })
     }
 
-    /// Whether `drag` draws a step of the grid at a time.
+    /// Whether `drag` draws a step of the grid at a time, now.
     fn draws_steps(&self, drag: &Drag) -> bool {
-        drag.action == MouseAction::Draw && self.editor().grid.snap
+        !drag.free && self.editor().grid.snap
     }
 
     /// Draws on the lane from where the pointer last drew to where it is
@@ -621,14 +634,16 @@ impl Scene<'_> {
         let values = &mut drag.drawn;
         if steps {
             // Each step crossed takes the value where the pointer crossed
-            // its middle, or came nearest it.
+            // its middle, or came nearest it, in place of what was drawn
+            // in it off the grid.
             let end = beats(right);
             let mut at = beats(left);
             let zoom = layout.viewport.zoom;
             loop {
                 let cell = self.editor().grid.cell(self.tempo(), at, zoom);
                 let middle = (layout.x_of(cell.start) + layout.x_of(cell.end)) / 2.0;
-                values.insert(cell.start, value(middle.clamp(left, right)));
+                values.retain(|&drawn, _| drawn <= cell.start || drawn >= cell.end);
+                values.insert(cell.start, (value(middle.clamp(left, right)), true));
                 if cell.end > end || cell.end <= at {
                     break;
                 }
@@ -638,8 +653,8 @@ impl Scene<'_> {
             // What was drawn between goes, so going back draws over it.
             let (start, end) = (beats(left), beats(right));
             values.retain(|&at, _| at <= start || at >= end);
-            values.insert(beats(from.x), value(from.x));
-            values.insert(beats(to.x), value(to.x));
+            values.insert(beats(from.x), (value(from.x), false));
+            values.insert(beats(to.x), (value(to.x), false));
         }
         drag.last = Some(to);
     }
@@ -648,11 +663,10 @@ impl Scene<'_> {
     /// in the clip's own time: a step at either end of it, from the line as
     /// it was to what was drawn and back.
     fn drawn_points(&self, drag: &Drag) -> Option<Vec<Point>> {
-        let steps = self.draws_steps(drag);
         let (&start, _) = drag.drawn.first_key_value()?;
-        let (&last, _) = drag.drawn.last_key_value()?;
+        let (&last, &(_, step)) = drag.drawn.last_key_value()?;
         let zoom = self.layout.viewport.zoom;
-        let end = match steps {
+        let end = match step {
             true => self.editor().grid.cell(self.tempo(), last, zoom).end,
             false => last,
         };
@@ -665,9 +679,9 @@ impl Scene<'_> {
         let mut points: Vec<Point> = old.iter().filter(|p| p.at < start_own).copied().collect();
         points.push(Point::new(start_own, before));
         let mut values = drag.drawn.iter().peekable();
-        while let Some((&at, &value)) = values.next() {
+        while let Some((&at, &(value, step))) = values.next() {
             points.push(Point::new(own(at), value));
-            if steps {
+            if step {
                 let next = values.peek().map_or(end, |&(&next, _)| next);
                 points.push(Point::new(own(next), value));
             }
@@ -685,8 +699,7 @@ impl Scene<'_> {
             (MouseAction::MoveMarker | MouseAction::MoveMarkerFree, Hit::Marker(i)) => {
                 let warp = self.warp()?;
                 let grabbed = warp::song_position(self.clip, self.audio, warp.markers.get(i)?.beat);
-                let free = drag.action == MouseAction::MoveMarkerFree;
-                let by = self.snap(grabbed + moved, free) - grabbed;
+                let by = self.snap(grabbed + moved, drag.free) - grabbed;
                 let by = warp.markers_can_move(&drag.markers, by);
                 (by != Beats::ZERO).then(|| Plan::Markers {
                     markers: drag.markers.clone(),
@@ -717,8 +730,7 @@ impl Scene<'_> {
                 let mut warp = self.warp()?.clone();
                 let i = warp.insert_at_frame(frame, self.rate)?;
                 let grabbed = warp::song_position(self.clip, self.audio, warp.markers[i].beat);
-                let free = drag.action == MouseAction::MoveMarkerFree;
-                let by = self.snap(grabbed + moved, free) - grabbed;
+                let by = self.snap(grabbed + moved, drag.free) - grabbed;
                 let by = warp.markers_can_move(&[i], by);
                 (by != Beats::ZERO).then_some(Plan::Pseudo { frame, by })
             }
@@ -737,7 +749,7 @@ impl Scene<'_> {
                 (to != frame).then_some(Plan::Transient { frame, to })
             }
             (MouseAction::SelectTime, Hit::WaveTop | Hit::Wave | Hit::Transient(_)) => {
-                let (start, end) = (self.snapped(drag.from.x), self.snapped(drag.to.x));
+                let (start, end) = self.ends(drag);
                 Some(Plan::Time {
                     start: start.min(end),
                     end: start.max(end),
@@ -749,10 +761,9 @@ impl Scene<'_> {
             ) => {
                 let old = self.curve();
                 let point = *old.get(i)?;
-                let free = drag.action == MouseAction::MovePointFree;
                 // It stays between the points either side.
                 let song = Beats::from_f64(self.song_of(point.at));
-                let mut at = self.own_of(self.snap(song + moved, free).max(Beats::ZERO));
+                let mut at = self.own_of(self.snap(song + moved, drag.free).max(Beats::ZERO));
                 if let Some(before) = i.checked_sub(1) {
                     at = at.max(old[before].at);
                 }
@@ -1123,6 +1134,9 @@ impl SampleEditor {
             if let Some(pos) = response.interact_pointer_pos() {
                 drag.to = pos;
             }
+            // Pressing Alt part of the way through keeps the drag off the
+            // grid, until it's let go.
+            (drag.action, drag.free) = scene.mouse.during(drag.hit.target(), drag.action, mods);
             if matches!(drag.action, MouseAction::Draw | MouseAction::DrawFree) {
                 scene.draw(drag);
             }
@@ -1176,10 +1190,13 @@ impl SampleEditor {
             self.drag = None;
             return;
         };
+        let (action, free) = scene.mouse.during(hit.target(), action, mods);
         let mut drag = Drag {
             area,
             action,
             hit,
+            free,
+            started_free: free,
             from,
             to: from,
             markers: Vec::new(),
