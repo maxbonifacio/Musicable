@@ -131,7 +131,10 @@ your export settings stay as they were.
 They can also read the plugins the browser lists, to add one by its id;
 whether a plugin device's plugin loaded, or why not, and whether its window
 is open; which panels are in sight, in which window, with your workspace
-and profile; and the meters, as the [mixer](../window/mixer.md) shows them.
+and profile; and the meters, as the [mixer](../window/mixer.md) shows them. They can
+list the windows, and take a picture of the main window or of a panel in
+it, which they see as an image, as it's drawn, even if another window
+covers it.
 
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,

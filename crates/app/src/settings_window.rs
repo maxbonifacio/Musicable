@@ -291,7 +291,7 @@ impl SettingsWindow {
         }
     }
 
-    #[cfg(test)]
+    /// Whether the window is open.
     pub(crate) fn is_open(&self) -> bool {
         self.open
     }

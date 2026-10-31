@@ -19,7 +19,7 @@
 //!
 //! `docs/agents.md` describes the tools, and what they take and give back.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use musicable_commands::{
     Args, BatchError, CommandError, CommandId, Editor, Keymap, Registry, Steps, Value, edit,
@@ -92,6 +92,10 @@ enum Asked {
         since: Option<u64>,
         last: usize,
     },
+    /// The windows.
+    Windows,
+    /// A picture of a window or a panel.
+    Screenshot(Shot),
     /// The messages the window shows the user, and whether to clear them
     /// once read.
     Messages {
@@ -342,6 +346,19 @@ pub struct Status {
     pub revision: u64,
 }
 
+/// What to take a picture of, and where to save it: see
+/// [`Window::screenshot`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Shot {
+    /// The window: the main window with `None`, or else a window of its
+    /// own, counted from 0.
+    pub window: Option<usize>,
+    /// The panel, by its id, in place of a whole window.
+    pub panel: Option<String>,
+    /// Where to save it as a PNG file too, if anywhere.
+    pub file: Option<PathBuf>,
+}
+
 /// How a plugin device's plugin is doing: see [`Window::plugin_state`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PluginState {
@@ -427,6 +444,18 @@ pub trait Window {
         serde_json::json!({ "entries": [], "count": 0, "file": null })
     }
 
+    /// The windows, as JSON.
+    fn windows(&self) -> Json {
+        serde_json::json!({ "windows": [] })
+    }
+
+    /// Takes a picture of `shot`, and answers `reply` once it has: with
+    /// what it took, and the picture as a PNG file in base64 as `png`,
+    /// which the tool hands the agent as an image.
+    fn screenshot(&mut self, _shot: Shot, reply: Reply) {
+        reply.failed("This window can't take pictures.");
+    }
+
     /// The settings, as the settings file has them, with the profile in
     /// use's, and what plays, as JSON.
     fn settings(&self) -> Json {
@@ -463,6 +492,8 @@ pub fn answer(call: Call, window: &mut impl Window) {
     }
     let answer = match asked {
         Asked::Run(run) => return window.run(run, reply),
+        Asked::Screenshot(shot) => return window.screenshot(shot, reply),
+        Asked::Windows => Ok(window.windows()),
         Asked::Commands(filter) => Ok(reads::commands(window, filter.as_deref())),
         Asked::Command(id) => reads::command(window, &id),
         Asked::Project => Ok(reads::project(window)),
