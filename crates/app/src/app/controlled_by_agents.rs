@@ -944,3 +944,97 @@ fn agents_list_the_windows_and_take_pictures_of_them() {
         assert!(why.starts_with(expected), "{why}");
     }
 }
+
+/// Every node in `nodes`, and in theirs, as get_ui_tree gives them.
+fn every_node(nodes: &Json) -> Vec<&Json> {
+    let mut every = Vec::new();
+    for node in nodes.as_array().into_iter().flatten() {
+        every.push(node);
+        every.extend(every_node(&node["children"]));
+    }
+    every
+}
+
+fn labelled<'a>(nodes: &[&'a Json], label: &str) -> Option<&'a Json> {
+    nodes.iter().copied().find(|node| node["label"] == label)
+}
+
+#[test]
+fn agents_read_what_is_in_the_windows() {
+    let dir = TempDir::new("agents-ui-tree");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let tree = agent.call(&mut window, "get_ui_tree", json!({})).unwrap();
+    assert_eq!(tree["window"], "main", "{tree}");
+    assert_eq!(tree["panel"], Json::Null, "{tree}");
+    assert_eq!(tree["more"], 0, "{tree}");
+    let nodes = every_node(&tree["nodes"]);
+    let play = labelled(&nodes, "Play").expect("the Play button");
+    assert_eq!(play["role"], "button", "{play}");
+    assert_eq!(play["actions"], json!(["click"]), "{play}");
+    assert!(play["at"].is_array() && play["size"].is_array(), "{play}");
+    let tempo = labelled(&nodes, "BPM").expect("the tempo");
+    assert_eq!(tempo["role"], "spin_button", "{tempo}");
+    assert_eq!(tempo["value"], "120.00 BPM", "{tempo}");
+    // Neither text runs nor unnamed containers.
+    assert!(
+        nodes
+            .iter()
+            .all(|node| node["role"] != "text_run" && node["role"] != "generic_container"),
+        "{tree}"
+    );
+    // Letting agents in left Settings open.
+    assert_eq!(labelled(&nodes, "Settings").unwrap()["role"], "window");
+
+    // A panel's.
+    let mixer = agent
+        .call(&mut window, "get_ui_tree", json!({"panel": "mixer"}))
+        .unwrap();
+    assert_eq!(mixer["panel"], "mixer");
+    let nodes = every_node(&mixer["nodes"]);
+    assert!(labelled(&nodes, "Master Volume").is_some(), "{mixer}");
+    assert!(labelled(&nodes, "Play").is_none(), "{mixer}");
+
+    // What has some words, with what it's in.
+    let found = agent
+        .call(
+            &mut window,
+            "get_ui_tree",
+            json!({"filter": "master volume", "limit": 10}),
+        )
+        .unwrap();
+    let nodes = every_node(&found["nodes"]);
+    let volume = labelled(&nodes, "Master Volume").expect("the master volume");
+    assert_eq!(volume["role"], "slider", "{volume}");
+    assert!(labelled(&nodes, "Master Strip").is_some(), "{found}");
+    assert!(labelled(&nodes, "Master Pan").is_none(), "{found}");
+
+    // The limit.
+    let few = agent
+        .call(&mut window, "get_ui_tree", json!({"limit": 3}))
+        .unwrap();
+    assert!(every_node(&few["nodes"]).len() <= 4, "{few}");
+    assert!(few["more"].as_u64().unwrap() > 10, "{few}");
+
+    let none = agent.call(&mut window, "get_ui_tree", json!({"panel": "jukebox"}));
+    assert_eq!(
+        none,
+        Err("There's no panel jukebox: get_layout gives their ids.".to_owned())
+    );
+
+    // A window of its own's. The test draws it inside the main window, so
+    // its tree is in the main window's.
+    window
+        .state_mut()
+        .shell
+        .move_to_new_window("mixer")
+        .unwrap();
+    window.run();
+    let own = agent
+        .call(&mut window, "get_ui_tree", json!({"window": 1}))
+        .unwrap();
+    assert_eq!(own["window"], 1, "{own}");
+    let nodes = every_node(&own["nodes"]);
+    assert!(labelled(&nodes, "Master Volume").is_some(), "{own}");
+}

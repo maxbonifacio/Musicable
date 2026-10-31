@@ -32,7 +32,9 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_path_to_error = "0.1"
 toml = "1"
 # The app shell: egui in a winit window, drawn with wgpu, and native file dialogs.
+# AccessKit tells screen readers, and agents, what's in the windows.
 eframe = { version = "0.37", default-features = false, features = [
+    "accesskit",
     "clipboard",
     "default_fonts",
     "wayland",

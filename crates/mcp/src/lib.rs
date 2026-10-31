@@ -96,6 +96,8 @@ enum Asked {
     Windows,
     /// A picture of a window or a panel.
     Screenshot(Shot),
+    /// What's in a window, as a screen reader reads it.
+    UiTree(Tree),
     /// The messages the window shows the user, and whether to clear them
     /// once read.
     Messages {
@@ -362,6 +364,22 @@ pub struct Shot {
     pub file: Option<PathBuf>,
 }
 
+/// What of a window to read as a screen reader does: see
+/// [`Window::ui_tree`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Tree {
+    /// The window: the main window with `None`, or else a window of its
+    /// own, counted from 0.
+    pub window: Option<usize>,
+    /// The panel, by its id, to read only what's in it.
+    pub panel: Option<String>,
+    /// Words to look for, to read only what has them, with what's inside
+    /// it and what it's in.
+    pub filter: Option<String>,
+    /// The most to read.
+    pub limit: usize,
+}
+
 /// How a plugin device's plugin is doing: see [`Window::plugin_state`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PluginState {
@@ -459,6 +477,12 @@ pub trait Window {
         reply.failed("This window can't take pictures.");
     }
 
+    /// Reads what `tree` asks of a window, as it's next drawn, and answers
+    /// `reply` once it has.
+    fn ui_tree(&mut self, _tree: Tree, reply: Reply) {
+        reply.failed("This window can't read what's in it.");
+    }
+
     /// The settings, as the settings file has them, with the profile in
     /// use's, and what plays, as JSON.
     fn settings(&self) -> Json {
@@ -496,6 +520,7 @@ pub fn answer(call: Call, window: &mut impl Window) {
     let answer = match asked {
         Asked::Run(run) => return window.run(run, reply),
         Asked::Screenshot(shot) => return window.screenshot(shot, reply),
+        Asked::UiTree(tree) => return window.ui_tree(tree, reply),
         Asked::Windows => Ok(window.windows()),
         Asked::Commands(filter) => Ok(reads::commands(window, filter.as_deref())),
         Asked::Command(id) => reads::command(window, &id),

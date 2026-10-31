@@ -643,6 +643,10 @@ impl musicable_mcp::Window for Agent<'_> {
     fn screenshot(&mut self, shot: musicable_mcp::Shot, reply: Reply) {
         self.app.screenshot_for_agent(shot, reply, self.ctx);
     }
+
+    fn ui_tree(&mut self, tree: musicable_mcp::Tree, reply: Reply) {
+        self.app.ui_tree_for_agent(tree, reply, self.ctx);
+    }
 }
 
 /// Whether the app answers the agent whose command made `request`, rather

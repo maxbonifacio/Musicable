@@ -135,7 +135,9 @@ and profile; and the meters, as the [mixer](../window/mixer.md) shows them. They
 list the windows, and take a picture of the main window or of a panel in
 it, which they see as an image, as it's drawn, even if another window
 covers it. On Windows, they can take pictures of the windows you moved
-panels to, and of plugins' windows, too.
+panels to, and of plugins' windows, too. They can read what's in a window
+as a screen reader does: its buttons, sliders, switches and menus, with
+their names, values and places.
 
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,
