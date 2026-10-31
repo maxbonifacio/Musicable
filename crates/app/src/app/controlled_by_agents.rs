@@ -1228,3 +1228,75 @@ fn agents_play_midi_only_into_their_input_while_it_is_open() {
         "{why}"
     );
 }
+
+#[test]
+fn agents_record_what_the_device_plays_with_a_timeline() {
+    let dir = TempDir::new("agents-record-output");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let run = |window: &mut Harness<'static, App>, id: &str, args: Json| {
+        agent.call(window, "run_command", json!({"id": id, "args": args}))
+    };
+    let relative = run(
+        &mut window,
+        "debug.record_output",
+        json!({"file": "out.wav"}),
+    );
+    assert!(
+        relative
+            .as_ref()
+            .is_err_and(|why| why.contains("isn't a full path")),
+        "{relative:?}"
+    );
+    let track = run(&mut window, "track.new_audio_track", json!({})).unwrap()["result"].clone();
+    let file = dir.0.join("Output.wav");
+    let started = run(&mut window, "debug.record_output", json!({"file": file})).unwrap();
+    let timeline = dir.0.join("Output.timeline.json");
+    assert_eq!(
+        started["result"],
+        json!({"file": file, "timeline": timeline})
+    );
+    let again = run(&mut window, "debug.record_output", json!({"file": file}));
+    assert!(
+        again.as_ref().is_err_and(|why| why.contains("already")),
+        "{again:?}"
+    );
+    // What the device plays, as the engine hands it over, with a change of
+    // volume in between.
+    window.state_mut().output.play_idle(512);
+    run(
+        &mut window,
+        "mixer.set_volume",
+        json!({"track": track, "gain": 0.5}),
+    )
+    .unwrap();
+    window.run();
+    window.state_mut().output.play_idle(1024);
+    window.state_mut().output.play_idle(1024);
+    let stopped = run(&mut window, "debug.stop_recording_output", json!({})).unwrap();
+    let stopped = &stopped["result"];
+    assert_eq!(stopped["frames"], 2560, "{stopped}");
+    assert_eq!(stopped["channels"], 2, "{stopped}");
+    let info = Decoder::open(&file).unwrap().info();
+    assert_eq!((info.channels, info.frames), (2, 2560));
+    let timeline: Json = serde_json::from_slice(&fs::read(&timeline).unwrap()).unwrap();
+    assert_eq!(timeline["sample_rate"], 48_000, "{timeline}");
+    let name = format!(
+        "{}: Volume",
+        window.state().session.project().tracks[0].name
+    );
+    let volume = (timeline["events"].as_array().unwrap().iter())
+        .find(|event| event["name"] == json!(name))
+        .unwrap_or_else(|| panic!("no {name} in {timeline}"));
+    assert_eq!(volume["event"], "param", "{volume}");
+    assert_eq!(volume["value"], 0.5, "{volume}");
+    // Sent once the first 512 frames had played, and applied 512 frames
+    // later, as the engine keeps that far ahead while the transport stands
+    // still.
+    assert_eq!(volume["sent_frame"], 512, "{volume}");
+    assert_eq!(volume["frame"], 1024, "{volume}");
+    assert_eq!(volume["late_ms"], 10.67, "{volume}");
+    let not = run(&mut window, "debug.stop_recording_output", json!({}));
+    assert_eq!(not, Err("Musicable isn't recording its output.".into()));
+}

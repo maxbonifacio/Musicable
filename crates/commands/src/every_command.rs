@@ -53,8 +53,8 @@ use crate::editor::AudioFile;
 use crate::testing::Setup;
 use crate::{
     Args, CommandError, CommandId, Committed, Document, Value, arrange, automation, browser,
-    controllers, device, edit, file, history, json, locator, mixer, modulation, notes, options,
-    rewarp, take, track, transient, transport, view, warp, warp_mode, wire, workspace,
+    controllers, debug, device, edit, file, history, json, locator, mixer, modulation, notes,
+    options, rewarp, take, track, transient, transport, view, warp, warp_mode, wire, workspace,
 };
 
 /// An audio file the editor has read, which clips can be inserted from.
@@ -241,6 +241,10 @@ fn examples() -> Vec<Example> {
             let param = ParamAddress::Volume(Chain::Master);
             Some(Args::new().with("param", param))
         }),
+        leaves(debug::RECORD_OUTPUT, |_| {
+            Some(Args::new().with("file", "/checks/output.wav"))
+        }),
+        leaves(debug::STOP_RECORDING_OUTPUT, bare),
         leaves(browser::ADD_FOLDER, |_| {
             Some(Args::new().with("folder", "/samples"))
         }),

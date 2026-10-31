@@ -285,6 +285,12 @@ impl App {
     ) {
         let answer = match request {
             Request::SetSetting { key, value } => self.set_setting(&key, &value, ctx, frame),
+            Request::RecordOutput(file) if !file.is_absolute() => Err(format!(
+                "{} isn't a full path: give the file's full path, from the root of its drive.",
+                file.display()
+            )),
+            Request::RecordOutput(file) => self.session.record_output(&file),
+            Request::StopRecordingOutput => self.session.stop_recording_output(),
             Request::SetAudioDevice(device) => self.set_audio_device(device),
             Request::SetKeys { command, keys } => self.set_keys(&command, keys),
             Request::ResetKeys(command) => self.reset_keys(&command),
@@ -708,6 +714,8 @@ fn answers(request: &Request) -> bool {
             | Request::ResetKeys(_)
             | Request::SaveWorkspaceAs(_)
             | Request::RenameWorkspace(_)
+            | Request::RecordOutput(_)
+            | Request::StopRecordingOutput
     )
 }
 

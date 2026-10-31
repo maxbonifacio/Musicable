@@ -41,6 +41,7 @@ pub mod meter;
 pub mod midi;
 pub mod modulation;
 pub mod nodes;
+pub mod output_recording;
 mod parallel;
 pub mod preview;
 mod queue;
@@ -61,7 +62,7 @@ pub use compile::{
     compile_with_stems,
 };
 pub use engine::{
-    Engine, EngineHandle, MAX_WRITERS, PreviewAt, QueueFull, Stats, SwapError, TapWriter,
+    Engine, EngineHandle, MAX_WRITERS, PreviewAt, QueueFull, Sent, Stats, SwapError, TapWriter,
 };
 pub use event::{
     Event, NodeEvent, NodeEventKind, NoteEvent, NoteId, ParamId, TransportCommand, TransportState,
@@ -70,6 +71,7 @@ pub use graph::{Controls, Graph, GraphError, Joint, NodeId, NodeKey, Notes, Prep
 pub use load::{Load, LoadKey, NodeLoads};
 pub use meter::{Level, Meter, Meters};
 pub use midi::{MidiMessage, MidiMonitor, MidiNotes, NoteWire, Played};
+pub use output_recording::OutputRecording;
 pub use parallel::{
     AheadWaker, PARTS, ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats, Pipeline,
     SHORTEST_PART,

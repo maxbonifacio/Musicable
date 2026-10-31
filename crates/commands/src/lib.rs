@@ -26,6 +26,7 @@ pub mod auto_warp;
 pub mod automation;
 pub mod browser;
 pub mod controllers;
+pub mod debug;
 pub mod device;
 mod document;
 pub mod edit;
@@ -427,6 +428,11 @@ pub enum Request {
     SetAudioDevice(AudioDevice),
     /// Count dropouts from zero again.
     ResetDropouts,
+    /// Record what the audio device plays to this WAV file, a full path,
+    /// with its timeline beside it: see [`debug`].
+    RecordOutput(PathBuf),
+    /// Stop recording what the audio device plays.
+    StopRecordingOutput,
     /// Clear the highest peak of every channel's meter.
     ClearPeaks,
     /// Give `command` these keys, everywhere or in a panel, in place of
@@ -711,6 +717,7 @@ pub fn register_all(registry: &mut Registry) {
     view::register(registry);
     workspace::register(registry);
     options::register(registry);
+    debug::register(registry);
 }
 
 /// Registers commands that each ask the app for something. Agents can run

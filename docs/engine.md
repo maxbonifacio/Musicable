@@ -150,6 +150,25 @@ recorder reads them on another thread, and `Read::until` says how far in
 engine time they go. The queue holds 4,096 segments, and `Read::lost` says
 when a reader fell so far behind that some were dropped.
 
+**Output recordings.** For checks, `EngineHandle::record_output` keeps
+what the engine hands the audio device, as `debug.record_output` asks
+(`output_recording.rs`). The live side copies each callback's output,
+after previews and the cue, into a ring, and pushes a `Callback` note: its
+engine time, frames and channels, and the device's xruns, the short blocks
+and the lead so far. Both sides log what they apply into rings of their
+own, with the engine time each applied on: events, by their node's frame
+for a node's, graphs, tempo maps and loop wraps. The handle keeps each
+event sent meanwhile, with the engine time playing as it was sent, which
+`stop_recording_output` returns. A thread in the app drains the rings into
+a WAV file every 5 ms (`crates/app/src/output_recorder.rs`), and silence
+stands in for a callback the ring had no room for, so the frames after it
+stay where they played. Each end says it has stopped writing as it's
+replaced or dropped, so the reader knows when it has everything. The
+timeline beside the file matches each event sent to the first one like it
+the engine applied after, so it gives how late each applied, in frames of
+the file: the lead while the transport stands still, and with Render
+Ahead, the lead it plays with.
+
 The segments place what the inputs captured. What plays at song position
 `p` is rendered at engine time `t`, and with the graph's latency `L`, it's
 heard at `t + L`. Frame `t + L` of an input's buffer is what the input

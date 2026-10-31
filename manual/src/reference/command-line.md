@@ -110,6 +110,14 @@ as its input like any other, so they can check what recording and MIDI
 routing do with what's played. It plays on Windows only so far, where
 Musicable records MIDI.
 
+To check what you hear, agents can record every frame Musicable hands the
+audio device to a WAV file, with **Debug > Record Output**'s command, and
+stop with **Debug > Stop Recording Output**. Beside the file goes a
+timeline of what the engine applied as it played, on the same clock: each
+parameter change, Play and Stop, and new graph, with how long after it was
+sent it applied, and each dropout. So they can tell that a knob turned
+late, or that the output dropped out, without your ears.
+
 Agents can read what each device costs the CPU too, as the
 [Performance panel](../window/performance.md) lists it, to say which plugin
 to freeze or take out, and how far ahead of the audio device Musicable
