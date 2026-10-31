@@ -398,6 +398,20 @@ pub struct PluginState {
     /// It has a window of its own, and whether that's open.
     pub has_window: bool,
     pub window_open: bool,
+    /// What its read-only parameters say now, such as Test Load's Position:
+    /// the plugin sets them, and the project doesn't keep them.
+    pub readouts: Vec<Readout>,
+}
+
+/// A plugin's read-only parameter, as it is now.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Readout {
+    /// The plugin's id for it.
+    pub param: u32,
+    pub name: String,
+    pub value: f64,
+    /// The value as the plugin shows it, if it says.
+    pub text: Option<String>,
 }
 
 /// How an export is going, as its window's progress bar shows it.

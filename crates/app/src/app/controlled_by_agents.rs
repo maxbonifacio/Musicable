@@ -21,6 +21,9 @@ use musicable_model::clip::{ClipContent, MidiClip};
 use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceKind, PluginFormat, Project, TrackKind};
+use musicable_plugins::scan::{self, Outcome, ScanCache};
+use musicable_test_plugins::testing::Library;
+use musicable_test_plugins::{LOAD_ID, POSITION};
 use musicable_ui::PluginEntry;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
@@ -33,6 +36,7 @@ use tokio::task::JoinHandle;
 
 use super::App;
 use super::testing::{TempDir, window};
+use crate::plugin_scan::PLUGINS_FILE;
 use crate::settings::{SETTINGS_FILE, Settings};
 
 type Window = Harness<'static, App>;
@@ -1299,4 +1303,62 @@ fn agents_record_what_the_device_plays_with_a_timeline() {
     assert_eq!(volume["late_ms"], 10.67, "{volume}");
     let not = run(&mut window, "debug.stop_recording_output", json!({}));
     assert_eq!(not, Err("Musicable isn't recording its output.".into()));
+}
+
+#[test]
+fn agents_read_what_a_plugin_says_as_it_plays() {
+    let dir = TempDir::new("agents-readouts");
+    let folder = TempDir::new("agents-readouts-song");
+    let library = Library::copy(&folder.0, "test-plugins");
+    let mut cache = ScanCache::default();
+    cache.update(&[library.path().to_owned()], false, |path| {
+        Outcome::Found(scan::scan_here(path).unwrap())
+    });
+    cache.write(&dir.0.join(PLUGINS_FILE)).unwrap();
+    let mut song = Project::new();
+    let bass = song.add_track("Bass", TrackKind::Audio);
+    let load = song.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: LOAD_ID.to_str().unwrap().into(),
+        name: "Test Load".into(),
+        kind: PluginKind::AudioEffect,
+        inputs: Vec::new(),
+        note_output: false,
+        settings: PluginSettings::default(),
+    }));
+    let id = load.id;
+    song.track_mut(bass).unwrap().devices.push(load);
+    let file = folder.0.join("Song.musicable");
+    project::save(&file, &song).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    wait_for(&mut window, "Test Load loading", |app| {
+        app.session.plugin(id).is_some()
+    });
+
+    // Test Load's Position, read-only, says where it last rendered to.
+    window.state_mut().output.play_idle(480);
+    window.run();
+    let device = agent.call(&mut window, "get_device", json!({"device": id.0}));
+    let device = device.unwrap();
+    let readouts = device["readouts"].as_array().unwrap();
+    assert_eq!(readouts.len(), 1, "{device}");
+    let position = &readouts[0];
+    assert_eq!(position["param"], POSITION, "{device}");
+    assert_eq!(position["name"], "Position", "{device}");
+    let seconds = position["value"].as_f64().unwrap();
+    assert!(seconds > 0.0 && seconds < 1.0, "{device}");
+    assert_eq!(position["text"], format!("{seconds:.3} s"), "{device}");
+    // It isn't a setting: automation doesn't list it, and the project
+    // keeps none of it, so nothing changed to save or undo.
+    let params = device["params"].as_array().unwrap();
+    assert!(
+        params.iter().all(|param| param["param"] != POSITION),
+        "{device}"
+    );
+    let project = window.state().session.project();
+    let (_, _, device) = project.find_device(id).unwrap();
+    assert_eq!(device.kind.plugin().unwrap().settings.param(POSITION), None);
+    assert!(!window.state().session.is_modified());
 }

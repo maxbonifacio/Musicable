@@ -9,7 +9,8 @@ use musicable_commands::{Args, Editor, ExportOptions, Keymap, Registry, Request,
 use musicable_engine::Lead;
 use musicable_mcp::pipe::Address;
 use musicable_mcp::{
-    CpuPart, CpuRow, Exporting, Host, Performance, PluginState, RenderingAhead, Reply, Run, Status,
+    CpuPart, CpuRow, Exporting, Host, Performance, PluginState, Readout, RenderingAhead, Reply,
+    Run, Status,
 };
 use musicable_model::param::ParamSpec;
 use musicable_model::time::Beats;
@@ -621,11 +622,27 @@ impl musicable_mcp::Window for Agent<'_> {
 
     fn plugin_state(&self, device: DeviceId) -> Option<PluginState> {
         let status = self.app.plugin_status.get(&device)?;
+        let readouts = match self.app.session.plugin(device) {
+            Some(instance) => (instance.params().iter())
+                .filter(|param| param.read_only && !param.hidden)
+                .filter_map(|param| {
+                    let value = instance.param_value(param.id)?;
+                    Some(Readout {
+                        param: param.id,
+                        name: param.name.clone(),
+                        value,
+                        text: instance.value_to_text(param.id, value),
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         Some(PluginState {
             loaded: status.loaded,
             problem: status.problem.clone(),
             has_window: status.has_window,
             window_open: status.window_open,
+            readouts,
         })
     }
 

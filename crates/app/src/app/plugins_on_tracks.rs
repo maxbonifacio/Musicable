@@ -116,7 +116,7 @@ fn plugins_go_on_tracks_from_the_browser_and_come_back_from_the_file() {
         1,
     );
     click(&mut harness, "Add Device...");
-    harness.get_by_label("3 plugins");
+    harness.get_by_label("4 plugins");
 
     // A double-click puts a plugin on the track, after what's there.
     double_click(&mut harness, "Test Synth");

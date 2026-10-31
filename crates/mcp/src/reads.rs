@@ -692,6 +692,19 @@ pub(crate) fn device(
                 entry["problem"] = state.problem.into();
                 entry["has_window"] = state.has_window.into();
                 entry["window_open"] = state.window_open.into();
+                if !state.readouts.is_empty() {
+                    entry["readouts"] = (state.readouts.iter())
+                        .map(|readout| {
+                            json!({
+                                "param": readout.param,
+                                "name": readout.name,
+                                "value": readout.value,
+                                "text": readout.text,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .into();
+                }
             }
         }
         DeviceKind::TestGain { gain } => entry["gain"] = short(*gain),

@@ -1,6 +1,6 @@
 //! Plugins for testing Musicable's plugin hosting. Not shipped.
 //!
-//! The crate builds a CLAP shared library holding three plugins:
+//! The crate builds a CLAP shared library holding four plugins:
 //!
 //! - **Test Gain** (`org.musicable.test.gain`), a stereo effect that
 //!   multiplies its input by its Gain parameter and delays it by its Latency
@@ -23,8 +23,19 @@
 //!   held in turn, lowest first, a step of [`ARP_STEP`] each, its Transpose
 //!   parameter's semitones up. It starts stepping with the first key held,
 //!   and the note it plays ends once none is held.
+//! - **Test Load** (`org.musicable.test.load`), a stereo effect that passes
+//!   its input through unchanged, then spins for a set time each block,
+//!   as a heavy plugin takes it: its Cost parameter is the time for each 64
+//!   frames, in microseconds. Its Jitter makes spikes: about one block in
+//!   16, the same blocks every run, counted from when it was activated,
+//!   costs up to 10 times as much, at full Jitter. Its read-only Position
+//!   parameter is the song position at the end of the last block it
+//!   rendered, in seconds, which says how far ahead of the playhead the
+//!   engine renders. Agents running the PC checks load it to make a set
+//!   that drops out at will, whose export is the reference for a clean
+//!   live recording.
 //!
-//! All three check that the host keeps CLAP's rules: which thread calls
+//! All four check that the host keeps CLAP's rules: which thread calls
 //! what, and in which state. Each breach counts as a violation, which tests
 //! read with [`musicable_test_violations`]. Tests also play the part of a
 //! plugin's window: [`musicable_test_gui`] edits a parameter as someone
@@ -84,7 +95,8 @@ pub mod vst3;
 
 pub use arp::ARP_STEP;
 pub use plugin::{
-    ARPEGGIATOR_ID, BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SIDECHAIN, SYNTH_ID, THREADS, TRANSPOSE,
+    ARPEGGIATOR_ID, BYPASS, COST, GAIN, GAIN_ID, JITTER, LATENCY, LEVEL, LOAD_ID, POSITION,
+    SIDECHAIN, SYNTH_ID, THREADS, TRANSPOSE,
 };
 
 /// The CLAP entry point the host looks for.

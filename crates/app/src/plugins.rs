@@ -719,6 +719,11 @@ impl Hosted {
         self.instance.is_window_open() && Instant::now() >= self.settling
     }
 
+    /// Whether the plugin's parameter `param` is one only it sets.
+    fn read_only(&self, param: u32) -> bool {
+        (self.instance.params().iter()).any(|p| p.id == param && p.read_only)
+    }
+
     /// Polls the plugin, and turns what it says into changes for the
     /// project.
     fn poll(&mut self) -> Vec<Change> {
@@ -735,6 +740,9 @@ impl Hosted {
                 // it: only someone moving it overrides the automation.
                 PluginEvent::ParamChanged { param, .. }
                     if self.gestures == 0 && self.automated.contains(&param) => {}
+                // A read-only parameter is the plugin saying something, such
+                // as where it is or how loud: the project doesn't keep it.
+                PluginEvent::ParamChanged { param, .. } if self.read_only(param) => {}
                 PluginEvent::ParamChanged { param, value }
                     if let Some(bypass) = self.bypass
                         && bypass.id == param
@@ -851,11 +859,13 @@ impl Hosted {
     }
 }
 
-/// Each of the plugin's parameters, with its value as the plugin has it.
+/// Each of the plugin's parameters the host can set, with its value as the
+/// plugin has it.
 fn values(instance: &Instance) -> BTreeMap<u32, f64> {
     instance
         .params()
         .iter()
+        .filter(|p| !p.read_only)
         .filter_map(|p| Some((p.id, instance.param_value(p.id)?)))
         .collect()
 }
