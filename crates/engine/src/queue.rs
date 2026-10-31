@@ -234,7 +234,12 @@ impl Node for NoteIn {
 
     fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
         let end = ctx.time + ctx.frames as u64;
-        while let Some((time, kind)) = self.ring.pop_before(end) {
+        // A live block can span several blocks rendered ahead, with more
+        // notes than it has room for: those it hasn't room for wait in the
+        // ring for the next, rather than go.
+        while notes.room() > 0
+            && let Some((time, kind)) = self.ring.pop_before(end)
+        {
             let offset = time.saturating_sub(ctx.time) as usize;
             notes.send_played(offset, kind);
         }
@@ -282,7 +287,10 @@ impl Node for ModulationIn {
 
     fn control(&mut self, ctx: &ProcessContext<'_>, controls: &mut Controls<'_>) {
         let end = ctx.time + ctx.frames as u64;
-        while let Some((time, (port, amount))) = self.ring.pop_before(end) {
+        // As for notes: what it hasn't room for waits for the next block.
+        while controls.room() > 0
+            && let Some((time, (port, amount))) = self.ring.pop_before(end)
+        {
             let offset = time.saturating_sub(ctx.time) as usize;
             controls.send(port as usize, offset, amount);
         }

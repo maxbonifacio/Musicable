@@ -40,9 +40,9 @@
 //! for what the engine's ahead side renders, ahead or as the device asks,
 //! and the live board for the live half, which the audio thread renders
 //! with the renderer [`Renderer::live_renderer`] gives. A block rendered
-//! ahead of a graph with a live half leaves two workers out, the last two,
-//! which never render ahead either, so the live half has the audio thread
-//! and them. The live board wakes them first. A lane with nothing to do on
+//! ahead while the live side renders a live half leaves two workers out,
+//! the last two, which never render ahead either, so the live half has the
+//! audio thread and them. The live board wakes them first. A lane with nothing to do on
 //! the main board helps with the live board's block, and a lane helps only
 //! with the tasks of nodes on its own board.
 //!
@@ -240,6 +240,8 @@ impl ParallelRenderer {
             ahead_wanted: AtomicBool::new(false),
             ahead_inside: AtomicUsize::new(0),
             ahead_closed: AtomicBool::new(false),
+            live_half: AtomicBool::new(false),
+            lane_zero: AtomicBool::new(false),
         });
         let workers = (1..=options.threads)
             .map(|lane| {
@@ -300,11 +302,14 @@ impl ParallelRenderer {
         if !pipelines || !fits || graph.stage_makes_notes() {
             return 1;
         }
+        // Each piece of work is pushed onto a deque at most once a block,
+        // and a deque holds `max_nodes`: no more pieces than that.
+        let room = (self.max_nodes / graph.len().max(1)).max(1);
         #[cfg(test)]
         if let Some(parts) = self.forced_parts {
-            return parts.min(block.frames).max(1);
+            return parts.min(block.frames).min(room).max(1);
         }
-        let most = (block.frames / SHORTEST_PART).min(PARTS);
+        let most = (block.frames / SHORTEST_PART).min(PARTS).min(room);
         graph
             .schedule
             .parts(graph.stage, lanes)
@@ -378,7 +383,8 @@ impl ParallelRenderer {
             loads: graph.loads.loads[graph.load_base..].as_ptr(),
         };
         let started = Instant::now();
-        self.epoch += 1;
+        // From the board's, as another renderer may have used it before.
+        self.epoch = board.epoch.load(Relaxed) + 1;
         // Nothing reads these until it takes a node of the new block, which
         // the store to `sources` makes possible.
         debug_assert!(board.job.load(Relaxed).is_null(), "one block at a time");
@@ -436,8 +442,8 @@ impl Default for ParallelRenderer {
 impl Renderer for ParallelRenderer {
     fn render(&mut self, graph: &mut PreparedGraph, block: &Block<'_>) {
         // A block rendered ahead leaves the live half its workers, while
-        // there's one.
-        let capped = self.board == MAIN && block.ahead && graph.has_live_half();
+        // the live side renders one.
+        let capped = self.board == MAIN && block.ahead && self.shared.live_half.load(Relaxed);
         let lanes = self.shared.lanes.len();
         let open = if capped {
             lanes - self.shared.kept
@@ -445,14 +451,23 @@ impl Renderer for ParallelRenderer {
             lanes
         };
         let parts = self.parts(graph, block, open);
+        let shared = Arc::clone(&self.shared);
         // The workers flush denormals for as long as they run.
         rt::flush_denormals(|| {
-            if self.share(graph, parts) {
-                self.render_shared(graph, block, open, parts);
-            } else {
-                self.render_inline(graph, block);
+            let claim = (self.share(graph, parts))
+                .then(|| Claim::take(&shared, Some(self.board), DRIVER.get()))
+                .flatten();
+            match claim {
+                Some(_claim) => self.render_shared(graph, block, open, parts),
+                None => self.render_inline(graph, block),
             }
         });
+    }
+
+    fn set_live_half(&mut self, has: bool) {
+        if self.board == LIVE {
+            self.shared.live_half.store(has, Relaxed);
+        }
     }
 
     fn render_ahead(&mut self, work: AheadWork) -> Option<AheadWaker> {
@@ -463,7 +478,11 @@ impl Renderer for ParallelRenderer {
     }
 
     /// A renderer on the same threads, on a board of its own, so the live
-    /// half renders while the workers render the rest ahead.
+    /// half renders while the workers render the rest ahead. Whatever
+    /// renderers there are, one block at a time shares each board between
+    /// the threads, and one thread at a time starts one from lane 0, the
+    /// audio thread's: a renderer that would start another renders its
+    /// block alone.
     fn live_renderer(&mut self) -> Box<dyn Renderer> {
         Box::new(Self {
             shared: self.shared.clone(),
@@ -601,6 +620,12 @@ struct Shared {
     ahead_inside: AtomicUsize,
     /// Set once the engine stops, after which no worker renders ahead.
     ahead_closed: AtomicBool,
+    /// Set while the live side renders a live half, which a block rendered
+    /// ahead leaves its workers.
+    live_half: AtomicBool,
+    /// Set while a thread works as lane 0: starting a block from it, or
+    /// helping as it with one a worker renders ahead.
+    lane_zero: AtomicBool,
 }
 
 /// One block at a time, as the lanes working on it see it.
@@ -629,6 +654,8 @@ struct Board {
     /// Nanoseconds spent running nodes in the current block, summed over
     /// lanes.
     block_busy: AtomicU64,
+    /// Set while a renderer shares a block on the board.
+    driven: AtomicBool,
     failure: Failure,
 }
 
@@ -869,7 +896,8 @@ impl Shared {
     }
 
     /// Works on the live board's block, if one is running, for `lane`,
-    /// which holds no node on the main board. Says whether there was one.
+    /// which holds no node on the main board: runs a node of it, or a
+    /// task. Says whether it did.
     fn help_live(&self, lane: usize) -> bool {
         let live = &self.boards[LIVE];
         // The audio thread starts the live board's blocks, and is never on
@@ -877,8 +905,20 @@ impl Shared {
         if lane == 0 || live.remaining.load(Acquire) == 0 {
             return false;
         }
-        self.work(LIVE, lane, live.epoch.load(Acquire));
-        true
+        // A node and what it goes on to at a time, so the lane is back on
+        // the main board as soon as that has work again.
+        let epoch = live.epoch.load(Acquire);
+        let _lane = WorkingFor::enter(self, lane, LIVE);
+        match self
+            .take_source(LIVE, epoch)
+            .or_else(|| self.steal(LIVE, lane))
+        {
+            Some(first) => {
+                self.session(LIVE, lane, first);
+                true
+            }
+            None => self.help(LIVE, lane),
+        }
     }
 
     /// Runs `task` for each of `0..tasks`, for the node `lane` is running
@@ -1366,6 +1406,9 @@ impl AheadWaker {
         if main.remaining.load(Acquire) == 0 {
             return false;
         }
+        let Some(_claim) = Claim::take(shared, None, 0) else {
+            return false;
+        };
         // A block that ends meanwhile gives nothing more to take: its
         // sources carry its epoch, and steals see only the running one's
         // nodes.
@@ -1387,6 +1430,49 @@ impl AheadWaker {
 impl std::fmt::Debug for AheadWaker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AheadWaker").finish_non_exhaustive()
+    }
+}
+
+/// A board a renderer shares a block on, and lane 0 if a thread works
+/// from it, which one thread at a time has, until dropped.
+struct Claim<'a> {
+    shared: &'a Shared,
+    board: Option<usize>,
+    lane_zero: bool,
+}
+
+impl<'a> Claim<'a> {
+    /// Claims `board`, if any, and lane 0 if `lane` is it, unless another
+    /// thread has either.
+    fn take(shared: &'a Shared, board: Option<usize>, lane: usize) -> Option<Self> {
+        let claim = |flag: &AtomicBool| !flag.swap(true, Acquire);
+        let driven = board.map(|board| &shared.boards[board].driven);
+        if driven.is_some_and(|driven| !claim(driven)) {
+            return None;
+        }
+        let lane_zero = lane == 0;
+        if lane_zero && !claim(&shared.lane_zero) {
+            if let Some(driven) = driven {
+                driven.store(false, Release);
+            }
+            return None;
+        }
+        Some(Self {
+            shared,
+            board,
+            lane_zero,
+        })
+    }
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if let Some(board) = self.board {
+            self.shared.boards[board].driven.store(false, Release);
+        }
+        if self.lane_zero {
+            self.shared.lane_zero.store(false, Release);
+        }
     }
 }
 

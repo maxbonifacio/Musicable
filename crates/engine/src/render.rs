@@ -109,6 +109,14 @@ pub trait Renderer: Send {
     fn live_renderer(&mut self) -> Box<dyn Renderer> {
         Box::new(ReferenceRenderer)
     }
+
+    /// Tells the renderer [`live_renderer`](Self::live_renderer) gave
+    /// whether the live side has a live half to render, from the frame it
+    /// installs each graph's on: what the renderer it came from renders
+    /// ahead meanwhile may leave it threads. Nothing, by default.
+    fn set_live_half(&mut self, has: bool) {
+        let _ = has;
+    }
 }
 
 /// Processes one node at a time in topological order, on the calling thread.

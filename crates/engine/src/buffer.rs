@@ -120,16 +120,6 @@ impl RawBuffer {
         capacity: 0,
     };
 
-    /// The first `frames` frames of every channel.
-    ///
-    /// # Safety
-    ///
-    /// As for [`part`](Self::part), of `0..frames`.
-    pub(crate) unsafe fn view<'a>(self, frames: usize) -> AudioRef<'a> {
-        // SAFETY: the caller's promise.
-        unsafe { self.part(0..frames) }
-    }
-
     /// The first `frames` frames of every channel, writable.
     ///
     /// # Safety
@@ -613,7 +603,9 @@ impl<'a> Inputs<'a> {
     /// # Safety
     ///
     /// While the inputs live, the buffers of `ids` stay alive and nothing
-    /// writes to them. `frames` is at most their capacity.
+    /// writes to the frames they're read over: the first `frames`, or those
+    /// of the [`range`](Self::range) they're narrowed to before they're
+    /// read. `frames` is at most their capacity.
     pub(crate) unsafe fn shared(
         buffers: &'a [RawBuffer],
         ids: &'a [NodeId],
@@ -698,9 +690,12 @@ impl<'a> Inputs<'a> {
                 ids,
                 frames,
             } => {
+                // Only the part's frames, as other lanes may be writing the
+                // rest of a pipelined block's buffers.
+                let part = self.part.map_or(0..frames, |(start, end)| start..end);
                 // SAFETY: `Inputs::shared` requires the buffers to stay
-                // alive and unwritten while these inputs live.
-                unsafe { buffers[ids[index].0].view(frames) }
+                // alive and those frames unwritten while these inputs live.
+                return unsafe { buffers[ids[index].0].part(part) };
             }
             InputsRepr::Views(views) => views[index],
         };

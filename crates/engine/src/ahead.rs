@@ -54,7 +54,7 @@ use musicable_model::time::{BeatRange, TempoMap};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::buffer::source_channel;
-use crate::engine::{CoreGarbage, CoreMessage, Counters, EVENT_CAPACITY, MAX_WRITERS};
+use crate::engine::{CoreGarbage, CoreMessage, Counters, EVENT_CAPACITY, MAX_WRITERS, messages};
 use crate::graph::take_over;
 use crate::parallel::{CachePadded, Failure};
 use crate::timeline::{Segment, TimelineWriter};
@@ -638,6 +638,46 @@ pub(crate) struct Pending {
     pub(crate) event: Event,
 }
 
+impl Pending {
+    /// Puts the event, for a node, into `graph` for a block from engine
+    /// time `start`: on its frame, or on the first if it's late. Says
+    /// whether it was late, and whether `graph` had the node. Each side of
+    /// the engine applies events this way, so a node gets them on the same
+    /// frames from either.
+    pub(crate) fn route(self, graph: Option<&mut PreparedGraph>, start: u64) -> (bool, bool) {
+        let (node, kind) = match self.event {
+            Event::Param { node, param, value } => (node, NodeEventKind::Param { param, value }),
+            Event::Note { node, note } => (node, NodeEventKind::Note(note)),
+            Event::Transport(_) => unreachable!("a transport command is for no node"),
+        };
+        let event = NodeEvent {
+            offset: (self.time.max(start) - start) as usize,
+            kind,
+        };
+        let found = match graph.and_then(|graph| Some((graph.find(node)?, graph))) {
+            Some((node, graph)) => {
+                let routed = graph.route(node, event);
+                debug_assert!(routed, "a graph has room for the events the engine holds");
+                true
+            }
+            None => false,
+        };
+        (self.time < start, found)
+    }
+}
+
+/// Holds `event` in `pending` until engine time `time`, after the others
+/// for that time, unless it holds as many as it can: then it's dropped,
+/// and counted in `counters`.
+pub(crate) fn hold(pending: &mut Vec<Pending>, counters: &Counters, time: u64, event: Event) {
+    if pending.len() >= EVENT_CAPACITY {
+        counters.events_dropped.fetch_add(1, Relaxed);
+        return;
+    }
+    let at = pending.partition_point(|p| p.time <= time);
+    pending.insert(at, Pending { time, event });
+}
+
 /// What one side of the engine applied, for a test to apply the same to
 /// another engine at the same engine times: each with the time it applied
 /// on.
@@ -875,13 +915,9 @@ impl Core {
         let mut graph = self.graph.as_deref_mut();
         let (mut late, mut unmatched, mut dropped) = (0, 0, 0);
         for p in self.pending.drain(..due) {
-            let (node, kind) = match p.event {
-                Event::Param { node, param, value } => {
-                    (node, NodeEventKind::Param { param, value })
-                }
-                Event::Note { node, note } => (node, NodeEventKind::Note(note)),
+            let (Event::Param { node, .. } | Event::Note { node, .. }) = p.event else {
                 // Those due now were applied, and the next ends the block.
-                Event::Transport(_) => continue,
+                continue;
             };
             // The live side applies it on its frame, if it hasn't played
             // that yet, and counts it late if it has. It takes it once it
@@ -900,23 +936,15 @@ impl Core {
                 }
                 continue;
             }
-            if p.time < start {
-                late += 1;
-            }
-            let time = p.time.max(start);
             #[cfg(test)]
-            log(&mut self.applied, time, Applied::Event(p.event));
-            let event = NodeEvent {
-                offset: (time - start) as usize,
-                kind,
-            };
-            match (graph.as_deref_mut()).and_then(|graph| Some((graph.find(node)?, graph))) {
-                Some((node, graph)) => {
-                    let routed = graph.route(node, event);
-                    debug_assert!(routed, "a graph has room for the events the engine holds");
-                }
-                None => unmatched += 1,
-            }
+            log(
+                &mut self.applied,
+                p.time.max(start),
+                Applied::Event(p.event),
+            );
+            let (was_late, found) = p.route(graph.as_deref_mut(), start);
+            late += u64::from(was_late);
+            unmatched += u64::from(!found);
         }
         if late > 0 {
             self.counters.events_late.fetch_add(late, Relaxed);
@@ -937,11 +965,7 @@ impl Core {
                 max,
                 ..
             } => {
-                let due = match frames == max {
-                    true => midi.len(),
-                    false => midi.partition_point(|m| m.time < end),
-                };
-                let (messages, later) = midi.split_at(due);
+                let (messages, later) = messages(midi, end, frames == max);
                 *midi = later;
                 (input.range(offset..offset + frames), messages)
             }
@@ -1227,12 +1251,7 @@ impl Core {
     }
 
     fn schedule(&mut self, time: u64, event: Event) {
-        if self.pending.len() >= EVENT_CAPACITY {
-            self.counters.events_dropped.fetch_add(1, Relaxed);
-            return;
-        }
-        let at = self.pending.partition_point(|p| p.time <= time);
-        self.pending.insert(at, Pending { time, event });
+        hold(&mut self.pending, &self.counters, time, event);
     }
 }
 

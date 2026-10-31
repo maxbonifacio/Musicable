@@ -876,6 +876,13 @@ fn build(
             tail: head,
         };
         let taps = strip.channel(Channel::Track(track), devices, media, &mut stages, cut);
+        // Its modulators and macros too, which nothing live reaches on an
+        // audio track, so its knobs answer at once as well.
+        if track.always_live
+            && let Some(modulation) = strip.graph.find(keys::modulation(Chain::Track(track.id)))
+        {
+            (strip.graph.set_live(modulation)).expect("the node was just added");
+        }
         // The cut follows the monitor's arming a block on, so the two
         // render on the same side of the engine, live or ahead, and so
         // does everything between.
