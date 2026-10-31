@@ -887,6 +887,43 @@ fn the_wheel_scrolls_and_ctrl_wheel_zooms_around_the_pointer() {
 }
 
 #[test]
+fn every_other_group_of_bars_is_shaded_and_groups_grow_as_bars_narrow() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let shade = harness.state().theme.bar_shade;
+    let shaded = |harness: &Harness<'_, State>| {
+        let mut spans: Vec<_> = (filled(harness, shade, lanes).iter())
+            .map(|rect| (rect.left(), rect.right()))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // The tracks' lanes and the master's have the same shades.
+        spans.dedup();
+        spans
+    };
+    let span =
+        |harness: &Harness<'_, State>, start, end| (x_of(harness, start), x_of(harness, end));
+    // A bar of 4/4 is 62.5 points wide, so groups are two bars, and bars 3
+    // and 4 are the first shaded, then 7 and 8.
+    assert_eq!(harness.state().editor().viewport.zoom, 15.625);
+    let spans = shaded(&harness);
+    assert_eq!(
+        spans[..2],
+        [span(&harness, 8.0, 16.0), span(&harness, 24.0, 32.0)],
+        "{spans:?}"
+    );
+    // Zoomed out to bars of 15.625 points, groups are eight bars.
+    harness.state_mut().document.editor_mut().viewport.zoom = 15.625 / 4.0;
+    harness.run();
+    let spans = shaded(&harness);
+    assert_eq!(
+        spans[..2],
+        [span(&harness, 32.0, 64.0), span(&harness, 96.0, 128.0)],
+        "{spans:?}"
+    );
+}
+
+#[test]
 fn header_buttons_mute_solo_and_arm() {
     let (project, ids) = project();
     let mut harness = harness(project);

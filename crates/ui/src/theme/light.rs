@@ -26,6 +26,7 @@ impl Theme {
             lane_alternate: gray(228),
             lane_selected: rgb(206, 216, 230),
             empty: gray(210),
+            bar_shade: alpha(0, 0, 0, 14),
             grid_bar: gray(182),
             grid_beat: gray(202),
             grid_step: gray(214),
