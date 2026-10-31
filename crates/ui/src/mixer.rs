@@ -57,7 +57,7 @@ use crate::parts::{Draw, MIXER_STRIP, Part, Parts, Registry, Shown, Size};
 use crate::performance::{self, Performance};
 use crate::shell::Action;
 use crate::theme::{MixerSizes, Theme};
-use crate::widgets::{Face, toggle};
+use crate::widgets::{Face, placeholder, toggle};
 
 pub(crate) use routing::RoutingPanel;
 
@@ -203,9 +203,7 @@ pub(crate) fn show(
         ui.push_id("master", |ui| mixer.strip(ui, &lineup, &master, actions));
         ui.separator();
         if project.tracks.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(NO_TRACKS).weak());
-            });
+            placeholder(ui, NO_TRACKS);
             return;
         }
         ScrollArea::both()
@@ -2224,8 +2222,8 @@ pub(crate) fn pan_text(pan: f32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use egui::Modifiers;
     use egui::accesskit::Toggled;
+    use egui::{CursorIcon, Modifiers};
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT, Queryable};
     use musicable_commands::{
@@ -2239,7 +2237,7 @@ mod tests {
     use musicable_model::{DeviceKind, PluginFormat};
 
     use super::*;
-    use crate::testing::Player;
+    use crate::testing::{Player, cursor_at};
 
     /// The mixer, on a document its changes go to and its commands run on,
     /// as the app would make and run them, and the actions it handed back.
@@ -2423,9 +2421,14 @@ mod tests {
 
     #[test]
     fn without_tracks_it_says_how_to_add_one() {
-        let harness = harness(Project::new());
-        harness.get_by_label_contains("No tracks yet");
+        let mut harness = harness(Project::new());
+        let words = harness.get_by_label_contains("No tracks yet").rect();
         harness.get_by_role_and_label(Role::Slider, "Master Volume");
+        // The pointer turns to the text cursor over the words, and not over
+        // the room around them.
+        assert_eq!(cursor_at(&mut harness, words.center()), CursorIcon::Text);
+        let corner = pos2(20.0, 20.0);
+        assert_eq!(cursor_at(&mut harness, corner), CursorIcon::Default);
     }
 
     #[test]
