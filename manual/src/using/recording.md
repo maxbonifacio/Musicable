@@ -59,6 +59,11 @@ looks at what's plugged in every two seconds, except while recording: it
 opens an input plugged in since that a track takes, or one plugged in again
 after it was pulled out. MIDI inputs open on Windows only so far.
 
+The menu also lists **Musicable Agent MIDI**, which nothing is plugged into:
+it's the input agents play notes into, as if from a keyboard, when they
+check recording and MIDI routing for you ([The command
+line](../reference/command-line.md#agents)).
+
 ## Monitoring
 
 A track's strip sets how it monitors its input:

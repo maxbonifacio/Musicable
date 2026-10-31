@@ -15,6 +15,7 @@
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
+pub mod agent;
 mod bus;
 mod ring;
 #[cfg(test)]
@@ -56,15 +57,23 @@ pub struct MidiInputInfo {
     pub error: Option<String>,
 }
 
-/// The MIDI inputs the system has.
+/// The MIDI inputs the system has, and on Windows, where Musicable
+/// records MIDI, the one agents play ([`agent`]).
 pub(crate) fn input_devices() -> Vec<MidiInputDevice> {
     let system = System::list();
-    system
+    let mut devices: Vec<MidiInputDevice> = system
         .ids
         .into_iter()
         .zip(system.names)
         .map(|(id, name)| MidiInputDevice { id, name })
-        .collect()
+        .collect();
+    if cfg!(windows) {
+        devices.push(MidiInputDevice {
+            id: agent::AGENT_INPUT.to_owned(),
+            name: agent::AGENT_INPUT.to_owned(),
+        });
+    }
+    devices
 }
 
 /// Each of `names`' ids: the name, or for the second and later of the same
@@ -90,6 +99,8 @@ pub(crate) struct MidiInputs {
     /// `None` for an input that didn't open.
     pub buffers: Vec<Option<MidiBuffer>>,
     open: Vec<Open>,
+    /// The input agents play, if it's one of them.
+    agent: Option<agent::Input>,
 }
 
 impl MidiInputs {
@@ -99,6 +110,17 @@ impl MidiInputs {
         let mut inputs = MidiInputs::default();
         let system = System::list();
         for id in ids {
+            if cfg!(windows) && id == agent::AGENT_INPUT {
+                let (buffer, input) = agent::open(CAPACITY, playback);
+                inputs.agent = Some(input);
+                inputs.infos.push(MidiInputInfo {
+                    id: id.clone(),
+                    name: id.clone(),
+                    error: None,
+                });
+                inputs.buffers.push(Some(buffer));
+                continue;
+            }
             let (name, buffer, error) = match system.open(id, playback) {
                 Ok((name, buffer, open)) => {
                     inputs.open.push(open);

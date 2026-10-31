@@ -54,6 +54,7 @@ pub const GET_WINDOWS: &str = "get_windows";
 pub const GET_SCREENSHOT: &str = "get_screenshot";
 pub const GET_UI_TREE: &str = "get_ui_tree";
 pub const USE_MOUSE_AND_KEYS: &str = "use_mouse_and_keys";
+pub const PLAY_MIDI: &str = "play_midi";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -534,6 +535,19 @@ pub fn list() -> Vec<Tool> {
                 &["steps"],
             ),
         ),
+        run(
+            PLAY_MIDI,
+            "Play MIDI",
+            "Plays notes, controllers such as the sustain pedal, pitch bend, pressure and program \
+             changes into Musicable Agent MIDI, a MIDI input agents have, at their times from \
+             now, as if from a keyboard plugged in, and answers once the last has played. MPE \
+             gives each note a channel of its own, from 2, with its bend and pressure on it. A \
+             MIDI track takes it as its input with mixer.set_input, device \"Musicable Agent \
+             MIDI\", like any other: it then plays through the track while it's armed or \
+             monitored, and records as the track records. It plays only while the audio device \
+             does, and only on Windows so far, where Musicable records MIDI.",
+            object(json!({ "events": crate::midi::schema() }), &["events"]),
+        ),
         read(
             GET_LEVELS,
             "Get Levels",
@@ -655,6 +669,7 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_WINDOWS => &[],
         GET_UI_TREE => &["window", "panel", "filter", "limit"],
         USE_MOUSE_AND_KEYS => &["window", "steps", "watch"],
+        PLAY_MIDI => &["events"],
         GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
         | LIST_AUDIO_DEVICES | GET_LAYOUT | GET_LEVELS => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
@@ -727,6 +742,7 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
                 limit,
             })
         }
+        PLAY_MIDI => Asked::Midi(crate::midi::messages(arguments)?),
         USE_MOUSE_AND_KEYS => Asked::Hands(Hands {
             window: window(arguments)?,
             steps: crate::hands::steps(arguments)?,
@@ -1229,6 +1245,17 @@ mod tests {
             call(USE_MOUSE_AND_KEYS, json!({})),
             refused("steps must be a list of steps.")
         );
+        assert_eq!(
+            call(PLAY_MIDI, json!({"events": [{"note": 60, "length": 0.5}]})),
+            Ok(Asked::Midi(vec![
+                (0.0, [0x90, 60, 100]),
+                (0.5, [0x80, 60, 64])
+            ]))
+        );
+        assert_eq!(
+            call(PLAY_MIDI, json!({})),
+            refused("events must be a list of notes and controllers.")
+        );
         let tree = Tree {
             window: None,
             panel: None,
@@ -1410,7 +1437,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 26);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

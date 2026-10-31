@@ -674,6 +674,18 @@ impl musicable_mcp::Window for Agent<'_> {
     fn use_mouse_and_keys(&mut self, hands: musicable_mcp::Hands, reply: Reply) {
         self.app.hands_for_agent(hands, reply, self.ctx);
     }
+
+    fn play_midi(&mut self, messages: Vec<(f64, [u8; 3])>, reply: Reply) {
+        // Off the window's thread, which it would hold for as long as it
+        // plays.
+        std::thread::spawn(move || match musicable_audio::play_agent_midi(&messages) {
+            Ok(()) => reply.done(serde_json::json!({
+                "messages": messages.len(),
+                "seconds": messages.last().map_or(0.0, |(at, _)| *at),
+            })),
+            Err(why) => reply.failed(why),
+        });
+    }
 }
 
 /// Whether the app answers the agent whose command made `request`, rather

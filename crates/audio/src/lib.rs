@@ -67,6 +67,7 @@ pub use input::{
     loopback_id, loopback_of,
 };
 use input::{Playback, StreamInput};
+pub use midi::agent::{AGENT_INPUT, play as play_agent_midi};
 pub use midi::{
     EventBuffer, EventReader, EventWriter, MidiBuffer, MidiEvent, MidiInputDevice, MidiInputInfo,
     MidiReader, MidiWriter,
