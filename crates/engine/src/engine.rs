@@ -26,7 +26,7 @@ use crate::preview::{Preview, Previews};
 use crate::timeline::Timeline;
 use crate::{
     AheadWaker, AudioBuffer, AudioMut, AudioRef, Block, EngineConfig, Event, MidiMessage,
-    NodeEvent, NodeEventKind, NodeKey, ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
+    NodeEvent, NodeKey, ParamId, PreparedGraph, ReferenceRenderer, Renderer, rt,
 };
 
 /// Messages the control thread can have in flight to each side.
@@ -296,6 +296,9 @@ struct Live {
     /// The events for the live half's nodes not yet due, by time and then
     /// in arrival order.
     pending: Vec<Pending>,
+    /// Events for nodes a new live half hasn't, for the ahead side to take
+    /// back once the live side next has it, as it was busy rendering.
+    orphans: Vec<Pending>,
     /// The tempo map, as of the live side's time.
     tempo: Box<TempoMap>,
     /// What it's replaced and couldn't hand back yet, as the garbage queue
@@ -396,6 +399,7 @@ impl Engine {
                 renderer: live_renderer,
                 to_live: to_live_rx,
                 pending: Vec::with_capacity(EVENT_CAPACITY),
+                orphans: Vec::with_capacity(EVENT_CAPACITY),
                 tempo: Box::default(),
                 stash: Vec::with_capacity(LIVE_DEBT),
                 #[cfg(test)]
@@ -514,9 +518,7 @@ impl Engine {
                     }
                     for (n, tap) in taps.iter_mut().enumerate() {
                         let mut part = tap.range_mut(range.clone());
-                        let live = played.live.and_then(|live| live.own_tap(n, frames));
-                        let graph = || played.graph.and_then(|graph| graph.own_tap(n, frames));
-                        match live.or_else(graph) {
+                        match live_first(played.live, played.graph, |g| g.own_tap(n, frames)) {
                             Some(source) => part.copy_from(source),
                             None => part.clear(),
                         }
@@ -610,11 +612,16 @@ impl Engine {
             frames => shared.period.store(frames, Relaxed),
         }
         // The events for the live half's nodes sent since the last
-        // callback, unless a thread rendering ahead takes them in first.
-        if live.half.is_some()
+        // callback, unless a thread rendering ahead takes them in first,
+        // and those it couldn't hand back.
+        if (live.half.is_some() || !live.orphans.is_empty())
             && let Some(mut token) = shared.try_lock()
         {
-            token.core().receive_now(shared);
+            let core = token.core();
+            live.give_back(core);
+            if live.half.is_some() {
+                core.receive_now(shared);
+            }
         }
         let gain = f32::from_bits(live.counters.preview_gain.load(Relaxed));
         let mut done = 0;
@@ -700,12 +707,28 @@ impl Engine {
 /// The messages at the front of `midi` that play in a stretch ending at
 /// engine time `end`, and those after: all of them if the stretch ends the
 /// callback, as one timed after its last frame plays on its last frame.
-fn messages(midi: &[MidiMessage], end: u64, last: bool) -> (&[MidiMessage], &[MidiMessage]) {
+pub(crate) fn messages(
+    midi: &[MidiMessage],
+    end: u64,
+    last: bool,
+) -> (&[MidiMessage], &[MidiMessage]) {
     let due = match last {
         true => midi.len(),
         false => midi.partition_point(|m| m.time < end),
     };
     midi.split_at(due)
+}
+
+/// What `own` finds in the live half, if there's one and it has it, or
+/// else in `graph`, the rest that rendered with it: the output, a tap and
+/// the like come from the live half first, wherever the rest of a stretch
+/// comes from.
+fn live_first<'a, T>(
+    half: Option<&'a PreparedGraph>,
+    graph: Option<&'a PreparedGraph>,
+    own: impl Fn(&'a PreparedGraph) -> Option<T>,
+) -> Option<T> {
+    half.and_then(&own).or_else(|| graph.and_then(&own))
 }
 
 impl Live {
@@ -785,6 +808,9 @@ impl Live {
     /// the events for the live half's nodes, which wait for theirs. With
     /// `core`, it holds the ahead side already.
     fn take_to_live(&mut self, shared: &Shared, mut core: Option<&mut Core>) {
+        if let Some(core) = core.as_deref_mut() {
+            self.give_back(core);
+        }
         loop {
             match self.to_live.peek() {
                 Ok(ToLive::Graph { at, .. } | ToLive::Tempo { at, .. }) if *at > self.time => break,
@@ -832,19 +858,28 @@ impl Live {
             }
             Event::Transport(_) => false,
         };
-        if drain || self.pending.iter().any(orphaned) {
-            let mut token = None;
-            let core = match core {
-                Some(core) => core,
-                None => token.insert(shared.lock(self.waker.as_ref())).core(),
-            };
-            self.pending.retain(|p| {
-                let keep = !orphaned(p);
-                if !keep {
-                    core.take_back(p.time, p.event);
-                }
-                keep
-            });
+        // It waits for the ahead side only to drain it: otherwise they
+        // wait until it has the ahead side, so a thread rendering a block
+        // ahead doesn't hold up the callback.
+        let orphans = &mut self.orphans;
+        self.pending.retain(|p| {
+            let keep = !orphaned(p);
+            if !keep && orphans.len() < orphans.capacity() {
+                orphans.push(*p);
+            } else if !keep {
+                self.counters.events_dropped.fetch_add(1, Relaxed);
+            }
+            keep
+        });
+        let mut token = None;
+        let core = match (core, drain) {
+            (Some(core), _) => Some(core),
+            (None, true) => Some(token.insert(shared.lock(self.waker.as_ref())).core()),
+            (None, false) if self.orphans.is_empty() => None,
+            (None, false) => shared.try_lock().map(|t| token.insert(t).core()),
+        };
+        if let Some(core) = core {
+            self.give_back(core);
             if drain {
                 core.hand_over_live(new.as_deref_mut(), old.as_deref_mut());
             }
@@ -856,6 +891,7 @@ impl Live {
             // Its loads have all carried on, for the control thread to read.
             new.loads.set_installed();
         }
+        self.renderer.set_live_half(new.is_some());
         self.half = new;
         match old {
             Some(old) => self.discard(shared, LiveGarbage::Graph(old)),
@@ -863,6 +899,14 @@ impl Live {
             None => {
                 shared.live_debt.fetch_sub(1, Release);
             }
+        }
+    }
+
+    /// Has the ahead side take back the events for nodes a live half it
+    /// installed hasn't.
+    fn give_back(&mut self, core: &mut Core) {
+        for p in self.orphans.drain(..) {
+            core.take_back(p.time, p.event);
         }
     }
 
@@ -896,12 +940,7 @@ impl Live {
     /// Holds `event` for a node in the live half until engine time `time`,
     /// after the others for that time, unless it holds as many as it can.
     fn schedule(&mut self, time: u64, event: Event) {
-        if self.pending.len() == self.pending.capacity() {
-            self.counters.events_dropped.fetch_add(1, Relaxed);
-            return;
-        }
-        let at = self.pending.partition_point(|p| p.time <= time);
-        self.pending.insert(at, Pending { time, event });
+        ahead::hold(&mut self.pending, &self.counters, time, event);
     }
 
     /// The engine time of the next graph or tempo map from the ahead side,
@@ -923,15 +962,8 @@ impl Live {
         let due = self.pending.partition_point(|p| p.time < end);
         let (mut late, mut unmatched) = (0, 0);
         for p in self.pending.drain(..due) {
-            let (node, kind) = match p.event {
-                Event::Param { node, param, value } => {
-                    (node, NodeEventKind::Param { param, value })
-                }
-                Event::Note { node, note } => (node, NodeEventKind::Note(note)),
-                Event::Transport(_) => continue,
-            };
-            if p.time < start {
-                late += 1;
+            if let Event::Transport(_) = p.event {
+                continue;
             }
             #[cfg(test)]
             ahead::log(
@@ -939,17 +971,9 @@ impl Live {
                 p.time.max(start),
                 ahead::Applied::Event(p.event),
             );
-            let event = NodeEvent {
-                offset: (p.time.max(start) - start) as usize,
-                kind,
-            };
-            match (self.half.as_deref_mut()).and_then(|half| Some((half.find(node)?, half))) {
-                Some((node, half)) => {
-                    let routed = half.route(node, event);
-                    debug_assert!(routed, "a graph has room for the events the engine holds");
-                }
-                None => unmatched += 1,
-            }
+            let (was_late, found) = p.route(self.half.as_deref_mut(), start);
+            late += u64::from(was_late);
+            unmatched += u64::from(!found);
         }
         if late > 0 {
             self.counters.events_late.fetch_add(late, Relaxed);
@@ -1028,9 +1052,9 @@ impl Live {
         }
         let half = self.half.as_deref();
         // A ring holds a mono output in both channels.
-        let output = (half.and_then(|half| half.own_output(frames)))
+        let output = live_first(half, None, |half| half.own_output(frames))
             .or_else(|| (output > 0).then(|| self.output.view(frames).first(output.into())));
-        let cue = (half.and_then(|half| half.own_cue(frames)))
+        let cue = live_first(half, None, |half| half.own_cue(frames))
             .or_else(|| (cue > 0).then(|| self.cue.view(frames).first(cue.into())));
         let preview = self.previews.play(frames, gain);
         write(
@@ -1044,12 +1068,12 @@ impl Live {
             },
         );
         for LiveWriter { key, writer, queue } in &mut self.writers {
-            match half.and_then(|half| half.own_record(*key, frames)) {
+            match live_first(half, None, |half| half.own_record(*key, frames)) {
                 Some(tapped) => writer.write(time, tapped),
                 // SAFETY: as above.
                 None => unsafe { queue.play_sound(writer.as_mut(), time, frames, &mut self.tap) },
             }
-            match half.and_then(|half| half.own_record_notes(*key)) {
+            match live_first(half, None, |half| half.own_record_notes(*key)) {
                 Some(notes) => writer.write_notes(time, frames, notes),
                 None => queue.play_notes(writer.as_mut(), time, frames, &mut self.notes),
             }
@@ -1112,10 +1136,8 @@ impl Live {
         self.render_half(input.range(offset..offset + frames), messages, frames);
         let graph = core.graph.as_deref();
         let half = self.half.as_deref();
-        let output = (half.and_then(|half| half.own_output(frames)))
-            .or_else(|| graph.and_then(|graph| graph.own_output(frames)));
-        let cue = (half.and_then(|half| half.own_cue(frames)))
-            .or_else(|| graph.and_then(|graph| graph.own_cue(frames)));
+        let output = live_first(half, graph, |g| g.own_output(frames));
+        let cue = live_first(half, graph, |g| g.own_cue(frames));
         let preview = self.previews.play(frames, gain);
         write(
             frames,
@@ -1129,11 +1151,9 @@ impl Live {
         );
         let start = self.time;
         for LiveWriter { key, writer, .. } in &mut self.writers {
-            let tapped = (half.and_then(|half| half.own_record(*key, frames)))
-                .or_else(|| graph.and_then(|graph| graph.own_record(*key, frames)));
+            let tapped = live_first(half, graph, |g| g.own_record(*key, frames));
             writer.write(start, tapped.unwrap_or(AudioRef::empty(frames)));
-            let notes = (half.and_then(|half| half.own_record_notes(*key)))
-                .or_else(|| graph.and_then(|graph| graph.own_record_notes(*key)));
+            let notes = live_first(half, graph, |g| g.own_record_notes(*key));
             writer.write_notes(start, frames, notes.unwrap_or_default());
         }
         self.played(shared, frames);

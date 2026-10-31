@@ -438,7 +438,9 @@ fn check_parts(
 fn pipelining(threads: usize, spin: Duration) -> ParallelRenderer {
     ParallelRenderer::new(ParallelOptions {
         pipeline: Pipeline::Always,
-        max_nodes: 1 << 10,
+        // Room in the queues for every part of every node, in as many parts
+        // as a test asks for.
+        max_nodes: 1 << 14,
         ..options(threads, spin)
     })
 }
@@ -676,6 +678,46 @@ fn a_node_that_makes_many_ready_fits_the_queue() {
     check(&spec, &blocks, &mut renderers).unwrap();
     let stats = renderers[0].monitor().stats();
     assert_eq!(stats.parallel_blocks, 3);
+}
+
+#[test]
+fn a_pipelined_block_takes_no_more_parts_than_the_queues_hold() {
+    // The same fan-out, in parts: finishing each part of the source queues
+    // that part of every other node on one thread, so 16 nodes in 4 parts
+    // would overfill a queue of 32. The block takes 2.
+    let max_nodes = 16;
+    let fanned = (1..max_nodes - 1).collect::<Vec<_>>();
+    let mut nodes = vec![(mix(0, 2), vec![])];
+    nodes.extend(fanned.iter().map(|&i| (mix(i as u8, 1), vec![0])));
+    nodes.push((mix(99, 2), fanned));
+    let spec = Spec {
+        added: (0..nodes.len()).collect(),
+        output: nodes.len() - 1,
+        nodes,
+    };
+    let frames = CONFIG.max_block;
+    let blocks = vec![
+        BlockSpec {
+            frames,
+            playing: true,
+            events: vec![],
+        };
+        3
+    ];
+    let options = ParallelOptions {
+        max_nodes: 2 * max_nodes,
+        pipeline: Pipeline::Always,
+        ..options(2, Duration::ZERO)
+    };
+    let mut renderers = [ParallelRenderer::new(options)];
+    renderers[0].force_parts(4);
+    let (graph, _) = build(&spec);
+    let tempo = TempoMap::default();
+    assert_eq!(renderers[0].parts(&graph, &block(frames, &tempo), 3), 2);
+    // And in the 2, every part of every node fits.
+    check_parts(&spec, &blocks, 2, &mut renderers).unwrap();
+    let stats = renderers[0].monitor().stats();
+    assert_eq!((stats.parallel_blocks, stats.pipelined_blocks), (3, 3));
 }
 
 /// Waits until `count` nodes like it have started in the current block, or

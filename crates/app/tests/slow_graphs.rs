@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use musicable_app::{Session, demo_project};
 use musicable_commands::{KeyChord, Keymap};
 use musicable_engine::{
-    AudioMut, Engine, EngineConfig, Inputs, Node, NodeKey, ProcessContext, compile, rt,
+    AudioMut, Engine, EngineConfig, Inputs, Lead, Node, NodeKey, ProcessContext, compile, rt,
 };
 use musicable_model::Project;
 use musicable_model::time::Beats;
@@ -183,4 +183,27 @@ fn a_new_engine_waits_for_its_graph_before_it_plays_on() {
     let stats = session.stats();
     assert!(stats.playing);
     assert_eq!(stats.position, 24_000 + 100);
+}
+
+#[test]
+fn turning_the_lead_off_or_on_compiles_the_graph_again() {
+    let gate = Arc::new(Gate::default());
+    gate.open();
+    let (_engine, mut session) = slow_session(Project::new(), &gate);
+    session.wait_for_graph();
+    // From one lead to another, the graph stays split, into what renders
+    // ahead and what renders live.
+    for lead in [Lead::Normal, Lead::Long] {
+        session.set_lead(lead);
+        assert!(!session.compiling(), "{lead:?}");
+    }
+    // With the lead off, nothing renders ahead, and the graph renders
+    // whole; with it on again, split.
+    for lead in [Lead::Off, Lead::Short] {
+        session.set_lead(lead);
+        assert!(session.compiling(), "{lead:?}");
+        session.wait_for_graph();
+        session.set_lead(lead);
+        assert!(!session.compiling(), "{lead:?} again");
+    }
 }

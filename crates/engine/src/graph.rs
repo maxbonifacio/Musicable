@@ -475,6 +475,18 @@ impl Graph {
         self.prepare_split(config, true)
     }
 
+    /// [`prepare`](Graph::prepare), keeping the graph whole, without a live
+    /// half: for an engine that renders nothing ahead, with the lead off
+    /// ([`EngineHandle::set_lead`](crate::EngineHandle::set_lead)) or for
+    /// an offline render. Every node renders as the device asks, in one
+    /// block, so the nodes that would render live run alongside the rest
+    /// rather than after them, and a pipelined block has them too. It
+    /// renders the same, sample for sample. With the lead on, a whole
+    /// graph with a live source renders nothing ahead.
+    pub fn prepare_whole(self, config: &EngineConfig) -> Result<PreparedGraph, GraphError> {
+        self.prepare_split(config, false)
+    }
+
     /// [`prepare`](Graph::prepare), keeping the graph whole if `split` is
     /// false: for a test's reference, which renders every node as the
     /// device asks.
@@ -557,25 +569,35 @@ impl Graph {
     /// the nearest that reach it, counting the nodes between but not the
     /// delays.
     fn liveness(&self) -> Vec<Option<NodeKey>> {
-        let mut source = vec![None; self.nodes.len()];
-        let mut reached: VecDeque<NodeId> = (0..self.nodes.len())
+        let len = self.nodes.len();
+        // What each node reaches: its outputs, then where its notes and
+        // made notes go, what it modulates and the nodes kept with it.
+        let mut reaches = self.outputs.clone();
+        let routes = self.note_routes.iter().chain(&self.made_routes);
+        for &(from, to, _) in routes {
+            reaches[from.0].push(to);
+        }
+        for &(from, to, _) in &self.modulations {
+            reaches[from.0].push(to);
+        }
+        for &(a, b) in &self.together {
+            reaches[a.0].push(b);
+            reaches[b.0].push(a);
+        }
+        let mut marked = vec![false; len];
+        for n in &self.marks {
+            marked[n.0] = true;
+        }
+        let mut source = vec![None; len];
+        let mut reached: VecDeque<NodeId> = (0..len)
             .map(NodeId)
-            .filter(|n| self.nodes[n.0].live() == Some(true) || self.marks.contains(n))
+            .filter(|n| self.nodes[n.0].live() == Some(true) || marked[n.0])
             .collect();
         for n in &reached {
             source[n.0] = Some(self.keys[n.0]);
         }
         while let Some(n) = reached.pop_front() {
-            let audio = self.outputs[n.0].iter().copied();
-            let routes = self.note_routes.iter().chain(&self.made_routes);
-            let notes = routes.filter(|r| r.0 == n).map(|r| r.1);
-            let modulated = (self.modulations.iter()).filter(|m| m.0 == n).map(|m| m.1);
-            let together = (self.together.iter()).filter_map(|&(a, b)| match n {
-                _ if a == n => Some(b),
-                _ if b == n => Some(a),
-                _ => None,
-            });
-            for next in audio.chain(notes).chain(modulated).chain(together) {
+            for &next in &reaches[n.0] {
                 if source[next.0].is_some() {
                     continue;
                 }
@@ -790,36 +812,26 @@ impl Graph {
                 .collect();
             graph.records = records.clone();
         }
+        // The half a node of the whole graph goes to.
+        fn half_of<'a>(live: &[bool], halves: [&'a mut Graph; 2], n: NodeId) -> &'a mut Graph {
+            let [ahead, live_half] = halves;
+            if live[n.0] { live_half } else { ahead }
+        }
         for (key, node) in note_records {
-            let graph = if live[node.0] {
-                &mut *live_half
-            } else {
-                &mut *ahead
-            };
+            let graph = half_of(live, [ahead, live_half], node);
             graph.note_records.push((key, place[node.0]));
         }
         for node in playing {
-            let graph = if live[node.0] {
-                &mut *live_half
-            } else {
-                &mut *ahead
-            };
-            graph.playing.push(place[node.0]);
+            half_of(live, [ahead, live_half], node)
+                .playing
+                .push(place[node.0]);
         }
         for (node, param, feed) in feeds {
-            let graph = if live[node.0] {
-                &mut *live_half
-            } else {
-                &mut *ahead
-            };
+            let graph = half_of(live, [ahead, live_half], node);
             graph.feeds.push((place[node.0], param, feed));
         }
         for node in controllers {
-            let graph = if live[node.0] {
-                &mut *live_half
-            } else {
-                &mut *ahead
-            };
+            let graph = half_of(live, [ahead, live_half], node);
             graph.controllers.push(place[node.0]);
         }
         // Notes and made notes for live nodes from ahead ones, through a
@@ -1819,6 +1831,11 @@ impl<'a> Notes<'a> {
         self.send_kind(offset, kind)
     }
 
+    /// How many more notes the node can send this block.
+    pub(crate) fn room(&self) -> usize {
+        self.room
+    }
+
     /// How many notes there was no room for.
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped
@@ -1885,6 +1902,11 @@ impl Controls<'_> {
     /// How many ports the node has.
     pub fn ports(&self) -> usize {
         self.ports.len()
+    }
+
+    /// How many more events the node can send this block.
+    pub(crate) fn room(&self) -> usize {
+        self.room
     }
 
     /// The block's length: modulation is sent at offsets below it.
@@ -2054,12 +2076,6 @@ impl PreparedGraph {
                 .live_half
                 .as_ref()
                 .is_some_and(|live| live.can_be_live(key))
-    }
-
-    /// Whether the graph has a live half, which the engine may have taken
-    /// out: this is the half that renders ahead then.
-    pub(crate) fn has_live_half(&self) -> bool {
-        !self.live_ids.is_empty()
     }
 
     /// Whether the node with `key` renders in the graph's live half, which

@@ -146,6 +146,7 @@ impl Session {
             handle,
             media,
             Arc::new(compile_with_inputs),
+            false,
         )
     }
 
@@ -167,6 +168,7 @@ impl Session {
             handle,
             media,
             Arc::new(compile_with_inputs),
+            false,
         )
     }
 
@@ -174,7 +176,10 @@ impl Session {
     /// `project` load from `installed` before it plays, and the graphs tap
     /// the tracks in `stems`, in that order, for the engine's
     /// [`process_with_taps`](musicable_engine::Engine::process_with_taps)
-    /// (see [`compile_with_stems`]). Key presses do nothing.
+    /// (see [`compile_with_stems`]). Key presses do nothing. The engine
+    /// renders nothing ahead, so the graphs are whole
+    /// ([`Graph::prepare_whole`]): what would render live renders alongside
+    /// the rest, and pipelined with it.
     pub fn exporting(
         project: Project,
         folder: Option<&Path>,
@@ -197,6 +202,7 @@ impl Session {
             handle,
             media,
             Arc::new(build),
+            true,
         );
         session.set_installed_plugins(installed);
         session
@@ -218,7 +224,7 @@ impl Session {
                 build(project)
             };
         let media = MediaPool::new(false);
-        Self::building(project, None, keymap, handle, media, Arc::new(build))
+        Self::building(project, None, keymap, handle, media, Arc::new(build), false)
     }
 
     fn building(
@@ -228,6 +234,7 @@ impl Session {
         mut handle: EngineHandle,
         media: MediaPool,
         build: Build,
+        whole: bool,
     ) -> Self {
         let plugins = Plugins::new(handle.config());
         let recorder = Recorder::spawn();
@@ -241,6 +248,7 @@ impl Session {
             handle,
             compiler: Compiler::spawn(),
             build,
+            whole,
             media: Arc::new(media),
             folder: folder.map(Path::to_owned),
             devices: Devices::new(),
@@ -1089,6 +1097,15 @@ impl Session {
     pub fn set_lead(&mut self, lead: Lead) {
         self.lead = lead;
         self.engine.handle.set_lead(lead);
+        // With the lead off nothing renders ahead, so the graph renders
+        // whole, in one block; with it on, split, so the rest renders ahead
+        // of what renders live. The graph playing until the new one comes
+        // renders the same either way.
+        let whole = lead == Lead::Off;
+        if whole != self.engine.whole {
+            self.engine.whole = whole;
+            self.engine.recompile(self.document.project());
+        }
     }
 
     /// How far ahead of the device the engine renders.
@@ -1534,6 +1551,10 @@ struct EngineLink {
     handle: EngineHandle,
     compiler: Compiler,
     build: Build,
+    /// Whether it prepares the graphs whole, as for an engine that renders
+    /// nothing ahead ([`Graph::prepare_whole`]), or split into the half
+    /// that renders ahead and the half that renders live.
+    whole: bool,
     /// The audio files the graphs play.
     media: Arc<MediaPool>,
     /// The folder of the project's file, which audio clips' relative paths
@@ -1625,12 +1646,17 @@ impl EngineLink {
         let inputs = self.inputs.clone();
         let project = project.clone();
         let playhead = self.playhead();
-        self.asked = self.compiler.compile(self.handle.config(), move || {
+        let job = move || {
             // Files load here, on the compiler's thread, with the graph, and
             // clips in Spectral ask for their segments.
             let media = media.media(&project, folder.as_deref(), playhead);
             build(&project, &meters, &media, &devices, &inputs)
-        });
+        };
+        let config = self.handle.config();
+        self.asked = match self.whole {
+            true => self.compiler.compile_whole(config, job),
+            false => self.compiler.compile(config, job),
+        };
         self.asked
     }
 

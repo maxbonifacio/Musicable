@@ -1866,18 +1866,29 @@ rest ahead: the main board for what the engine's ahead side renders, and
 the live board for the live half, which the renderer's
 `Renderer::live_renderer` renders on the same workers. Each board has its
 own queues, counters and failure, and a thread works on one at a time.
-While the graph has a live half, a block rendered ahead leaves out the
-last two workers, `KEPT`, which never take on rendering ahead either, so
+One block at a time shares each board, and one thread at a time works
+from lane 0: a renderer that would start a second block on a board, or a
+second thread from lane 0, renders its block alone, so no use of the
+renderers can race. While the live side renders a live half (the live
+renderer hears of each as the live side installs it,
+`Renderer::set_live_half`), a block rendered ahead leaves out the last
+two workers, `KEPT`, which never take on rendering ahead either, so
 the live half has the audio thread and them however much the rest takes:
 all workers but two render ahead, as the [hybrid buffering
 design](#rendering-ahead) has it. With three workers or fewer it leaves
 out one fewer, so a worker still renders ahead. The live board's wake-up
 tree starts from the last worker and goes down, so it wakes those two
 first. A worker with nothing to do on the main board works on the live
-board's block meanwhile, as the device waits for that, and a thread helps
-only with the tasks of nodes on its own board. A block rendered ahead of
-a graph without a live half, or one the audio thread renders as the device
-asks, has every worker.
+board's block meanwhile, as the device waits for that, a node or a task
+at a time, so it's back on the main board as soon as that has work, and a
+thread helps only with the tasks of nodes on its own board. A block
+rendered ahead while the live side renders no live half, or one the audio
+thread renders as the device asks, has every worker.
+
+A pipelined block takes no more parts than the lanes' queues hold pieces
+of work: each lane's holds `ParallelOptions::max_nodes`, and a lane may
+push every part of every node of the block, so a graph of a sixteenth of
+that or more takes fewer than `PARTS`.
 
 ## Rendering ahead
 
@@ -1939,10 +1950,21 @@ node gets on a frame come in the same order too: the graph numbers each
 node that plays notes, makes them or sends modulation, in the order they'd
 run in the whole graph, and each event carries its sender's number. The
 ahead side renders a block only while each queue has room for a block's
-notes and modulation. A graph without live sources is one half, which
-renders ahead. The compiler sets a track's clip player, input monitor and
-bus live when the track is set to Always Live (`Track::always_live`), so
-the whole of its strip renders live, while what feeds a group or a return
+notes and modulation. A live block can span several blocks rendered
+ahead, with more notes or modulation than a block has room for: what it
+hasn't room for waits in the queue for the next live block, late, rather
+than go. A graph without live sources is one half, which
+renders ahead. `Graph::prepare_whole` keeps any graph whole, for an
+engine that renders nothing ahead: with the lead off, every node renders
+as the device asks, so a split graph would render its two halves one
+after the other, each a block of its own, where a whole one renders them
+in the same block, alongside each other, and pipelined together in an
+export. The two render the same. `Compiler::compile_whole` prepares a
+job's graph that way. With the lead on, a whole graph with a live source
+renders nothing ahead. The compiler sets a track's clip player, input monitor,
+bus and modulation live when the track is set to Always Live
+(`Track::always_live`), so the whole of its strip renders live, its
+modulators and macros too, while what feeds a group or a return
 set to it renders ahead. It sets a device's switch live, while the device
 is in the signal, when the app has it render live (`Devices::set_live`),
 as for a plugin that must render in real time
@@ -1966,8 +1988,8 @@ before each stretch, as far as the ahead side has rendered.
 the engine asks the renderer's workers for more (`Renderer::render_ahead`).
 One worker takes it on, starts each block from its own lane as the audio
 thread does from lane 0, and the others help as they would with any block,
-until the lead is whole. While the graph has a live half, the last two
-workers stay out of it, for the live half's blocks. A renderer without
+until the lead is whole. While the live side renders a live half, the
+last two workers stay out of it, for the live half's blocks. A renderer without
 workers, such as
 `ReferenceRenderer`, has the audio thread render ahead at the end of each
 callback instead. When a callback needs frames that aren't rendered yet,
