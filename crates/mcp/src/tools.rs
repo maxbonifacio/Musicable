@@ -26,7 +26,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::{Map, Value as Json, json};
 
 use crate::waiting::{self, Until};
-use crate::{Asked, Call, Reply, Run, Shot, reads};
+use crate::{Asked, Call, Reply, Run, Shot, Tree, reads};
 
 pub const LIST_COMMANDS: &str = "list_commands";
 pub const DESCRIBE_COMMAND: &str = "describe_command";
@@ -51,6 +51,7 @@ pub const WAIT_FOR: &str = "wait_for";
 pub const GET_COMMAND_LOG: &str = "get_command_log";
 pub const GET_WINDOWS: &str = "get_windows";
 pub const GET_SCREENSHOT: &str = "get_screenshot";
+pub const GET_UI_TREE: &str = "get_ui_tree";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -446,6 +447,51 @@ pub fn list() -> Vec<Tool> {
             ),
         ),
         read(
+            GET_UI_TREE,
+            "Get UI Tree",
+            "Reads what's in a window, the main window unless window says, as a screen reader \
+             does: its buttons, sliders, switches, menus, text and fields, as egui last drew \
+             them, nested as they are. Each has its id, which stays the same from one frame to \
+             the next, its role, such as button or slider, and where they're given, its label, \
+             its value, its number and range, whether it's toggled, selected, expanded, \
+             disabled or has the focus, what can be done to it, such as click or increment, and \
+             where it is and how big, in pixels in the window, as get_screenshot's pictures of \
+             it are. Plain containers are left out, and their insides moved up. Parts of \
+             Musicable drawn without widgets, such as the clips in the arrangement, aren't in \
+             it: get_project and get_editor say what's there.",
+            object(
+                json!({
+                    "window": {
+                        "description": "main, or a window of its own's number from 1, as \
+                                        get_windows gives it.",
+                        "anyOf": [
+                            { "type": "string", "enum": ["main"] },
+                            { "type": "integer", "minimum": 1 },
+                        ],
+                    },
+                    "panel": {
+                        "type": "string",
+                        "description": "A panel's id, as get_layout gives it, to read only what's \
+                                        in it.",
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "Words to look for in labels, values and descriptions: \
+                                        only what has them, with all that's inside it, and what \
+                                        it's in, is read.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": LONGEST_TREE,
+                        "description": "The most it reads, 300 unless it says. The answer's more \
+                                        says how many it left out.",
+                    },
+                }),
+                &[],
+            ),
+        ),
+        read(
             GET_LEVELS,
             "Get Levels",
             "Reads the meters, as the mixer shows them: each track's and the master's peak \
@@ -564,6 +610,7 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_COMMAND_LOG => &["since", "last"],
         GET_SCREENSHOT => &["window", "panel", "device", "file"],
         GET_WINDOWS => &[],
+        GET_UI_TREE => &["window", "panel", "filter", "limit"],
         GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
         | LIST_AUDIO_DEVICES | GET_LAYOUT | GET_LEVELS => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
@@ -621,6 +668,27 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_LEVELS => Asked::Levels,
         GET_WINDOWS => Asked::Windows,
         GET_SCREENSHOT => Asked::Screenshot(shot(arguments)?),
+        GET_UI_TREE => {
+            let window = window(arguments)?;
+            let panel = optional_text(arguments, "panel")?;
+            if panel.is_some() && window.is_some() {
+                let problem = "Give the window or the panel, not both: a panel is in one window.";
+                return Err(Refused::Arguments(problem.into()));
+            }
+            Asked::UiTree(Tree {
+                window,
+                panel,
+                filter: optional_text(arguments, "filter")?.filter(|filter| !filter.is_empty()),
+                limit: match optional_number(arguments, "limit", LONGEST_TREE)? {
+                    Some(0) => {
+                        let problem = format!("limit must be from 1 to {LONGEST_TREE}.");
+                        return Err(Refused::Arguments(problem));
+                    }
+                    Some(limit) => limit as usize,
+                    None => TREE,
+                },
+            })
+        }
         GET_COMMAND_LOG => Asked::CommandLog {
             since: optional_number(arguments, "since", u64::MAX)?,
             last: optional_number(arguments, "last", LONGEST_LOG)?
@@ -708,20 +776,31 @@ fn flag(arguments: &JsonObject, name: &str) -> Result<bool, Refused> {
     }
 }
 
-/// What `get_screenshot`'s `arguments` ask a picture of.
-fn shot(arguments: &JsonObject) -> Result<Shot, Refused> {
-    let window = match arguments.get("window") {
-        None | Some(Json::Null) => None,
-        Some(Json::String(main)) if main == "main" => None,
+/// The window `arguments` name: the main window with `None`, or else a
+/// window of its own, counted from 0.
+fn window(arguments: &JsonObject) -> Result<Option<usize>, Refused> {
+    match arguments.get("window") {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::String(main)) if main == "main" => Ok(None),
         Some(window) => match window.as_u64() {
-            Some(window @ 1..) => Some(window as usize - 1),
+            Some(window @ 1..) => Ok(Some(window as usize - 1)),
             _ => {
                 let problem = "window is main, or a window of its own's number from 1, as \
                                get_windows gives it.";
-                return Err(Refused::Arguments(problem.into()));
+                Err(Refused::Arguments(problem.into()))
             }
         },
-    };
+    }
+}
+
+/// How much of a window `get_ui_tree` reads unless it says, and the most
+/// it can say.
+const TREE: usize = 300;
+const LONGEST_TREE: u64 = 5000;
+
+/// What `get_screenshot`'s `arguments` ask a picture of.
+fn shot(arguments: &JsonObject) -> Result<Shot, Refused> {
+    let window = window(arguments)?;
     let panel = optional_text(arguments, "panel")?;
     if panel.is_some()
         && arguments
@@ -1040,6 +1119,47 @@ mod tests {
         assert_eq!(call(GET_LAYOUT, json!({})), Ok(Asked::Layout));
         assert_eq!(call(GET_LEVELS, json!({})), Ok(Asked::Levels));
         assert_eq!(call(GET_WINDOWS, json!({})), Ok(Asked::Windows));
+        let tree = Tree {
+            window: None,
+            panel: None,
+            filter: None,
+            limit: 300,
+        };
+        assert_eq!(
+            call(GET_UI_TREE, json!({})),
+            Ok(Asked::UiTree(tree.clone()))
+        );
+        assert_eq!(
+            call(
+                GET_UI_TREE,
+                json!({"panel": "mixer", "filter": "Solo", "limit": 20})
+            ),
+            Ok(Asked::UiTree(Tree {
+                panel: Some("mixer".into()),
+                filter: Some("Solo".into()),
+                limit: 20,
+                ..tree.clone()
+            }))
+        );
+        assert_eq!(
+            call(GET_UI_TREE, json!({"window": 2, "filter": ""})),
+            Ok(Asked::UiTree(Tree {
+                window: Some(1),
+                ..tree
+            }))
+        );
+        assert_eq!(
+            call(GET_UI_TREE, json!({"window": 1, "panel": "mixer"})),
+            refused("Give the window or the panel, not both: a panel is in one window.")
+        );
+        assert_eq!(
+            call(GET_UI_TREE, json!({"limit": 0})),
+            refused("limit must be from 1 to 5000.")
+        );
+        assert_eq!(
+            call(GET_UI_TREE, json!({"limit": 5001})),
+            refused("limit must be a whole number, from 0 to 5000.")
+        );
         assert_eq!(
             call(GET_SCREENSHOT, json!({})),
             Ok(Asked::Screenshot(Shot::default()))
@@ -1180,7 +1300,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

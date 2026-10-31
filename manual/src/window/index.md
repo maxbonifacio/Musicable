@@ -188,3 +188,8 @@ The status bar shows errors and notices until they're dismissed, and:
 **Double-clicks** count when the second click comes soon enough after the
 first: on Windows, within the double-click time in its mouse settings, as in
 other Windows apps; elsewhere, within 0.3 seconds.
+
+**Screen readers**, such as Narrator on Windows, VoiceOver on macOS and
+Orca on Linux, read the window's buttons, sliders, menus and meters by name,
+such as "Lead Volume". The arrangement's clips and the piano roll's notes
+aren't named for them yet.

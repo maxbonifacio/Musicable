@@ -33,6 +33,7 @@ mod settings;
 mod settings_window;
 mod theme_file;
 pub mod toolkit;
+mod ui_tree;
 mod window_capture;
 mod workspaces;
 

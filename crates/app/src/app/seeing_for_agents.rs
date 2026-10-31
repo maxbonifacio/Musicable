@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
-use eframe::egui::{self, ColorImage, Rect, ScreenshotCallback, ViewportCommand};
-use musicable_mcp::{Reply, Shot};
+use eframe::egui::{self, ColorImage, Rect, ScreenshotCallback, ViewportCommand, ViewportId};
+use musicable_mcp::{Reply, Shot, Tree};
 use musicable_model::DeviceId;
 use serde_json::{Value as Json, json};
 
@@ -89,36 +89,9 @@ impl App {
         if let Some(device) = shot.device {
             return self.plugin_screenshot(device, shot.file, reply);
         }
-        let (window, crop) = match &shot.panel {
-            Some(panel) => {
-                if !self
-                    .shell
-                    .layout()
-                    .panels
-                    .iter()
-                    .any(|place| place.id == panel)
-                {
-                    return reply.failed(format!(
-                        "There's no panel {panel}: get_layout gives their ids."
-                    ));
-                }
-                let Some((window, rect)) = self.shell.panel_rect(panel) else {
-                    return reply.failed(format!(
-                        "The panel {panel} isn't in sight: view.toggle_{panel} shows it, if it \
-                         has a command of its own, or its tab brings it forward."
-                    ));
-                };
-                (window, Some(rect))
-            }
-            None => (shot.window, None),
-        };
-        let Some(viewport) = self.shell.window_viewport(window) else {
-            let windows = self.shell.windows();
-            return reply.failed(format!(
-                "There's no window {}: there are {windows} windows of their own besides the main \
-                 one.",
-                window.map_or(0, |index| index + 1)
-            ));
+        let (window, viewport, crop) = match self.place(shot.window, shot.panel.as_deref()) {
+            Ok(place) => place,
+            Err(why) => return reply.failed(why),
         };
         let minimized = ctx.input_for(viewport, |input| input.viewport().minimized);
         if minimized == Some(true) {
@@ -163,6 +136,62 @@ impl App {
 }
 
 impl App {
+    /// Reads what `tree` asks of a window, as a screen reader does, as it's
+    /// next drawn, and answers `reply` with it, or says why it can't.
+    pub(super) fn ui_tree_for_agent(&mut self, tree: Tree, reply: Reply, ctx: &egui::Context) {
+        let (window, viewport, panel) = match self.place(tree.window, tree.panel.as_deref()) {
+            Ok(place) => place,
+            Err(why) => return reply.failed(why),
+        };
+        let minimized = ctx.input_for(viewport, |input| input.viewport().minimized);
+        if minimized == Some(true) {
+            return reply.failed("The window is minimized, so it isn't drawn.");
+        }
+        let ask = crate::ui_tree::Ask {
+            window: window.map_or(json!("main"), |index| json!(index + 1)),
+            panel: tree.panel.zip(panel),
+            filter: tree.filter,
+            limit: tree.limit,
+        };
+        crate::ui_tree::read(ctx, viewport, ask, reply);
+    }
+
+    /// The window that `window` or `panel` names, as the window, counted
+    /// from 0 with `None` for the main one, and its viewport, and where the
+    /// panel is in it, or why there isn't one.
+    fn place(
+        &self,
+        window: Option<usize>,
+        panel: Option<&str>,
+    ) -> Result<(Option<usize>, ViewportId, Option<Rect>), String> {
+        let (window, rect) = match panel {
+            Some(panel) => {
+                if !(self.shell.layout().panels.iter()).any(|place| place.id == panel) {
+                    return Err(format!(
+                        "There's no panel {panel}: get_layout gives their ids."
+                    ));
+                }
+                let Some((window, rect)) = self.shell.panel_rect(panel) else {
+                    return Err(format!(
+                        "The panel {panel} isn't in sight: view.toggle_{panel} shows it, if it \
+                         has a command of its own, or its tab brings it forward."
+                    ));
+                };
+                (window, Some(rect))
+            }
+            None => (window, None),
+        };
+        let Some(viewport) = self.shell.window_viewport(window) else {
+            let windows = self.shell.windows();
+            return Err(format!(
+                "There's no window {}: there are {windows} windows of their own besides the main \
+                 one.",
+                window.map_or(0, |index| index + 1)
+            ));
+        };
+        Ok((window, viewport, rect))
+    }
+
     /// Takes a picture of the device `device`'s plugin window, and answers
     /// `reply` with it, saved to `file` too if it's given, or says why it
     /// can't.

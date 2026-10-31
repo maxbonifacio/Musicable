@@ -329,6 +329,7 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_layout",
             "get_windows",
             "get_screenshot",
+            "get_ui_tree",
             "get_levels",
             "get_command_log",
             "list_audio_devices",
