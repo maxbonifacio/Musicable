@@ -342,9 +342,12 @@ pub enum Request {
         track: Option<TrackId>,
         at: Option<Beats>,
     },
-    /// Render the mix to the audio file at this path, as the export window
-    /// last did, or else show the export window.
-    ExportAudio(Option<PathBuf>),
+    /// Render the song to the audio file at `file`, as the export window
+    /// last did but for what `options` say, or else show the export window.
+    ExportAudio {
+        file: Option<PathBuf>,
+        options: ExportOptions,
+    },
     /// Show the command palette.
     CommandPalette,
     /// Show the Settings window, at the page it showed last.
@@ -403,11 +406,11 @@ pub enum Request {
     /// Switch to the workspace in this slot, from 1, the first being
     /// Default.
     SwitchWorkspace(u8),
-    /// Ask for a name, and keep the panels' layout as a new workspace under
-    /// it.
-    SaveWorkspaceAs,
-    /// Ask for a new name for the workspace in use.
-    RenameWorkspace,
+    /// Keep the panels' layout as a new workspace under this name, or ask
+    /// for one.
+    SaveWorkspaceAs(Option<String>),
+    /// Give the workspace in use this name, or ask for one.
+    RenameWorkspace(Option<String>),
     /// Delete the workspace in use, once the user says so.
     DeleteWorkspace,
     /// Lay the panels of the workspace in use out as at first.
@@ -424,6 +427,38 @@ pub enum Request {
     SetAudioDevice(AudioDevice),
     /// Count dropouts from zero again.
     ResetDropouts,
+    /// Clear the highest peak of every channel's meter.
+    ClearPeaks,
+    /// Give `command` these keys, everywhere or in a panel, in place of
+    /// the ones it has. A key another command has in the same place is
+    /// taken from it.
+    SetKeys {
+        command: CommandId,
+        keys: Vec<(Scope, KeyChord)>,
+    },
+    /// Give `command` its default keys again.
+    ResetKeys(CommandId),
+}
+
+/// How [`file::EXPORT_AUDIO`] renders, where it doesn't as the export
+/// window last did: what's `None` is as the window had it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// `song`, `loop` or `selection`. Without it, what the window starts
+    /// out with: the time selection, or else the song.
+    pub range: Option<String>,
+    /// 16, 24, or 32 for floats.
+    pub bits: Option<u8>,
+    pub sample_rate: Option<u32>,
+    pub dither: Option<bool>,
+    pub normalize: Option<bool>,
+    pub tail: Option<bool>,
+    /// Write the mix. Without it, the mix is written.
+    pub mix: Option<bool>,
+    /// Write each of `tracks` on its own too.
+    pub stems: Option<bool>,
+    /// The tracks to write on their own: all of them without it.
+    pub tracks: Option<Vec<TrackId>>,
 }
 
 /// The audio device to play through, and how, as
@@ -461,8 +496,6 @@ impl Request {
                 | Request::Rename(_)
                 | Request::LoadSample(_)
                 | Request::FocusBrowserSearch
-                | Request::SaveWorkspaceAs
-                | Request::RenameWorkspace
                 | Request::DeleteWorkspace
         )
     }

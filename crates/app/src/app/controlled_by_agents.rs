@@ -562,3 +562,107 @@ fn agents_read_the_plugins_the_layout_and_the_meters() {
     assert_eq!(levels["tracks"][0]["name"], "Keys", "{levels}");
     assert_eq!(levels["tracks"][0]["peak"], silent["peak"], "{levels}");
 }
+
+#[test]
+fn agents_clear_peaks_change_keys_name_workspaces_and_export_stems() {
+    let dir = TempDir::new("agents-shell");
+    let file = dir.0.join("Song.musicable");
+    project::save(&file, &song()).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let run = |window: &mut Window, id: &str, args: Json| {
+        agent.call(window, "run_command", json!({"id": id, "args": args}))
+    };
+
+    assert_eq!(
+        run(&mut window, "mixer.clear_peaks", json!({})),
+        Ok(json!({"result": null}))
+    );
+
+    // Keys, as the Keys page changes them, saying what they were.
+    let set = run(
+        &mut window,
+        "options.set_keys",
+        json!({"command": "transport.play_stop", "keys": ["Ctrl+Shift+Space", "Ctrl+K"]}),
+    );
+    assert_eq!(
+        set,
+        Ok(json!({"result": {
+            "command": "transport.play_stop",
+            "was": ["Space"],
+            "now": ["Ctrl+K", "Ctrl+Shift+Space"],
+            "taken": [{"key": "Ctrl+K", "from": "options.keyboard_shortcuts"}],
+        }}))
+    );
+    let keymap = window.state().session.keymap().clone();
+    let play_stop = musicable_commands::CommandId::from("transport.play_stop");
+    assert_eq!(keymap.chords_for(&play_stop).count(), 2);
+    let saved = fs::read_to_string(dir.0.join(crate::settings::KEYMAP_FILE)).unwrap();
+    assert!(saved.contains("Ctrl+Shift+Space"), "{saved}");
+    let reset = run(
+        &mut window,
+        "options.reset_keys",
+        json!({"command": "transport.play_stop"}),
+    );
+    assert_eq!(reset.unwrap()["result"]["now"], json!(["Space"]));
+    let unknown = run(
+        &mut window,
+        "options.set_keys",
+        json!({"command": "transport.nothing", "keys": []}),
+    );
+    assert_eq!(
+        unknown,
+        Err("There's no command transport.nothing.".to_owned())
+    );
+
+    // Workspaces by name, where the user would be asked for one.
+    let saved = run(&mut window, "workspace.save_as", json!({"name": "Mixing"}));
+    assert_eq!(saved, Ok(json!({"result": {"workspace": "Mixing"}})));
+    assert_eq!(window.state().workspaces.current_name(), "Mixing");
+    let renamed = run(&mut window, "workspace.rename", json!({"name": "Mixdown"}));
+    assert_eq!(renamed, Ok(json!({"result": {"workspace": "Mixdown"}})));
+    assert_eq!(window.state().workspaces.current_name(), "Mixdown");
+    let unnamed = run(&mut window, "workspace.save_as", json!({}));
+    let unnamed = unnamed.unwrap_err();
+    assert!(
+        unnamed.starts_with("The argument name is missing"),
+        "{unnamed}"
+    );
+
+    // Stems alone, at another rate and depth, without the tail.
+    let stems = dir.0.join("Stems.wav");
+    let exported = run(
+        &mut window,
+        "file.export_audio",
+        json!({
+            "file": stems,
+            "range": "song",
+            "bits": 16,
+            "sample_rate": 44100,
+            "tail": false,
+            "mix": false,
+            "stems": true,
+        }),
+    );
+    let keys = dir.0.join("Stems 01 Keys.wav");
+    assert_eq!(exported, Ok(json!({"result": [keys]})));
+    assert!(fs::metadata(&stems).is_err());
+    let info = Decoder::open(&keys).unwrap().info();
+    assert_eq!((info.sample_rate, info.frames), (44_100, 44_100));
+    let nowhere = run(
+        &mut window,
+        "file.export_audio",
+        json!({"file": dir.0.join("Selected.wav"), "range": "selection"}),
+    );
+    assert_eq!(
+        nowhere,
+        Err("There's nothing to export: nothing is selected.".to_owned())
+    );
+    let missing = run(
+        &mut window,
+        "file.export_audio",
+        json!({"file": stems, "stems": true, "tracks": [9]}),
+    );
+    assert_eq!(missing, Err("There's no track 9.".to_owned()));
+}

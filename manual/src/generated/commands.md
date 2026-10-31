@@ -108,6 +108,7 @@
 | Tempo Up | Ctrl+Shift+Up | `transport.tempo_up` |
 | Tempo Down | Ctrl+Shift+Down | `transport.tempo_down` |
 | Reset Dropouts |  | `transport.reset_dropouts` |
+| Clear Peaks |  | `mixer.clear_peaks` |
 
 ### Device
 

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use musicable_commands::{Args, Editor, Keymap, Registry, Request, Steps, arrange};
+use musicable_commands::{Args, Editor, ExportOptions, Keymap, Registry, Request, Steps, arrange};
 use musicable_engine::Lead;
 use musicable_mcp::pipe::Address;
 use musicable_mcp::{
@@ -255,6 +255,17 @@ impl App {
         let answer = match request {
             Request::SetSetting { key, value } => self.set_setting(&key, &value, ctx, frame),
             Request::SetAudioDevice(device) => self.set_audio_device(device),
+            Request::SetKeys { command, keys } => self.set_keys(&command, keys),
+            Request::ResetKeys(command) => self.reset_keys(&command),
+            Request::SaveWorkspaceAs(Some(name)) => {
+                (self.save_workspace_as(&name)).map(|()| json!({ "workspace": name }))
+            }
+            Request::RenameWorkspace(Some(name)) => {
+                (self.rename_workspace(&name)).map(|()| json!({ "workspace": name }))
+            }
+            Request::SaveWorkspaceAs(None) | Request::RenameWorkspace(None) => {
+                Err("Give the workspace its name.".into())
+            }
             request => return self.file_for_agent(request, reply, ctx),
         };
         match answer {
@@ -299,7 +310,10 @@ impl App {
                 track,
                 at,
             } => self.import_for_agent(files, track, at, reply),
-            Request::ExportAudio(Some(file)) => self.export_for_agent(file, reply, ctx),
+            Request::ExportAudio {
+                file: Some(file),
+                options,
+            } => self.export_for_agent(file, &options, reply, ctx),
             // The file commands' arguments for files are ones agents must
             // give.
             _ => reply.failed("Give the command its file."),
@@ -364,8 +378,14 @@ impl App {
 
     /// Renders the mix to `file` for an agent, as a script would: see
     /// [`App::export_mix_to`]. The agent hears the file once it's written.
-    fn export_for_agent(&mut self, file: PathBuf, reply: Reply, ctx: &egui::Context) {
-        match self.export_mix_to(&file, ctx) {
+    fn export_for_agent(
+        &mut self,
+        file: PathBuf,
+        options: &ExportOptions,
+        reply: Reply,
+        ctx: &egui::Context,
+    ) {
+        match self.export_audio_to(&file, options, ctx) {
             Ok(()) => self.agents.exporting = Some(reply),
             Err(why) => reply.failed(why),
         }
@@ -617,9 +637,13 @@ fn answers(request: &Request) -> bool {
             | Request::Save
             | Request::SaveAs(_)
             | Request::ImportAudio { .. }
-            | Request::ExportAudio(_)
+            | Request::ExportAudio { .. }
             | Request::SetSetting { .. }
             | Request::SetAudioDevice(_)
+            | Request::SetKeys { .. }
+            | Request::ResetKeys(_)
+            | Request::SaveWorkspaceAs(_)
+            | Request::RenameWorkspace(_)
     )
 }
 
@@ -629,7 +653,9 @@ fn relative_path(request: &Request) -> Option<&Path> {
     let paths: Vec<&Path> = match request {
         Request::Open(Some(path))
         | Request::SaveAs(Some(path))
-        | Request::ExportAudio(Some(path)) => {
+        | Request::ExportAudio {
+            file: Some(path), ..
+        } => {
             vec![path]
         }
         Request::ImportAudio {

@@ -151,6 +151,7 @@ const MENUS: [MenuSpec; 8] = [
             Some(transport::TEMPO_DOWN),
             None,
             Some(transport::RESET_DROPOUTS),
+            Some(musicable_commands::mixer::CLEAR_PEAKS),
         ],
     ),
 ];
@@ -387,7 +388,8 @@ mod tests {
 
         let menus = menus(&commands);
         // Areas without a menu of their own come before the last menus, and
-        // the mixer's commands all need arguments.
+        // the mixer's commands need arguments, but for Clear Peaks, which
+        // the Transport menu has.
         assert_eq!(
             titles(&menus),
             [
