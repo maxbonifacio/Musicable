@@ -95,6 +95,7 @@ Musicable closes.
 | `plugins.json` | What the plugin scans found, so the next start has the plugins at once and scans only what changed ([Plugins](../using/plugins.md#finding-them)). Deleting it makes the next scan load every plugin again. |
 | `library.json` | The browser's library: the folders of samples you added, what's in them, and your tags ([The browser](../window/browser.md#the-library)). Deleting it empties the library, tags and all. |
 | `musicable.log` and `musicable.old.log` | What went wrong while Musicable ran ([Troubleshooting](../reference/troubleshooting.md#the-log-file)). |
+| `command logs` | The commands each session ran, the latest 20 sessions ([Troubleshooting](../reference/troubleshooting.md#the-command-log)). |
 | `agents` | On macOS and Linux, the pipe agents connect through. |
 
 The keymap, the mouse map, the workspaces and the settings that go with a

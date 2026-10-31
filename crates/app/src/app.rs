@@ -254,6 +254,9 @@ impl App {
         ));
         session.set_preview_gain(settings.browser.preview_gain());
         session.set_lead(settings.audio.render_ahead.lead());
+        if let Some(dir) = &config_dir {
+            session.command_log_mut().write_to(dir);
+        }
         let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
         let theme_file = UserTheme::new(
             config_dir.as_ref().map(|dir| dir.join(THEMES_FOLDER)),

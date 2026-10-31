@@ -263,7 +263,7 @@ fn panicked(info: &PanicHookInfo) -> String {
 }
 
 /// `time` in UTC to the millisecond, as in `2026-10-25T00:50:21.123Z`.
-fn utc(time: SystemTime) -> String {
+pub(crate) fn utc(time: SystemTime) -> String {
     let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
     let (days, seconds) = (since.as_secs() / 86_400, since.as_secs() % 86_400);
     // Howard Hinnant's `civil_from_days`: the date `days` days after

@@ -48,6 +48,7 @@ pub const GET_PLUGINS: &str = "get_plugins";
 pub const GET_LAYOUT: &str = "get_layout";
 pub const GET_LEVELS: &str = "get_levels";
 pub const WAIT_FOR: &str = "wait_for";
+pub const GET_COMMAND_LOG: &str = "get_command_log";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -405,6 +406,33 @@ pub fn list() -> Vec<Tool> {
             object(json!({}), &[]),
         ),
         read(
+            GET_COMMAND_LOG,
+            "Get Command Log",
+            "Reads the commands run this session, oldest first: the user's, from the menus, keys \
+             and panels, and agents', each with its number n, its time in UTC, by, user or the \
+             agent's name, the command and its args, or for run_commands the batch's name and \
+             its commands, and the error, if it failed. It gives the last 100 unless last says, \
+             and with since, only those after that number, to read what ran since the last call. \
+             count says how many have run, and file where the session's log is, one entry a \
+             line, which outlasts the app.",
+            object(
+                json!({
+                    "since": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "The number n of the entry to read after.",
+                    },
+                    "last": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": LONGEST_LOG,
+                        "description": "The most entries to give, the latest: 100 unless it says.",
+                    },
+                }),
+                &[],
+            ),
+        ),
+        read(
             LIST_AUDIO_DEVICES,
             "List Audio Devices",
             "Lists the audio devices again, as the Audio settings and the mixer's input menus \
@@ -483,6 +511,7 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_MODULATOR => &["modulator"],
         GET_AUTOMATION => &["param"],
         GET_MESSAGES => &["clear"],
+        GET_COMMAND_LOG => &["since", "last"],
         GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
         | LIST_AUDIO_DEVICES | GET_LAYOUT | GET_LEVELS => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
@@ -538,6 +567,11 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_PLUGINS => Asked::Plugins(optional_text(arguments, "filter")?),
         GET_LAYOUT => Asked::Layout,
         GET_LEVELS => Asked::Levels,
+        GET_COMMAND_LOG => Asked::CommandLog {
+            since: optional_number(arguments, "since", u64::MAX)?,
+            last: optional_number(arguments, "last", LONGEST_LOG)?
+                .map_or(LOG, |last| last as usize),
+        },
         GET_MODULATOR => Asked::Modulator(ModulatorId(id(arguments, "modulator")?)),
         GET_AUTOMATION => {
             let param = text(arguments, "param")?;
@@ -617,6 +651,24 @@ fn flag(arguments: &JsonObject, name: &str) -> Result<bool, Refused> {
         None | Some(Json::Null) => Ok(false),
         Some(Json::Bool(on)) => Ok(*on),
         Some(_) => Err(Refused::Arguments(format!("{name} must be true or false."))),
+    }
+}
+
+/// How many entries of the command log `get_command_log` gives unless it
+/// says, and the most it can say.
+const LOG: usize = 100;
+const LONGEST_LOG: u64 = 10_000;
+
+/// The whole number `name`, up to `most`, if it's there.
+fn optional_number(arguments: &JsonObject, name: &str, most: u64) -> Result<Option<u64>, Refused> {
+    match arguments.get(name) {
+        None | Some(Json::Null) => Ok(None),
+        Some(number) => match number.as_u64() {
+            Some(number) if number <= most => Ok(Some(number)),
+            _ => Err(Refused::Arguments(format!(
+                "{name} must be a whole number, from 0 to {most}."
+            ))),
+        },
     }
 }
 
@@ -869,6 +921,31 @@ mod tests {
         assert_eq!(call(GET_LAYOUT, json!({})), Ok(Asked::Layout));
         assert_eq!(call(GET_LEVELS, json!({})), Ok(Asked::Levels));
         assert_eq!(
+            call(GET_COMMAND_LOG, json!({})),
+            Ok(Asked::CommandLog {
+                since: None,
+                last: 100
+            })
+        );
+        assert_eq!(
+            call(GET_COMMAND_LOG, json!({"since": 12, "last": 5})),
+            Ok(Asked::CommandLog {
+                since: Some(12),
+                last: 5
+            })
+        );
+        assert_eq!(
+            call(GET_COMMAND_LOG, json!({"last": 10_001})),
+            refused("last must be a whole number, from 0 to 10000.")
+        );
+        assert_eq!(
+            call(GET_COMMAND_LOG, json!({"since": -1})),
+            refused(&format!(
+                "since must be a whole number, from 0 to {}.",
+                u64::MAX
+            ))
+        );
+        assert_eq!(
             call(GET_PLUGINS, json!({"filter": "surge"})),
             Ok(Asked::Plugins(Some("surge".into())))
         );
@@ -894,7 +971,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 21);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

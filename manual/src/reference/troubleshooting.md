@@ -95,9 +95,18 @@ so the two hold the latest lines. The console Musicable was started from,
 if any, shows them too. Agents read it with `get_log`
 ([The command line](command-line.md#agents)).
 
+## The command log
+
+Musicable also keeps a log of each session's commands, in the
+`command logs` folder of its config folder: each command you ran from the
+menus, keys and panels, and each one an agent ran, with its arguments, the
+time in UTC, who ran it, and why it failed, if it did. Each session has a
+file of its own, named after the time it started, and the folder keeps the
+latest 20. Agents read this session's with `get_command_log`.
+
 ## Reporting a bug
 
 [Open an issue](https://github.com/maxbonifacio/Musicable/issues) on
 GitHub, with what you did, what happened and what you expected. Add the log
-file, and say which commit you built (`git log -1` in the source code's
+file and the session's command log, and say which commit you built (`git log -1` in the source code's
 folder prints it), on which system.

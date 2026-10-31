@@ -108,7 +108,9 @@ the window's question, or for you to change the project, then carry on,
 without asking you whether it's done. They can read the messages in
 the status bar, and clear them, as **Dismiss** (×) does. And they can read
 the [log file](troubleshooting.md#the-log-file), which `musicable mcp` reads
-itself, so they can see why Musicable stopped after it has.
+itself, so they can see why Musicable stopped after it has. They can read the
+[command log](troubleshooting.md#the-command-log) too: each command run this
+session, yours and theirs, with its arguments, and who ran it.
 
 Agents can read your settings and the audio devices there are, and change
 the settings the Settings window has, such as the audio device, its buffer

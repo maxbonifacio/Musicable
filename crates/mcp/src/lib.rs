@@ -86,6 +86,12 @@ enum Asked {
     Layout,
     /// The meters.
     Levels,
+    /// The commands run this session: those after the entry numbered
+    /// `since`, if it says, at most the `last`.
+    CommandLog {
+        since: Option<u64>,
+        last: usize,
+    },
     /// The messages the window shows the user, and whether to clear them
     /// once read.
     Messages {
@@ -415,6 +421,12 @@ pub trait Window {
         Json::Object(Map::new())
     }
 
+    /// The commands run this session, after the entry numbered `since`,
+    /// if it says, at most the `last`, as JSON.
+    fn command_log(&self, _since: Option<u64>, _last: usize) -> Json {
+        serde_json::json!({ "entries": [], "count": 0, "file": null })
+    }
+
     /// The settings, as the settings file has them, with the profile in
     /// use's, and what plays, as JSON.
     fn settings(&self) -> Json {
@@ -467,6 +479,7 @@ pub fn answer(call: Call, window: &mut impl Window) {
         Asked::Plugins(filter) => Ok(window.plugins(filter.as_deref())),
         Asked::Layout => Ok(window.layout()),
         Asked::Levels => Ok(window.levels()),
+        Asked::CommandLog { since, last } => Ok(window.command_log(since, last)),
         Asked::Messages { clear } => {
             let messages = window.messages();
             if clear {

@@ -169,7 +169,8 @@ impl App {
 
     /// Runs what an agent asked for, as a menu or a key runs it, and
     /// answers: at once, or once the user has said whether to save their
-    /// changes, or once an export has finished.
+    /// changes, or once an export has finished. The command log says the
+    /// agent ran it.
     fn run_for_agent(
         &mut self,
         run: Run,
@@ -177,6 +178,13 @@ impl App {
         ctx: &egui::Context,
         frame: &eframe::Frame,
     ) {
+        let agent = reply.agent().to_owned();
+        self.session.command_log_mut().set_by(Some(agent));
+        self.run_as_agent(run, reply, ctx, frame);
+        self.session.command_log_mut().set_by(None);
+    }
+
+    fn run_as_agent(&mut self, run: Run, reply: Reply, ctx: &egui::Context, frame: &eframe::Frame) {
         if self.pending.is_some() {
             return reply.failed(ASKING);
         }
@@ -594,6 +602,10 @@ impl musicable_mcp::Window for Agent<'_> {
 
     fn plugins(&self, filter: Option<&str>) -> serde_json::Value {
         self.app.plugins_for_agent(filter)
+    }
+
+    fn command_log(&self, since: Option<u64>, last: usize) -> serde_json::Value {
+        self.app.session.command_log().read(since, last)
     }
 
     fn layout(&self) -> serde_json::Value {

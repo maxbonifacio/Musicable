@@ -735,3 +735,60 @@ fn agents_wait_for_the_work_under_way_and_for_the_user() {
         Err("since goes with until changed.".to_owned())
     );
 }
+
+#[test]
+fn the_command_log_says_what_the_user_and_agents_ran() {
+    let dir = TempDir::new("agents-command-log");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let before = agent.call(&mut window, "get_command_log", json!({}));
+    let before = before.unwrap()["count"].as_u64().unwrap();
+
+    // The user adds a track, and the agent names it, then copies with
+    // nothing selected.
+    (window.state_mut().session)
+        .run(&musicable_commands::track::NEW_MIDI_TRACK)
+        .unwrap();
+    window.run();
+    let project = agent.call(&mut window, "get_project", json!({})).unwrap();
+    let track = project["tracks"][0]["id"].clone();
+    let rename = json!({"id": "track.rename", "args": {"track": track, "name": "Bass"}});
+    agent.call(&mut window, "run_command", rename).unwrap();
+    let copy = json!({"id": "edit.copy"});
+    let refused = agent.call(&mut window, "run_command", copy).unwrap_err();
+    assert!(refused.contains("doesn't apply now"), "{refused}");
+
+    let log = agent.call(&mut window, "get_command_log", json!({"since": before}));
+    let log = log.unwrap();
+    assert_eq!(log["count"], before + 3, "{log}");
+    let entries = log["entries"].as_array().unwrap();
+    let ran: Vec<(&str, &str)> = (entries.iter())
+        .map(|entry| {
+            (
+                entry["by"].as_str().unwrap(),
+                entry["command"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ran,
+        [
+            ("user", "track.new_midi_track"),
+            ("claude-code", "track.rename"),
+            ("claude-code", "edit.copy"),
+        ]
+    );
+    assert_eq!(entries[1]["args"], json!({"track": track, "name": "Bass"}));
+    let error = entries[2]["error"].as_str().unwrap_or_default();
+    assert!(error.contains("doesn't apply now"), "{log}");
+
+    // The session's file has them too, one a line.
+    let file = log["file"].as_str().expect("the log has a file");
+    let lines: Vec<Json> = (fs::read_to_string(file).unwrap().lines())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len() as u64, before + 3);
+    assert_eq!(lines.last(), entries.last());
+    assert!(Path::new(file).starts_with(dir.0.join("command logs")));
+}
