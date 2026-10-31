@@ -29,6 +29,7 @@ use musicable_mcp::local::{LocalTool, LocalTools};
 use serde_json::{Map, Value as Json, json};
 
 mod cli;
+mod compare;
 mod files;
 mod levels;
 #[cfg(test)]
@@ -57,9 +58,10 @@ pub struct AudioCommand {
     /// What it does, for `--help`, its tool's description and the manual.
     pub about: &'static str,
     pub params: Vec<Param>,
-    /// The parameter the command line takes without its name, before the
-    /// options: the files in `musicable audio info a.wav b.wav`.
-    pub positional: &'static str,
+    /// The parameters the command line takes without their names, before
+    /// the options, in order: the files in `musicable audio info a.wav
+    /// b.wav`. A list takes every file there, so it's the only one.
+    pub positional: &'static [&'static str],
     /// Whether it only reads files, writing none.
     pub read_only: bool,
     /// An example of its arguments on the command line, after its name, on
@@ -106,6 +108,7 @@ impl AudioCommand {
 pub fn commands() -> Vec<AudioCommand> {
     let mut commands = files::commands();
     commands.extend(levels::commands());
+    commands.extend(compare::commands());
     commands.sort_by_key(|command| command.id);
     commands
 }

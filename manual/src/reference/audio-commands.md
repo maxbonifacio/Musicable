@@ -3,8 +3,9 @@
 `musicable audio` works on audio files without opening Musicable: it cuts
 a stretch out of a file, joins files or loops one, converts a file to
 another sample rate, format or bit depth, makes it louder or quieter, and
-measures its loudness and peaks, or finds where its sound starts and its
-loudest moment. It reads and writes WAV, AIFF and FLAC files.
+measures its loudness and peaks, finds where its sound starts and its
+loudest moment, or compares two files: a take with the one before, or a
+recording with an export. It reads and writes WAV, AIFF and FLAC files.
 
 ```sh
 musicable audio cut take.wav --from 12.5 --length 4 --out loop.wav
@@ -18,7 +19,8 @@ you have open ([Agents](command-line.md#agents)).
 
 ## On the command line
 
-Each command takes its file, or its files, first, then its options:
+Each command takes its file, or its files, first, then its options.
+`compare` takes two, A and then B:
 
 - An option is `--name value`, such as `--fade-ms 10`, or `--name=value`.
 - An option that's true or false takes `--name` for true, and `--no-name`

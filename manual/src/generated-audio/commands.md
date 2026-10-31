@@ -2,6 +2,300 @@
 
 The examples run in a folder, `/music`, of three files: `tone.wav`, 2 seconds of stereo 24-bit 44.1 kHz audio, half a second of silence and then a 441 Hz tone at -12 dBFS for a second and at -6 dBFS for half a second; `loop.flac`, a second of four noise hits, in stereo 16-bit 44.1 kHz; and `voice.aif`, 1.5 seconds of a 240 Hz tone that swells and fades, in mono 32-bit floating point at 48 kHz.
 
+### compare
+
+**Compare Two Files**: `musicable audio compare A B [options]`, or the tool `audio_compare`.
+
+Says how B differs from A, which it's measured against: a render against a reference, or a recording against an export. It lines B up with A, matches B's level to A's, and takes A from it, then gives how far apart they were, the gain, how loud what's left is and where it's loudest, their loudness and their levels in three bands and 31 third octaves, how early or late B's onsets come against A's, and the clicks one has and the other doesn't. Their sample rates and channels must be the same, and each can have about 6 minutes of stereo at 48 kHz.
+
+| Option | Argument | What it's for |
+|---|---|---|
+| `A` | `a` | The file to measure against, by its path: a WAV, AIFF or FLAC file. Required. |
+| `B` | `b` | The file to measure, by its path: a WAV, AIFF or FLAC file. Required. |
+| `--align` | `align` | Lines B up with A first, where their samples correlate best. Without it, true: --no-align compares them frame for frame, from their starts. |
+| `--max-offset-ms <n>` | `max_offset_ms` | How far B may be from A, either way, in milliseconds, up to 10000. Without it, 1000. |
+| `--match-level` | `match_level` | Matches B's level to A's before taking A from it, with the gain that leaves the least. Without it, true: --no-match-level takes A from B as it is, as a recording that should play the export exactly needs. |
+| `--count <n>` | `count` | How many of the stretches where what's left is loudest to give, from 1 to 200. Without it, 5. |
+| `--click-db <n>` | `click_db` | How far a click's high frequencies must rise above those around it, in decibels. Without it, 20. |
+| `--at <n>` | `at` | A position in A, in seconds, to measure the high frequencies at, such as a slice's loop turn, where a click would be: on the command line, --at once for each. |
+
+It gives back:
+
+| Field | What it is |
+|---|---|
+| `a` | A's whole path. |
+| `b` | B's whole path. |
+| `sample_rate` | Their sample rate, in hertz. |
+| `channels` | Their channels. |
+| `identical` | Whether they have the same samples, every one, as they are: without being lined up or their levels matched. |
+| `a_frames` | A's length, in frames. |
+| `b_frames` | B's length, in frames. |
+| `length_difference_ms` | How much longer B is than A, in milliseconds. |
+| `offset_frames` | How much later B's sound comes than A's, in frames: early if negative. 0 with --no-align. |
+| `offset_ms` | The same, in milliseconds, to 3 places. |
+| `correlation` | How alike their samples are, lined up, from -1 to 1: 1 if B is A at another level. Null if either is silent where they overlap. |
+| `compared` | The stretch of A that B overlaps, lined up, which the rest measures. |
+| `compared.from` | Where it starts, in A. Its `seconds` and `frame`. |
+| `compared.to` | Where it ends, in A. Its `seconds` and `frame`. |
+| `compared.seconds` | How long it is. |
+| `a_lufs` | A's integrated loudness, in LUFS, all of it. |
+| `b_lufs` | B's, in LUFS, all of it, as it is. |
+| `loudness_difference_lu` | How much louder B is than A, in LU. |
+| `gain_db` | The gain that matched B's level to A's, in decibels: 0 with --no-match-level, and null if it had to turn B upside down. |
+| `residual_dbfs` | The RMS level of what's left, B lined up and matched, less A, in dBFS: null if nothing is. |
+| `residual_db` | The same, against A's RMS level over the stretch compared, in decibels: null if nothing is left, or A is silent. |
+| `loudest_residual` | The 100 ms stretches where what's left is loudest, loudest first: count of them. |
+| `loudest_residual[].from` | Where it starts, in A. Its `seconds` and `frame`. |
+| `loudest_residual[].to` | Where it ends, in A. Its `seconds` and `frame`. |
+| `loudest_residual[].residual_dbfs` | The RMS level of what's left there, in dBFS. |
+| `loudest_residual[].a_dbfs` | A's RMS level there, in dBFS. |
+| `bands` | Their levels in three bands. |
+| `bands[].band` | Which band it is. |
+| `bands[].a_dbfs` | A's level in the band, as an RMS level, in dBFS. |
+| `bands[].b_dbfs` | B's, once its level is matched. |
+| `bands[].difference_db` | How much louder B is in the band than A. |
+| `third_octaves` | Their levels in each third octave below half the sample rate. Below about 60 Hz, each takes a few of the spectrum's bins. |
+| `third_octaves[].centre_hz` | Its centre, in hertz, as IEC 61260 names it. |
+| `third_octaves[].a_dbfs` | A's level in the band, as an RMS level, in dBFS. |
+| `third_octaves[].b_dbfs` | B's, once its level is matched. |
+| `third_octaves[].difference_db` | How much louder B is in the band than A. |
+| `onsets` | How the timing of their onsets differs, B's lined up with A's. |
+| `onsets.a_count` | A's onsets. |
+| `onsets.b_count` | B's onsets. |
+| `onsets.matched` | Onsets of A's with one of B's within 50 ms. |
+| `onsets.median_lag_ms` | The median of how much later B's matched onsets come, in milliseconds: null if none matched. |
+| `onsets.mean_lag_ms` | The mean, in milliseconds: null if none matched. |
+| `onsets.earliest_lag_ms` | The earliest, in milliseconds: null if none matched. |
+| `onsets.latest_lag_ms` | The latest, in milliseconds: null if none matched. |
+| `onsets.lags` | Each matched pair, in order, the first 200. |
+| `onsets.lags[].at` | A's onset. Its `seconds` and `frame`. |
+| `onsets.lags[].lag_ms` | How much later B's comes, in milliseconds: early if negative. |
+| `clicks` | The clicks one file has and the other doesn't: high frequencies in what's left that rise click_db above those around them, peaking at -80 dBFS or louder. |
+| `clicks.count` | How many there are. |
+| `clicks.found` | Each of them, in order, the first 200. |
+| `clicks.found[].at` | Its peak, in A. Its `seconds` and `frame`. |
+| `clicks.found[].in` | Which file has it: the louder there. |
+| `clicks.found[].level_dbfs` | How loud its high frequencies peak, in dBFS. |
+| `clicks.found[].above_db` | How far they rise above the high frequencies around it. |
+| `clicks.found[].spread` | The share of its energy within 1 ms of its peak, of that within 5 ms, from 0 to 1: the nearer 1, the sharper it is. |
+| `at` | Each position at gave, in the order given. |
+| `at[].at` | The position, in A. Its `seconds` and `frame`. |
+| `at[].residual_peak_dbfs` | How loud the high frequencies of what's left peak within 2 ms of it, in dBFS. |
+| `at[].high_difference_db` | How much more energy B's high frequencies have than A's within 2 ms of it, in decibels: null if either has none. |
+
+For example,
+
+```sh
+musicable audio compare tone.wav take.wav
+```
+
+prints
+
+```text
+a: /music/tone.wav
+b: /music/take.wav
+sample_rate: 44100
+channels: 2
+identical: false
+a_frames: 88200
+b_frames: 88200
+length_difference_ms: 0.0
+offset_frames: 441
+offset_ms: 10.0
+correlation: 0.999997
+compared:
+  from: 0.0 s, frame 0
+  to: 1.99 s, frame 87759
+  seconds: 1.99
+a_lufs: -12.4
+b_lufs: -13.47
+loudness_difference_lu: -1.07
+gain_db: 1.0
+residual_dbfs: -67.38
+residual_db: -52.3
+loudest_residual:
+  - from: 1.1 s, frame 48510
+    to: 1.2 s, frame 52920
+    residual_dbfs: -54.4
+    a_dbfs: -16.81
+  - from: 1.7 s, frame 74970
+    to: 1.8 s, frame 79380
+    residual_dbfs: -106.88
+    a_dbfs: -10.77
+  - from: 1.8 s, frame 79380
+    to: 1.9 s, frame 83790
+    residual_dbfs: -106.9
+    a_dbfs: -10.79
+  - from: 1.6 s, frame 70560
+    to: 1.7 s, frame 74970
+    residual_dbfs: -106.9
+    a_dbfs: -10.79
+  - from: 1.5 s, frame 66150
+    to: 1.6 s, frame 70560
+    residual_dbfs: -106.91
+    a_dbfs: -10.8
+bands:
+  - band: low
+    a_dbfs: -55.14
+    b_dbfs: -55.14
+    difference_db: 0.0
+  - band: mid
+    a_dbfs: -15.91
+    b_dbfs: -15.91
+    difference_db: 0.0
+  - band: high
+    a_dbfs: -53.07
+    b_dbfs: -52.97
+    difference_db: 0.11
+third_octaves:
+  - centre_hz: 20.0
+    a_dbfs: -72.18
+    b_dbfs: -72.18
+    difference_db: 0.0
+  - centre_hz: 25.0
+    a_dbfs: -71.17
+    b_dbfs: -71.17
+    difference_db: 0.0
+  - centre_hz: 31.5
+    a_dbfs: -70.15
+    b_dbfs: -70.15
+    difference_db: 0.0
+  - centre_hz: 40.0
+    a_dbfs: -69.13
+    b_dbfs: -69.13
+    difference_db: 0.0
+  - centre_hz: 50.0
+    a_dbfs: -68.08
+    b_dbfs: -68.08
+    difference_db: 0.0
+  - centre_hz: 63.0
+    a_dbfs: -67.01
+    b_dbfs: -67.01
+    difference_db: 0.0
+  - centre_hz: 80.0
+    a_dbfs: -65.9
+    b_dbfs: -65.9
+    difference_db: 0.0
+  - centre_hz: 100.0
+    a_dbfs: -64.72
+    b_dbfs: -64.72
+    difference_db: 0.0
+  - centre_hz: 125.0
+    a_dbfs: -63.43
+    b_dbfs: -63.43
+    difference_db: 0.0
+  - centre_hz: 160.0
+    a_dbfs: -61.94
+    b_dbfs: -61.94
+    difference_db: 0.0
+  - centre_hz: 200.0
+    a_dbfs: -60.1
+    b_dbfs: -60.1
+    difference_db: 0.0
+  - centre_hz: 250.0
+    a_dbfs: -57.58
+    b_dbfs: -57.58
+    difference_db: 0.0
+  - centre_hz: 315.0
+    a_dbfs: -53.33
+    b_dbfs: -53.33
+    difference_db: 0.0
+  - centre_hz: 400.0
+    a_dbfs: -16.0
+    b_dbfs: -16.0
+    difference_db: 0.0
+  - centre_hz: 500.0
+    a_dbfs: -38.71
+    b_dbfs: -38.71
+    difference_db: 0.0
+  - centre_hz: 630.0
+    a_dbfs: -56.38
+    b_dbfs: -56.38
+    difference_db: 0.0
+  - centre_hz: 800.0
+    a_dbfs: -61.78
+    b_dbfs: -61.77
+    difference_db: 0.01
+  - centre_hz: 1000.0
+    a_dbfs: -64.61
+    b_dbfs: -64.59
+    difference_db: 0.02
+  - centre_hz: 1250.0
+    a_dbfs: -35.04
+    b_dbfs: -35.04
+    difference_db: 0.0
+  - centre_hz: 1600.0
+    a_dbfs: -78.84
+    b_dbfs: -78.05
+    difference_db: 0.79
+  - centre_hz: 2000.0
+    a_dbfs: -43.87
+    b_dbfs: -43.87
+    difference_db: 0.0
+  - centre_hz: 2500.0
+    a_dbfs: -72.79
+    b_dbfs: -72.46
+    difference_db: 0.33
+  - centre_hz: 3150.0
+    a_dbfs: -49.64
+    b_dbfs: -49.64
+    difference_db: 0.0
+  - centre_hz: 4000.0
+    a_dbfs: -53.92
+    b_dbfs: -53.91
+    difference_db: 0.0
+  - centre_hz: 5000.0
+    a_dbfs: -57.29
+    b_dbfs: -57.28
+    difference_db: 0.01
+  - centre_hz: 6300.0
+    a_dbfs: -58.05
+    b_dbfs: -58.03
+    difference_db: 0.01
+  - centre_hz: 8000.0
+    a_dbfs: -62.13
+    b_dbfs: -62.04
+    difference_db: 0.09
+  - centre_hz: 10000.0
+    a_dbfs: -63.97
+    b_dbfs: -63.77
+    difference_db: 0.2
+  - centre_hz: 12500.0
+    a_dbfs: -67.14
+    b_dbfs: -66.67
+    difference_db: 0.47
+  - centre_hz: 16000.0
+    a_dbfs: -68.24
+    b_dbfs: -67.59
+    difference_db: 0.65
+  - centre_hz: 20000.0
+    a_dbfs: -68.81
+    b_dbfs: -67.89
+    difference_db: 0.92
+onsets:
+  a_count: 2
+  b_count: 3
+  matched: 2
+  median_lag_ms: 0.0
+  mean_lag_ms: 0.0
+  earliest_lag_ms: 0.0
+  latest_lag_ms: 0.0
+  lags:
+    - at: 0.500023 s, frame 22051
+      lag_ms: 0.0
+    - at: 1.50034 s, frame 66165
+      lag_ms: 0.0
+clicks:
+  count: 1
+  found:
+    - at: 1.19 s, frame 52479
+      in: b
+      level_dbfs: -23.97
+      above_db: 96.03
+      spread: 1.0
+at: none
+```
+
 ### convert
 
 **Convert Audio File**: `musicable audio convert FILE [options]`, or the tool `audio_convert`.

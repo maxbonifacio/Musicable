@@ -211,6 +211,24 @@ impl From<AudioError> for AnalysisError {
     }
 }
 
+/// The onsets of `audio` alone, found as [`analyse`] finds them, to the
+/// sample, without its tempo, beats or pitch.
+pub fn onsets(audio: &mut dyn Audio) -> Result<Vec<Onset>, AudioError> {
+    let mut spectrum = flux::Spectrum::new(audio.sample_rate());
+    let mut chunk = vec![0.0; CHUNK];
+    let mut at = 0;
+    while at < audio.frames() {
+        let read = audio.read(at, &mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        spectrum.push(&chunk[..read]);
+        at += read as u64;
+    }
+    let flux = spectrum.finish();
+    onsets::refine(audio, &flux, &onsets::peaks(&flux))
+}
+
 /// Analyses `audio`, with `network` if there's one, calling `step` between
 /// the pieces of the work, as a job that keeps pace with the engine does:
 /// it says whether to go on. If the network fails, the classic tracker's

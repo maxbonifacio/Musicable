@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use musicable_commands::Param;
 use serde_json::Value as Json;
 
 use super::tests::{Folder, fixtures, texts, without_folder};
@@ -71,12 +72,19 @@ fn section(command: &AudioCommand, page: &mut String) {
 
     page.push_str("| Option | Argument | What it's for |\n|---|---|---|\n");
     // The files first, as the command line takes them.
-    let (first, rest): (Vec<_>, Vec<_>) =
-        (command.params.iter()).partition(|param| param.name == command.positional);
+    let first = |param: &&Param| command.positional.contains(&param.name.as_ref());
+    let (mut first, rest): (Vec<_>, Vec<_>) = command.params.iter().partition(first);
+    first.sort_by_key(|param| {
+        command
+            .positional
+            .iter()
+            .position(|name| *name == param.name)
+    });
     for param in first.into_iter().chain(rest) {
-        let option = match param.name == command.positional {
-            true => files.to_owned(),
-            false => cli::option(param),
+        let option = match command.positional {
+            [name] if *name == param.name => files.clone(),
+            names if names.contains(&param.name.as_ref()) => param.name.to_uppercase(),
+            _ => cli::option(param),
         };
         let about = match param.optional {
             true => param.about.to_string(),

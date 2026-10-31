@@ -215,6 +215,46 @@ starts, loudness range, and true peaks between samples, up to the bursts
 of cases 20 to 23. The audio commands' tests check the command gives the
 same through files.
 
+## Comparing two files
+
+`audio.compare` ([`toolkit/compare.rs`](../crates/app/src/toolkit/compare.rs))
+says how B differs from A, for checks that a render plays a reference, a
+recording an export, or one warp mode another. It holds both files in
+memory, as 32-bit floats, up to 2^25 samples each, and works on their
+channels mixed to one for all but the residual and the gain:
+
+- **Identical** compares every sample as the files store them, without
+  lining them up, so it's exact for any encoding.
+- **Lining up** finds the offset from -`max_offset_ms` to `max_offset_ms`
+  where B correlates best with A, normalised over where they overlap, and
+  leaving at least half of the shorter overlapping. The correlation is
+  found a block of A at a time against the stretch of B it can line up
+  with, through FFTs, so a long file with a large offset stays quick. On
+  ties, the offset nearest 0 wins.
+- **The gain** is the least-squares gain that leaves least of B less A,
+  over every channel where they overlap.
+- **What's left** is B, lined up and at that gain, less A: its RMS level,
+  against A's (`residual_db`), and the 100 ms stretches where it's
+  loudest.
+- **Bands** come from the mean power spectrum of each, over Hann windows
+  of 16384 frames (fewer for a short file) that overlap by half, summed
+  over the bands, each bin counting for the share of its width inside.
+  Levels are RMS levels, so a full-scale sine reads -3.01 dBFS.
+- **Onsets** are found in each as `analyse` finds them, through
+  `musicable_analysis::onsets`, and each of A's is matched with the
+  nearest of B's within 50 ms not taken already.
+- **Clicks** are found in the second difference of what's left, a
+  high-pass that rises 12 dB an octave: in blocks of 1 ms, a block whose
+  peak is `click_db` above the median of the blocks within 50 ms, and at
+  -80 dBFS or more, is a click, and clicks within 5 ms are one. Whichever
+  file's own second difference has more energy there has it. Its spread
+  is the share of its energy within 1 ms of its peak, of that within
+  5 ms.
+
+The partials' purity and beating, which the warping A/B rounds also
+measured with scripts, and the pitch difference come with the spectrum
+and pitch commands.
+
 ## In the app
 
 `analyses.rs` in the app asks for the analysis of every audio file the

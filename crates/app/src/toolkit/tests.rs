@@ -78,7 +78,8 @@ fn triangle(frame: usize, period: usize) -> f64 {
 
 /// The files the examples work on, in `folder`: `tone.wav`, 2 s of stereo
 /// 24-bit 44.1 kHz, silent for 0.5 s, then a 441 Hz tone at -12 dBFS for
-/// a second and at -6 dBFS for half a second; `loop.flac`, a second of
+/// a second and at -6 dBFS for half a second; `take.wav`, the same 10 ms
+/// later and 1 dB quieter, with a click at 1.2 s; `loop.flac`, a second of
 /// stereo 16-bit 44.1 kHz noise hits, four of them; and `voice.aif`, 1.5 s
 /// of mono 32-bit float 48 kHz, a 240 Hz tone that swells and fades.
 pub(super) fn fixtures(folder: &Path) {
@@ -99,6 +100,25 @@ pub(super) fn fixtures(folder: &Path) {
         44_100,
         2,
         &tone,
+    );
+    // The tone 10 ms later and 1 dB quieter, with a click at 1.2 s.
+    let quieter = 10f64.powf(-1.0 / 20.0);
+    let take: Vec<f64> = (0..88_200)
+        .flat_map(|i| {
+            let sample = match i {
+                52_920 => 0.3,
+                ..441 => 0.0,
+                i => quieter * tone[2 * (i - 441)],
+            };
+            [sample, sample]
+        })
+        .collect();
+    write(
+        &folder.join("take.wav"),
+        SampleFormat::Int24,
+        44_100,
+        2,
+        &take,
     );
     let mut noise = Noise(0x5EED);
     let hits: Vec<f64> = (0..44_100)
@@ -170,7 +190,7 @@ fn run(id: &str, words: &[&str], folder: &Path) -> Result<Json, String> {
 }
 
 /// The arguments the paths in which are file names in `folder`.
-const PATH_ARGUMENTS: [&str; 4] = ["file", "files", "out", "like"];
+const PATH_ARGUMENTS: [&str; 6] = ["file", "files", "out", "like", "a", "b"];
 
 /// `arguments` with the file names in them made whole paths in `folder`.
 fn in_folder(mut arguments: Map<String, Json>, folder: &Path) -> Map<String, Json> {
@@ -363,6 +383,7 @@ fn commands_have_ids_tools_and_schemas_of_their_own() {
     assert_eq!(
         ids,
         [
+            "audio.compare",
             "audio.convert",
             "audio.cut",
             "audio.find",
@@ -374,12 +395,10 @@ fn commands_have_ids_tools_and_schemas_of_their_own() {
     );
     for command in &commands {
         assert!(command.tool().starts_with("audio_"));
-        assert!(
-            command
-                .params
-                .iter()
-                .any(|param| param.name == command.positional)
-        );
+        for name in command.positional {
+            let param = command.params.iter().find(|param| param.name == *name);
+            assert!(param.is_some_and(|param| !param.optional), "{}", command.id);
+        }
         let input = command.input_schema();
         assert_eq!(input["type"], "object");
         assert_eq!(input["additionalProperties"], false);
@@ -390,7 +409,7 @@ fn commands_have_ids_tools_and_schemas_of_their_own() {
     }
     let catalogue = super::catalogue();
     assert_eq!(catalogue.as_array().unwrap().len(), commands.len());
-    assert_eq!(catalogue[1]["tool"], "audio_cut");
+    assert_eq!(catalogue[2]["tool"], "audio_cut");
     let tools = Tools.tools();
     assert_eq!(tools.len(), commands.len());
     assert!(Tools.instructions().contains("audio_info"));
@@ -1350,4 +1369,124 @@ fn text_for_people_has_each_field_on_a_line_in_the_schema_s_order() {
                 result["out"]["audio_md5"].as_str().unwrap()
             )
     );
+}
+
+#[test]
+fn compare_lines_two_files_up_matches_their_levels_and_finds_a_click() {
+    let folder = Folder::new("compare");
+    fixtures(&folder.0);
+    let take = run("audio.compare", &["tone.wav", "take.wav"], &folder.0).unwrap();
+    assert_eq!(take["identical"], false);
+    assert_eq!(take["offset_frames"], 441);
+    assert_eq!(take["offset_ms"], 10.0);
+    assert_eq!(take["compared"]["from"]["frame"], 0);
+    assert_eq!(take["compared"]["to"]["frame"], 88_200 - 441);
+    let gain = take["gain_db"].as_f64().unwrap();
+    assert!((gain - 1.0).abs() < 0.05, "{gain}");
+    let mid = take["bands"][1]["difference_db"].as_f64().unwrap();
+    assert!(mid.abs() < 0.05, "{mid}");
+    // The click is all that's left, so it's where what's left is loudest.
+    assert_eq!(take["clicks"]["count"], 1, "{take:#}");
+    let click = &take["clicks"]["found"][0];
+    assert_eq!(click["at"]["frame"], 52_920 - 441);
+    assert_eq!(click["in"], "b");
+    assert!(click["spread"].as_f64().unwrap() > 0.9);
+    let loudest = &take["loudest_residual"][0];
+    assert!(loudest["from"]["frame"].as_u64().unwrap() <= 52_479);
+    assert!(loudest["to"]["frame"].as_u64().unwrap() > 52_479);
+    // The tone starts in both at the same time, once they're lined up.
+    let onsets = &take["onsets"];
+    assert!(onsets["matched"].as_u64().unwrap() >= 1, "{onsets:#}");
+    assert!(onsets["median_lag_ms"].as_f64().unwrap().abs() < 0.5);
+
+    let at = run(
+        "audio.compare",
+        &["tone.wav", "take.wav", "--at", "1.19", "--at", "0.7"],
+        &folder.0,
+    )
+    .unwrap();
+    let click = at["at"][0]["high_difference_db"].as_f64().unwrap();
+    let tone = at["at"][1]["high_difference_db"].as_f64().unwrap();
+    assert!(click > 15.0 && tone.abs() < 0.5, "{click} {tone}");
+
+    // Unaligned and unmatched, B is 10 ms late and 1 dB down.
+    let unaligned = run(
+        "audio.compare",
+        &["tone.wav", "take.wav", "--no-align", "--no-match-level"],
+        &folder.0,
+    )
+    .unwrap();
+    assert_eq!(unaligned["offset_frames"], 0);
+    assert_eq!(unaligned["gain_db"], 0.0);
+    let lag = unaligned["onsets"]["median_lag_ms"].as_f64().unwrap();
+    assert!((lag - 10.0).abs() < 0.5, "{lag}");
+    let loudness = unaligned["loudness_difference_lu"].as_f64().unwrap();
+    assert!((loudness + 1.0).abs() < 0.1, "{loudness}");
+
+    let same = run("audio.compare", &["tone.wav", "tone.wav"], &folder.0).unwrap();
+    assert_eq!(same["identical"], true);
+    assert_eq!(same["offset_frames"], 0);
+    assert_eq!(same["correlation"], 1.0);
+    assert_eq!(same["residual_dbfs"], Json::Null);
+    assert_eq!(same["clicks"]["count"], 0);
+
+    assert_eq!(
+        run("audio.compare", &["tone.wav", "voice.aif"], &folder.0),
+        Err(
+            "A is at 44100 Hz and B at 48000 Hz: convert one to the other's rate with \
+             audio.convert first."
+                .to_owned()
+        )
+    );
+    assert!(run("audio.compare", &["tone.wav"], &folder.0).is_err());
+}
+
+#[test]
+fn compare_finds_onsets_that_come_early() {
+    let folder = Folder::new("compare-early");
+    // Hits every half second, and the same 3 ms early.
+    let mut noise = Noise(0xC11C);
+    let noise: Vec<f64> = (0..88_200 + 132).map(|_| noise.next()).collect();
+    let hits = |early: usize| -> Vec<f64> {
+        (0..88_200)
+            .flat_map(|i| {
+                let j = i + early;
+                let level = match j < 22_050 {
+                    true => 0.0,
+                    false => 0.7 * (1.0 - (j % 22_050) as f64 / 4410.0).max(0.0),
+                };
+                let sample = level * noise[j];
+                [sample, sample]
+            })
+            .collect()
+    };
+    write(
+        &folder.path("a.wav"),
+        SampleFormat::Float32,
+        44_100,
+        2,
+        &hits(0),
+    );
+    write(
+        &folder.path("b.wav"),
+        SampleFormat::Float32,
+        44_100,
+        2,
+        &hits(132),
+    );
+    let early = run(
+        "audio.compare",
+        &["a.wav", "b.wav", "--no-align"],
+        &folder.0,
+    )
+    .unwrap();
+    let onsets = &early["onsets"];
+    assert_eq!(onsets["matched"], 3, "{onsets:#}");
+    let lag = onsets["median_lag_ms"].as_f64().unwrap();
+    assert!((lag + 3.0).abs() < 0.2, "{lag}");
+    // Lined up, they're the same.
+    let lined_up = run("audio.compare", &["a.wav", "b.wav"], &folder.0).unwrap();
+    assert_eq!(lined_up["offset_frames"], -132);
+    assert_eq!(lined_up["residual_dbfs"], Json::Null);
+    assert_eq!(lined_up["onsets"]["median_lag_ms"], 0.0);
 }

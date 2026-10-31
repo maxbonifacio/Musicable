@@ -27,7 +27,7 @@ fn info() -> AudioCommand {
                 sample rate and length, its peak, the tempo its ACID chunk gives, and the MD5 \
                 of its samples.",
         params: vec![FILES],
-        positional: "files",
+        positional: &["files"],
         read_only: true,
         example: &["tone.wav", "loop.flac", "voice.aif"],
         run: |args, job| {
@@ -67,7 +67,7 @@ fn cut() -> AudioCommand {
                 at from or from_frame, and ends at to or to_frame, or after length or \
                 length_frames: seconds, or frames for a cut to the frame.",
         params,
-        positional: "file",
+        positional: &["file"],
         read_only: false,
         example: &[
             "tone.wav", "--from", "0.5", "--length", "1", "--out", "cut.wav",
@@ -209,7 +209,7 @@ fn join() -> AudioCommand {
             ),
             OVERWRITE,
         ],
-        positional: "files",
+        positional: &["files"],
         read_only: false,
         example: &[
             "loop.flac",
@@ -461,7 +461,7 @@ fn convert() -> AudioCommand {
             ),
             OVERWRITE,
         ],
-        positional: "file",
+        positional: &["file"],
         read_only: false,
         example: &[
             "tone.wav",
@@ -659,7 +659,7 @@ fn gain() -> AudioCommand {
             ),
             OVERWRITE,
         ],
-        positional: "file",
+        positional: &["file"],
         read_only: false,
         example: &["voice.aif", "--to-lufs", "-23", "--out", "voice-23.wav"],
         run: run_gain,

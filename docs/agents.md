@@ -189,8 +189,8 @@ and the file commands run alone, never among others.
 
 `musicable mcp` also has a tool for each audio command, which works on
 audio files rather than the project: `audio_info`, `audio_cut`,
-`audio_join`, `audio_convert`, `audio_gain`, `audio_loudness` and
-`audio_find`. It runs them itself, so they work while Musicable is closed
+`audio_join`, `audio_convert`, `audio_gain`, `audio_loudness`,
+`audio_find` and `audio_compare`. It runs them itself, so they work while Musicable is closed
 or doesn't let agents in, and they never touch the open project. People
 run the same commands as `musicable audio <command>`, and the
 [manual](../manual/src/reference/audio-commands.md) describes each one, on
@@ -227,7 +227,9 @@ a page made from the code.
   mono file stereo copy them exactly, read the new file back, and say
   whether it's `exact`.
 
-Loudness is measured as [analysis.md](analysis.md#loudness) describes.
+Loudness is measured as [analysis.md](analysis.md#loudness) describes,
+and `audio_compare` compares files as
+[analysis.md](analysis.md#comparing-two-files) does.
 
 ## `musicable api`
 
