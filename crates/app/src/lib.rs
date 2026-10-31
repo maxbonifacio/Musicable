@@ -8,6 +8,7 @@ mod appearance_page;
 mod audio_files;
 mod audio_page;
 pub mod bridge_tools;
+mod command_log;
 pub mod export;
 mod export_window;
 mod frame_times;
