@@ -236,10 +236,9 @@ channels mixed to one for all but the residual and the gain:
 - **What's left** is B, lined up and at that gain, less A: its RMS level,
   against A's (`residual_db`), and the 100 ms stretches where it's
   loudest.
-- **Bands** come from the mean power spectrum of each, over Hann windows
-  of 16384 frames (fewer for a short file) that overlap by half, summed
-  over the bands, each bin counting for the share of its width inside.
-  Levels are RMS levels, so a full-scale sine reads -3.01 dBFS.
+- **Bands** come from the mean power spectrum of each, taken as
+  [Spectra](#spectra) describes, summed over the bands. Levels are RMS
+  levels, so a full-scale sine reads -3.01 dBFS.
 - **Onsets** are found in each as `analyse` finds them, through
   `musicable_analysis::onsets`, and each of A's is matched with the
   nearest of B's within 50 ms not taken already.
@@ -251,9 +250,46 @@ channels mixed to one for all but the residual and the gain:
   is the share of its energy within 1 ms of its peak, of that within
   5 ms.
 
-The partials' purity and beating, which the warping A/B rounds also
-measured with scripts, and the pitch difference come with the spectrum
-and pitch commands.
+The pitch difference comes with the pitch command.
+
+`audio.match` lines files up with a reference as compare does, measures
+each one's integrated loudness lined up, over the reference's length, and
+writes each, and the reference, again into a folder, as long as the
+reference and at one loudness: the quietest's, the loudest's, or one
+given. It reads each file twice, once to measure and once to write, so
+it holds one file and the reference at a time.
+
+## Spectra
+
+`toolkit/spectra.rs` takes a sound's mean power spectrum a block at a
+time, by Welch's method, as compare's bands and `audio.spectrum` need:
+Hann windows of the power of two nearest 0.3 s above it, 16384 frames at
+44.1 and 48 kHz, overlapping by half, scaled so the bins add up to the
+mean square. A sound shorter than a window has one window of the largest
+power of two that fits. `audio.spectrum` averages its channels' spectra,
+and from them gives:
+
+- levels in IEC 61260's third octaves or octaves, each bin counting for
+  the share of its width in the band;
+- the centroid and the 85% roll-off, without the DC, and the flatness from
+  20 Hz to 20 kHz: the geometric mean of the bins over their arithmetic
+  mean;
+- the strongest peaks, bins higher than the 4 either side, placed between
+  bins by a parabola through their decibels, with the power of the 5 bins
+  around, which hold a tone's, and the note nearest each;
+- given a pitch, each harmonic's level, half the pitch either way, and its
+  purity, the share of that within 2.5 bins of it. Its beating comes from
+  the channels' mean turned down by the harmonic's frequency and
+  low-passed by four one-poles at a quarter of the pitch or 25 Hz,
+  whichever is lower: the envelope that leaves, read every 10 ms, ripples
+  as a partial split in two beats. Beating is the ripple from the
+  envelope's 10th percentile to its 90th. Harmonics 60 dB or more below
+  the loudest have neither.
+
+`audio.generate` writes the signals the tests and checks measure. Noise
+is xorshift64*, seeded by SplitMix64, a stream to each channel, and pink
+noise is Paul Kellet's filter on it, scaled to its RMS level by a first
+pass over the same noise.
 
 ## In the app
 

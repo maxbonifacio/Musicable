@@ -83,7 +83,7 @@ fn section(command: &AudioCommand, page: &mut String) {
     for param in first.into_iter().chain(rest) {
         let option = match command.positional {
             [name] if *name == param.name => files.clone(),
-            names if names.contains(&param.name.as_ref()) => param.name.to_uppercase(),
+            names if names.contains(&param.name.as_ref()) => cli::first(command, &param.name),
             _ => cli::option(param),
         };
         let about = match param.optional {

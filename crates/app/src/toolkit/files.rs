@@ -421,7 +421,7 @@ fn run_join(args: &Args, job: &Job) -> Result<Json, String> {
 }
 
 /// The encodings `audio.convert` writes.
-const ENCODINGS: &[&str] = &["int8", "int16", "int24", "int32", "float32", "float64"];
+pub(super) const ENCODINGS: &[&str] = &["int8", "int16", "int24", "int32", "float32", "float64"];
 
 fn convert() -> AudioCommand {
     AudioCommand {
@@ -594,7 +594,7 @@ fn run_convert(args: &Args, job: &Job) -> Result<Json, String> {
 }
 
 /// The sample format `audio.convert`'s encoding names.
-fn sample_format_named(name: &str) -> SampleFormat {
+pub(super) fn sample_format_named(name: &str) -> SampleFormat {
     use SampleFormat::{Float32, Float64, Int8, Int16, Int24, Int32};
     ([Int8, Int16, Int24, Int32, Float32, Float64].into_iter())
         .find(|sample_format| sample_format.name() == name)

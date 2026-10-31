@@ -512,6 +512,59 @@ out:
   audio_md5: 1dca2c0be141df77597125cfa7809651
 ```
 
+### generate
+
+**Generate Test Signal**: `musicable audio generate FILE [options]`, or the tool `audio_generate`.
+
+Writes a test signal: a sine; a sweep, rising exponentially from one pitch to another; white or pink noise; clicks at a tempo, each a 2 kHz tone that starts at its peak on the beat and dies away in about 5 ms; an impulse, a single sample at the start; or silence. Each channel's noise is its own, and the same for the same seed. Sines, sweeps, clicks and impulses peak at level_dbfs, and noise has it as its RMS level.
+
+| Option | Argument | What it's for |
+|---|---|---|
+| `FILE` | `out` | Where to write the new file, by its path. Its extension says the format: .wav, .aif or .flac. Required. |
+| `--signal <sine\|sweep\|noise\|pink\|clicks\|impulse\|silence>` | `signal` | The signal to write. Required. |
+| `--seconds <n>` | `seconds` | How long it is, in seconds, up to 3600. Without it, 1. |
+| `--level-dbfs <n>` | `level_dbfs` | Its peak, or noise's RMS level, in dBFS. Without it, -12. |
+| `--hz <n>` | `hz` | A sine's pitch, in hertz. Without it, 1000. |
+| `--from-hz <n>` | `from_hz` | Where a sweep starts, in hertz. Without it, 20. |
+| `--to-hz <n>` | `to_hz` | Where a sweep ends, in hertz. Without it, 20000, or just below half the sample rate. |
+| `--bpm <n>` | `bpm` | The clicks' tempo, in beats a minute, the first on the first frame. Without it, 120. |
+| `--rate <n>` | `rate` | The sample rate, in hertz, from 1000 to 768000. Without it, 48000. |
+| `--channels <n>` | `channels` | How many channels, from 1 to 8. Without it, 2. |
+| `--encoding <int8\|int16\|int24\|int32\|float32\|float64>` | `encoding` | How to store the samples: int8 to int32 for integers of that many bits, or float32 or float64. Without it, float32, or int24 in a FLAC file. |
+| `--seed <n>` | `seed` | The noise's seed: the same seed makes the same noise. Without it, 1. |
+| `--dither` | `dither` | Dithers samples written as integers, so what rounding loses is noise, not distortion. Without it, false, so silence stays silent. |
+| `--overwrite` | `overwrite` | Writes over a file at out. Without it, a file there stops the command. |
+
+It gives back:
+
+| Field | What it is |
+|---|---|
+| `signal` | Which signal it is. |
+| `out` | The new file. Its fields are those `info` gives. |
+
+For example,
+
+```sh
+musicable audio generate sweep.wav --signal sweep --seconds 0.5
+```
+
+prints
+
+```text
+signal: sweep
+out:
+  file: /music/sweep.wav
+  format: wav
+  encoding: float32
+  channels: 2
+  sample_rate: 48000
+  frames: 24000
+  seconds: 0.5
+  peak_dbfs: -12.0
+  acid_bpm: none
+  audio_md5: 544cc33d34aeee468e8ab450b06274f5
+```
+
 ### info
 
 **Describe Audio Files**: `musicable audio info FILE... [options]`, or the tool `audio_info`.
@@ -707,4 +760,217 @@ files:
     rms_dbfs: -13.98
     dc_offset: 0.0
     clipped_samples: 0
+```
+
+### match
+
+**Match Files to a Reference**: `musicable audio match REFERENCE FILES... [options]`, or the tool `audio_match`.
+
+Lines files up with a reference and matches their loudness, as blind pairs need: each file, and the reference, is written again into out_dir, under its own name, starting where the reference does and as long, with silence where it has none, and at one integrated loudness: the quietest's, the loudest's, or to_lufs. A file is lined up where its samples correlate best with the reference's, as audio.compare lines files up, and measured once it is, over the reference's length. Each must have the reference's sample rate and channels.
+
+| Option | Argument | What it's for |
+|---|---|---|
+| `REFERENCE` | `reference` | The file to line the others up with, by its path: a WAV, AIFF or FLAC file. Required. |
+| `FILES...` | `files` | The audio files to read, by their paths: WAV, AIFF or FLAC files, 200 at most. Required. |
+| `--out-dir <path>` | `out_dir` | The folder to write the files into, by its path. Each keeps its name and its format. Required. |
+| `--loudness <quietest\|loudest>` | `loudness` | Which loudness to bring them all to: the quietest's, which needs no file louder than it was, or the loudest's. Without it or to_lufs, quietest. |
+| `--to-lufs <n>` | `to_lufs` | The integrated loudness to bring them all to, in LUFS, instead. |
+| `--align` | `align` | Lines each file up with the reference. Without it, true: --no-align leaves them where they start. |
+| `--max-offset-ms <n>` | `max_offset_ms` | How far a file may be from the reference, either way, in milliseconds, up to 10000. Without it, 1000. |
+| `--dither` | `dither` | Dithers samples written as integers, so what rounding loses is noise, not distortion. Without it, true. |
+| `--overwrite` | `overwrite` | Writes over a file at out. Without it, a file there stops the command. |
+
+It gives back:
+
+| Field | What it is |
+|---|---|
+| `target_lufs` | The loudness they were brought to, in LUFS. |
+| `reference` | A file, lined up and matched. |
+| `reference.file` | Its whole path. |
+| `reference.offset_frames` | How much later its sound came than the reference's, in frames: early if negative. |
+| `reference.offset_ms` | The same, in milliseconds, to 3 places. |
+| `reference.correlation` | How alike its samples are to the reference's, lined up, from -1 to 1: null if either is silent where they overlap. |
+| `reference.lufs` | Its integrated loudness, lined up, before the gain, in LUFS. |
+| `reference.gain_db` | The gain it was given, in decibels. |
+| `reference.clipped_samples` | Samples the gain took beyond full scale, which integers clip, and floats keep. |
+| `reference.out` | The file written. Its fields are those `info` gives. |
+| `files` | Each file, in the order given. One the command couldn't read or write has only its `file` and an `error`, which says why. |
+| `files[].file` | Its whole path. |
+| `files[].offset_frames` | How much later its sound came than the reference's, in frames: early if negative. |
+| `files[].offset_ms` | The same, in milliseconds, to 3 places. |
+| `files[].correlation` | How alike its samples are to the reference's, lined up, from -1 to 1: null if either is silent where they overlap. |
+| `files[].lufs` | Its integrated loudness, lined up, before the gain, in LUFS. |
+| `files[].gain_db` | The gain it was given, in decibels. |
+| `files[].clipped_samples` | Samples the gain took beyond full scale, which integers clip, and floats keep. |
+| `files[].out` | The file written. Its fields are those `info` gives. |
+
+For example,
+
+```sh
+musicable audio match tone.wav take.wav --out-dir matched
+```
+
+prints
+
+```text
+target_lufs: -13.42
+reference:
+  file: /music/tone.wav
+  offset_frames: 0
+  offset_ms: 0.0
+  correlation: 1.0
+  lufs: -12.4
+  gain_db: -1.02
+  clipped_samples: 0
+  out:
+    file: /music/matched/tone.wav
+    format: wav
+    encoding: int24
+    channels: 2
+    sample_rate: 44100
+    frames: 88200
+    seconds: 2.0
+    peak_dbfs: -7.04
+    acid_bpm: none
+    audio_md5: f19cdc4a701724e61293f59f2f26f3fa
+files:
+  - file: /music/take.wav
+    offset_frames: 441
+    offset_ms: 10.0
+    correlation: 0.999997
+    lufs: -13.42
+    gain_db: 0.0
+    clipped_samples: 0
+    out:
+      file: /music/matched/take.wav
+      format: wav
+      encoding: int24
+      channels: 2
+      sample_rate: 44100
+      frames: 88200
+      seconds: 2.0
+      peak_dbfs: -7.02
+      acid_bpm: none
+      audio_md5: 28a86933a2395cc36198c509b41e6be7
+```
+
+### spectrum
+
+**Measure Spectrum**: `musicable audio spectrum FILE [options]`, or the tool `audio_spectrum`.
+
+Measures a file's mean spectrum, its channels' power averaged, over Hann windows of about 0.3 s that overlap by half: its levels in third octaves or octaves, the centre of its power, where 85% of it is below, how flat it is, and its strongest peaks, each with the note nearest it. Given a pitch, it follows its harmonics too, up to 32 of them: each one's level, how pure it is and how much it beats. With from or to, it measures that stretch of the file.
+
+| Option | Argument | What it's for |
+|---|---|---|
+| `FILE` | `file` | The audio file to read, by its path: a WAV, AIFF or FLAC file. Required. |
+| `--bands <third_octaves\|octaves>` | `bands` | The bands to give the levels of: third_octaves, 31 from 20 Hz to 20 kHz, or octaves, 10 from 31.5 Hz to 16 kHz. Without it, third_octaves. |
+| `--peaks <n>` | `peaks` | How many of the strongest peaks to give, from 0 to 200. Without it, 10. |
+| `--fundamental-hz <n>` | `fundamental_hz` | A pitch, in hertz, whose partials to follow: how loud each harmonic is, how much of the power around it is on it, and how much its level ripples, as two partials close together beat. Give a stretch where the note is held. |
+| `--partials <n>` | `partials` | How many of fundamental_hz's harmonics to follow, from 1 to 32. Without it, 16. |
+| `--from <n>` | `from` | Where the stretch starts, in seconds from the start of the file. Without it or from_frame, it starts where the file does. |
+| `--to <n>` | `to` | Where the stretch ends, in seconds from the start of the file. Without it or to_frame, it ends where the file does. |
+| `--from-frame <n>` | `from_frame` | Where the stretch starts, in frames from the start of the file, instead of from. |
+| `--to-frame <n>` | `to_frame` | Where the stretch ends, in frames from the start of the file, instead of to. |
+
+It gives back:
+
+| Field | What it is |
+|---|---|
+| `file` | Its whole path. |
+| `from` | Where the stretch measured starts. Its `seconds` and `frame`. |
+| `to` | Where it ends. Its `seconds` and `frame`. |
+| `seconds` | How long it is. |
+| `bin_hz` | How far apart the spectrum's bins are, in hertz: how finely it tells frequencies apart. |
+| `rms_dbfs` | Its RMS level, its channels' power averaged, in dBFS. |
+| `centroid_hz` | The centre of its power, in hertz: null for silence. |
+| `rolloff_hz` | The frequency 85% of its power is below: null for silence. |
+| `flatness` | How flat its spectrum is from 20 Hz to 20 kHz, from 0 to 1: 1 for white noise, near 0 for a tone. Null for silence. |
+| `bands` | Its level in each band below half the sample rate. |
+| `bands[].centre_hz` | Its centre, in hertz, as IEC 61260 names it. |
+| `bands[].dbfs` | Its level, as an RMS level, in dBFS: a full-scale sine reads -3.01. |
+| `peaks` | Its strongest peaks, strongest first. |
+| `peaks[].hz` | Its frequency, in hertz, to 2 places. |
+| `peaks[].dbfs` | Its level, as an RMS level, in dBFS. |
+| `peaks[].note` | The note nearest it, such as A4 for 440 Hz: middle C is C4. |
+| `peaks[].cents` | How far above that note it is, in cents: below if negative. |
+| `partials` | The harmonics of fundamental_hz below half the sample rate and 20 kHz, as many as partials says: none without it. |
+| `partials[].number` | Which harmonic it is: 1 is the pitch itself. |
+| `partials[].hz` | Its frequency, in hertz. |
+| `partials[].dbfs` | The level of the band around it, half the pitch either way, as an RMS level, in dBFS. |
+| `partials[].purity` | The share of the band's power within 2.5 bins of the harmonic, from 0 to 1: near 1 for a clean partial, lower when its power is spread or split. Null if it's silent, or 60 dB or more below the loudest harmonic. |
+| `partials[].beating_db` | How much its level ripples, in decibels, from the 10th percentile of its envelope to the 90th: near 0 for a steady partial. Null as purity is. |
+
+For example,
+
+```sh
+musicable audio spectrum voice.aif --bands octaves --peaks 3 --fundamental-hz 240 --partials 4
+```
+
+prints
+
+```text
+file: /music/voice.aif
+from: 0.0 s, frame 0
+to: 1.5 s, frame 72000
+seconds: 1.5
+bin_hz: 2.93
+rms_dbfs: -13.06
+centroid_hz: 248.9
+rolloff_hz: 240.2
+flatness: 0.0
+bands:
+  - centre_hz: 31.5
+    dbfs: -120.95
+  - centre_hz: 63.0
+    dbfs: -110.6
+  - centre_hz: 125.0
+    dbfs: -93.87
+  - centre_hz: 250.0
+    dbfs: -13.12
+  - centre_hz: 500.0
+    dbfs: -83.09
+  - centre_hz: 1000.0
+    dbfs: -31.67
+  - centre_hz: 2000.0
+    dbfs: -45.03
+  - centre_hz: 4000.0
+    dbfs: -53.74
+  - centre_hz: 8000.0
+    dbfs: -62.29
+  - centre_hz: 16000.0
+    dbfs: -68.42
+peaks:
+  - hz: 239.98
+    dbfs: -13.12
+    note: B3
+    cents: -49.5
+  - hz: 719.96
+    dbfs: -32.2
+    note: F#5
+    cents: -47.5
+  - hz: 1199.97
+    dbfs: -41.06
+    note: D6
+    cents: 36.9
+partials:
+  - number: 1
+    hz: 240.0
+    dbfs: -13.12
+    purity: 1.0
+    beating_db: 16.19
+  - number: 2
+    hz: 480.0
+    dbfs: -102.98
+    purity: none
+    beating_db: none
+  - number: 3
+    hz: 720.0
+    dbfs: -32.2
+    purity: 1.0
+    beating_db: 16.19
+  - number: 4
+    hz: 960.0
+    dbfs: -124.72
+    purity: none
+    beating_db: none
 ```

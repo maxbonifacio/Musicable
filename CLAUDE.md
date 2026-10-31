@@ -7,8 +7,9 @@ manual to the checks CI runs, and [docs](docs) says how each part works.
 ## Audio files: use the audio toolkit
 
 When you need to look into an audio file, cut, join or convert one,
-change its level, measure its loudness, find where its sound is, or
-compare two renders or a recording with an export, use
+change its level, measure its loudness or spectrum, find where its sound
+is, compare two renders or a recording with an export, line files up at
+one loudness for blind pairs, or make a test signal, use
 Musicable's own audio commands, rather than writing a script or reaching
 for ffmpeg or sox. They read and write WAV, AIFF and FLAC files exactly,
 measure loudness as EBU R 128 does, and say what they did as JSON.
@@ -24,6 +25,9 @@ measure loudness as EBU R 128 does, and say what they did as JSON.
 | `loudness` | Integrated loudness, loudness range, momentary and short-term maxima, sample and true peaks, RMS |
 | `find` | The loudest or quietest stretches of a length, or where sound and silence are |
 | `compare` | Lines B up with A and says how it differs: offset, gain, what's left and where, loudness, bands, onset timing, clicks |
+| `spectrum` | Levels in third octaves or octaves, centroid, roll-off, flatness, the strongest peaks as notes, and a pitch's partials: level, purity, beating |
+| `match` | Lines files up with a reference and writes them again at one loudness, as long as the reference |
+| `generate` | Writes a sine, sweep, white or pink noise, clicks at a tempo, an impulse or silence |
 
 Build the program once, then run them in a shell:
 

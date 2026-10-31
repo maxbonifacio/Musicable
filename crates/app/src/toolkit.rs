@@ -31,11 +31,15 @@ use serde_json::{Map, Value as Json, json};
 mod cli;
 mod compare;
 mod files;
+mod generate;
 mod levels;
 #[cfg(test)]
 mod manual;
+mod matching;
 mod resample;
 mod schema;
+mod spectra;
+mod spectrum;
 #[cfg(test)]
 mod tests;
 
@@ -109,6 +113,9 @@ pub fn commands() -> Vec<AudioCommand> {
     let mut commands = files::commands();
     commands.extend(levels::commands());
     commands.extend(compare::commands());
+    commands.extend(generate::commands());
+    commands.extend(matching::commands());
+    commands.extend(spectrum::commands());
     commands.sort_by_key(|command| command.id);
     commands
 }

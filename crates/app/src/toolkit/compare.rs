@@ -11,6 +11,7 @@ use realfft::num_complex::Complex64;
 use realfft::{RealFftPlanner, RealToComplex};
 use serde_json::{Value as Json, json};
 
+use super::spectra::{self, Welch, power_db};
 use super::{
     AudioCommand, CHUNK, Job, MOST, Share, Source, decibels, level, opt, position, round, schema,
 };
@@ -50,14 +51,6 @@ const BANDS: [(&str, f64, f64); 3] = [
     ("mid", 200.0, 4_000.0),
     ("high", 4_000.0, f64::INFINITY),
 ];
-/// The 31 third octaves of IEC 61260, by their nominal centres, from 20 Hz
-/// to 20 kHz.
-const THIRD_OCTAVES: [f64; 31] = [
-    20.0, 25.0, 31.5, 40.0, 50.0, 63.0, 80.0, 100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0,
-    500.0, 630.0, 800.0, 1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0, 6300.0,
-    8000.0, 10_000.0, 12_500.0, 16_000.0, 20_000.0,
-];
-
 pub(super) fn commands() -> Vec<AudioCommand> {
     vec![compare()]
 }
@@ -386,18 +379,18 @@ fn output() -> Json {
 }
 
 /// A file in memory, interleaved.
-struct Audio {
-    samples: Vec<f32>,
-    channels: usize,
+pub(super) struct Audio {
+    pub(super) samples: Vec<f32>,
+    pub(super) channels: usize,
 }
 
 impl Audio {
-    fn frames(&self) -> usize {
+    pub(super) fn frames(&self) -> usize {
         self.samples.len() / self.channels
     }
 
     /// Its channels mixed to one.
-    fn mono(&self) -> Vec<f32> {
+    pub(super) fn mono(&self) -> Vec<f32> {
         let scale = 1.0 / self.channels as f32;
         (self.samples.chunks_exact(self.channels))
             .map(|frame| frame.iter().sum::<f32>() * scale)
@@ -408,14 +401,14 @@ impl Audio {
 /// How B lines up with A: B's frame `n + offset` is A's frame `n`, for A's
 /// frames from `from` to `to`.
 #[derive(Debug, Clone, Copy)]
-struct Lineup {
+pub(super) struct Lineup {
     offset: i64,
     from: usize,
     to: usize,
 }
 
 impl Lineup {
-    fn new(offset: i64, a: usize, b: usize) -> Option<Self> {
+    pub(super) fn new(offset: i64, a: usize, b: usize) -> Option<Self> {
         let from = (-offset).max(0) as usize;
         let to = (a as i64).min(b as i64 - offset).max(0) as usize;
         (from < to).then_some(Self { offset, from, to })
@@ -475,13 +468,7 @@ fn run_compare(args: &Args, job: &Job) -> Result<Json, String> {
         ));
     }
     for source in [&a_source, &b_source] {
-        if source.frames() as u128 * channels as u128 > MOST_SAMPLES as u128 {
-            return Err(format!(
-                "{} is too long to compare: compare takes about 6 minutes of stereo at 48 kHz. \
-                 Cut the stretch to compare with audio.cut first.",
-                source.path.display()
-            ));
-        }
+        fits(source, "compare")?;
     }
     let share = |from, to| Share::ALL.between(from, to);
     let identical = identical(&mut a_source, &mut b_source, job, share(0.0, 0.1))?;
@@ -585,12 +572,20 @@ fn run_compare(args: &Args, job: &Job) -> Result<Json, String> {
     job.check()?;
 
     // Their spectra, over the stretch compared.
-    let a_power = power_spectrum(&a_mono_compared, job)?;
-    let b_power = power_spectrum(&b_mono_compared, job)?;
+    let spectrum = |mono: &[f64]| {
+        let mut welch = Welch::new(rate);
+        for chunk in mono.chunks(CHUNK) {
+            welch.push(chunk);
+        }
+        welch.finish()
+    };
+    let a_spectrum = spectrum(&a_mono_compared);
+    job.check()?;
+    let b_spectrum = spectrum(&b_mono_compared);
     job.report(share(0.7, 0.8), 1.0);
     let band_levels = |from: f64, to: f64| {
-        let a_db = band_db(a_power.as_ref(), rate_f, from, to);
-        let b_db = band_db(b_power.as_ref(), rate_f, from, to);
+        let a_db = a_spectrum.as_ref().and_then(|s| s.level(from, to));
+        let b_db = b_spectrum.as_ref().and_then(|s| s.level(from, to));
         json!({
             "a_dbfs": decibels(a_db),
             "b_dbfs": decibels(b_db),
@@ -604,13 +599,10 @@ fn run_compare(args: &Args, job: &Job) -> Result<Json, String> {
             levels
         })
         .collect();
-    let third_octaves: Vec<Json> = (THIRD_OCTAVES.iter().enumerate())
-        .map(|(i, &nominal)| (nominal, 1000.0 * 10f64.powf((i as f64 - 17.0) / 10.0)))
-        .filter(|&(_, centre)| centre < rate_f / 2.0)
-        .map(|(nominal, centre)| {
-            let edge = 10f64.powf(0.05);
-            let mut levels = band_levels(centre / edge, (centre * edge).min(rate_f / 2.0));
-            levels["centre_hz"] = json!(nominal);
+    let third_octaves: Vec<Json> = (spectra::bands(false, rate_f / 2.0).into_iter())
+        .map(|band| {
+            let mut levels = band_levels(band.from, band.to);
+            levels["centre_hz"] = json!(band.centre);
             levels
         })
         .collect();
@@ -765,11 +757,6 @@ fn run_compare(args: &Args, job: &Job) -> Result<Json, String> {
     }))
 }
 
-/// A mean square in decibels, or `None` for silence.
-fn power_db(power: f64) -> Option<f64> {
-    (power > 0.0).then(|| 10.0 * power.log10())
-}
-
 /// Whether `a` and `b` have the same samples, every one, read exactly.
 fn identical(a: &mut Source, b: &mut Source, job: &Job, share: Share) -> Result<bool, String> {
     if a.frames() != b.frames() || a.channels() != b.channels() || a.rate() != b.rate() {
@@ -796,8 +783,20 @@ fn identical(a: &mut Source, b: &mut Source, job: &Job, share: Share) -> Result<
     Ok(true)
 }
 
+/// Checks that `source` isn't too long to hold in memory, for `command`.
+pub(super) fn fits(source: &Source, command: &str) -> Result<(), String> {
+    match source.frames() as u128 * source.channels() as u128 > MOST_SAMPLES as u128 {
+        true => Err(format!(
+            "{} is too long to {command}: it takes about 6 minutes of stereo at 48 kHz. Cut \
+             the stretch you need with audio.cut first.",
+            source.path.display()
+        )),
+        false => Ok(()),
+    }
+}
+
 /// All of `source`, in memory.
-fn load(source: &mut Source, job: &Job, share: Share) -> Result<Audio, String> {
+pub(super) fn load(source: &mut Source, job: &Job, share: Share) -> Result<Audio, String> {
     let channels = source.channels();
     let mut samples = Vec::with_capacity(source.frames() as usize * channels);
     source.each_chunk(0, source.frames(), job, share, |chunk| {
@@ -809,7 +808,7 @@ fn load(source: &mut Source, job: &Job, share: Share) -> Result<Audio, String> {
 
 /// How well `a` and `b` correlate, lined up as `lineup` says: `None` if
 /// either is silent there.
-fn correlation_at(a: &[f32], b: &[f32], lineup: Lineup) -> Option<f64> {
+pub(super) fn correlation_at(a: &[f32], b: &[f32], lineup: Lineup) -> Option<f64> {
     let (mut ab, mut aa, mut bb) = (0.0f64, 0.0f64, 0.0f64);
     for n in lineup.from..lineup.to {
         let (x, y) = (f64::from(a[n]), f64::from(b[lineup.b(n)]));
@@ -824,7 +823,7 @@ fn correlation_at(a: &[f32], b: &[f32], lineup: Lineup) -> Option<f64> {
 /// `a`, normalised over where they overlap, and that correlation: B's
 /// frame `n + offset` is A's frame `n`. Offsets that leave less than half
 /// of the shorter overlapping don't count. Without one, 0.
-fn best_offset(
+pub(super) fn best_offset(
     a: &[f32],
     b: &[f32],
     most: usize,
@@ -927,73 +926,6 @@ fn best_offset(
         Some((offset, correlation)) => (offset, Some(correlation)),
         None => (0, None),
     })
-}
-
-/// The mean power of `x` in each bin of a spectrum, averaged over Hann
-/// windows of about 0.3 s that overlap by half, so the bins add up to its
-/// mean square: with the bins' width, or `None` if it's too short.
-struct Spectrum {
-    bins: Vec<f64>,
-    size: usize,
-}
-
-fn power_spectrum(x: &[f64], job: &Job) -> Result<Option<Spectrum>, String> {
-    const SHORTEST: usize = 256;
-    if x.len() < SHORTEST {
-        return Ok(None);
-    }
-    // 16384 frames at 44.1 and 48 kHz: bins about 3 Hz apart.
-    let size = 16_384usize.min(1 << x.len().ilog2());
-    let window: Vec<f64> = (0..size)
-        .map(|i| 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / size as f64).cos())
-        .collect();
-    let window_power: f64 = window.iter().map(|w| w * w).sum();
-    let mut planner = RealFftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(size);
-    let mut input = fft.make_input_vec();
-    let mut output = fft.make_output_vec();
-    let mut bins = vec![0.0; output.len()];
-    let mut frames = 0usize;
-    let hop = size / 2;
-    let mut start = 0;
-    loop {
-        job.check()?;
-        for (i, slot) in input.iter_mut().enumerate() {
-            *slot = x[start + i] * window[i];
-        }
-        fft.process(&mut input, &mut output)
-            .map_err(|error| format!("Couldn't take the spectrum: {error}."))?;
-        let last = output.len() - 1;
-        for (k, bin) in output.iter().enumerate() {
-            let both = if k == 0 || k == last { 1.0 } else { 2.0 };
-            bins[k] += both * bin.norm_sqr() / (size as f64 * window_power);
-        }
-        frames += 1;
-        start += hop;
-        if start + size > x.len() {
-            break;
-        }
-    }
-    for bin in &mut bins {
-        *bin /= frames as f64;
-    }
-    Ok(Some(Spectrum { bins, size }))
-}
-
-/// The level in decibels of a spectrum from `from` to `to` hertz, each bin
-/// counting for the share of its width in the band: `None` without a
-/// spectrum, or for silence.
-fn band_db(spectrum: Option<&Spectrum>, rate: f64, from: f64, to: f64) -> Option<f64> {
-    let spectrum = spectrum?;
-    let width = rate / spectrum.size as f64;
-    let power: f64 = (spectrum.bins.iter().enumerate())
-        .map(|(k, power)| {
-            let (low, high) = ((k as f64 - 0.5) * width, (k as f64 + 0.5) * width);
-            let share = (high.min(to) - low.max(from)).max(0.0) / width;
-            share * power
-        })
-        .sum();
-    power_db(power)
 }
 
 /// A's and B's onsets that match, each the nearest of the other's within
