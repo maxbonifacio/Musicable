@@ -32,7 +32,7 @@ use egui::{
     Button, ComboBox, CursorIcon, DragValue, Event, Id, MouseWheelUnit, Pos2, Rect, Response,
     RichText, Role, ScrollArea, Sense, Ui, UiBuilder, WidgetInfo, pos2,
 };
-use musicable_commands::editor::Viewport;
+use musicable_commands::editor::{Grid, Viewport};
 use musicable_commands::{
     Args, CommandId, Editor, Focus, Modifiers, auto_warp, automation, transient, transport,
     view as views, warp, warp_mode,
@@ -302,6 +302,8 @@ struct Scene<'s> {
     /// Where the pointer is, if it's over the Sample Editor and nothing's
     /// in the way.
     pointer: Option<Pos2>,
+    /// Whether a drag is keeping off the grid, as Alt does.
+    free: bool,
 }
 
 impl Scene<'_> {
@@ -311,6 +313,16 @@ impl Scene<'_> {
 
     fn editor(&self) -> &Editor {
         self.view.editor
+    }
+
+    /// The grid as it's drawn: as if snapping were off while a drag
+    /// keeps off it, so its lines are dashed then too.
+    fn drawn_grid(&self) -> Grid {
+        let grid = self.editor().grid;
+        Grid {
+            snap: grid.snap && !self.free,
+            ..grid
+        }
     }
 
     fn tempo(&self) -> &TempoMap {
@@ -1008,6 +1020,7 @@ impl SampleEditor {
             rate: editor.sample_rate_of(&audio.file),
             peaks: view.waveforms.get(&audio.file).map(|peaks| &**peaks),
             pointer,
+            free: false,
         };
         let mut viewport = scene.layout.viewport;
         let id = ui.scope_id().with("sample editor");
@@ -1043,6 +1056,7 @@ impl SampleEditor {
             set_viewport(actions, &viewport);
             scene.layout = Layout::new(rect, theme, viewport);
         }
+        scene.free = self.drag.as_ref().is_some_and(|drag| drag.free);
         let plan = self.drag.as_ref().and_then(|drag| scene.plan(drag));
         self.cursor(ui, &scene);
         let pseudo = self.pseudo(&scene, plan.as_ref());

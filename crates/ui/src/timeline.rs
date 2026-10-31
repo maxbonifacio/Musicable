@@ -2,7 +2,10 @@
 //! grid's lines, the ruler's bar numbers, the start marker and the
 //! playhead.
 
-use egui::{Align2, FontId, Painter, Rect, Shape, Stroke, pos2};
+use egui::{
+    Align2, Color32, ColorImage, FontId, Id, Mesh, Painter, Rect, Shape, Stroke, TextureHandle,
+    TextureOptions, TextureWrapMode, pos2,
+};
 use musicable_commands::editor::{Grid, Viewport};
 use musicable_model::time::{Beats, TempoMap};
 
@@ -14,6 +17,10 @@ use crate::theme::Theme;
 const MIN_LINE_SPACING: f64 = 3.0;
 /// The closest the ruler's ticks are drawn, in points.
 const MIN_TICK_SPACING: f32 = 6.0;
+/// How long the dashes of the grid's lines are while nothing snaps to it,
+/// and the gaps between them, in points.
+const DASH: f32 = 3.0;
+const GAP: f32 = 3.0;
 
 /// Song positions across the screen: the viewport's, from `left`.
 #[derive(Debug, Clone, Copy)]
@@ -30,7 +37,8 @@ impl Timeline<'_> {
     }
 }
 
-/// The lines of `grid` over `area`: brightest at bars, then at beats.
+/// The lines of `grid` over `area`: brightest at bars, then at beats, and
+/// dashed while nothing snaps to them, as in Live.
 pub(crate) fn grid(
     painter: &Painter,
     theme: &Theme,
@@ -47,6 +55,7 @@ pub(crate) fn grid(
     if grid.spacing(zoom, length) < MIN_LINE_SPACING {
         grid.fixed = None;
     }
+    let mut dashes = Mesh::default();
     for at in grid.lines(tempo, visible, zoom) {
         let position = tempo.bar_at(at);
         let colour = match (position.offset == Beats::ZERO, position.beat) {
@@ -55,8 +64,46 @@ pub(crate) fn grid(
             _ => theme.grid_step,
         };
         let x = painter.round_to_pixel_center(timeline.x_of(at));
-        painter.vline(x, area.y_range(), Stroke::new(1.0, colour));
+        if grid.snap {
+            painter.vline(x, area.y_range(), Stroke::new(1.0, colour));
+        } else {
+            // The dashes repeat down the texture from the top of the
+            // screen, so they line up from area to area.
+            let line = Rect::from_x_y_ranges(x - 0.5..=x + 0.5, area.y_range());
+            let period = DASH + GAP;
+            let uv = Rect::from_x_y_ranges(0.0..=1.0, area.top() / period..=area.bottom() / period);
+            dashes.add_rect_with_uv(line, uv, colour);
+        }
     }
+    if !dashes.is_empty() {
+        dashes.texture_id = dash_texture(painter).id();
+        painter.add(dashes);
+    }
+}
+
+/// A dash and a gap, in white, a texel to a point, repeated down a dashed
+/// line of the grid, tinted its colour: a rectangle for each line, rather
+/// than one for each of thousands of dashes.
+fn dash_texture(painter: &Painter) -> TextureHandle {
+    let ctx = painter.ctx();
+    let id = Id::unique("grid dashes");
+    if let Some(texture) = ctx.data(|data| data.get_temp::<TextureHandle>(id)) {
+        return texture;
+    }
+    let texels = (0..(DASH + GAP) as usize)
+        .map(|at| match (at as f32) < DASH {
+            true => Color32::WHITE,
+            false => Color32::TRANSPARENT,
+        })
+        .collect();
+    let image = ColorImage::new([1, (DASH + GAP) as usize], texels);
+    let options = TextureOptions {
+        wrap_mode: TextureWrapMode::Repeat,
+        ..TextureOptions::NEAREST
+    };
+    let texture = ctx.load_texture("grid dashes", image, options);
+    ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
+    texture
 }
 
 /// Every other group of bars over `area` shaded, counting from the song's

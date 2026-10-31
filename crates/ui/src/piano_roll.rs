@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use egui::{
     CursorIcon, Event, Id, MouseWheelUnit, Pos2, Rect, Response, Role, Sense, Ui, WidgetInfo, pos2,
 };
-use musicable_commands::editor::{Lane, Viewport};
+use musicable_commands::editor::{Grid, Lane, Viewport};
 use musicable_commands::{
     Args, CommandId, Editor, Focus, Modifiers, controllers, notes, transport, view as views,
 };
@@ -312,6 +312,8 @@ struct Scene<'s> {
     /// Where the pointer is, if it's over the piano roll and nothing's in
     /// the way.
     pointer: Option<Pos2>,
+    /// Whether a drag is keeping off the grid, as Alt does.
+    free: bool,
 }
 
 impl Scene<'_> {
@@ -321,6 +323,16 @@ impl Scene<'_> {
 
     fn editor(&self) -> &Editor {
         self.view.editor
+    }
+
+    /// The grid as it's drawn: as if snapping were off while a drag
+    /// keeps off it, so its lines are dashed then too.
+    fn drawn_grid(&self) -> Grid {
+        let grid = self.editor().grid;
+        Grid {
+            snap: grid.snap && !self.free,
+            ..grid
+        }
     }
 
     fn selected(&self, note: NoteId) -> bool {
@@ -723,6 +735,7 @@ impl PianoRoll {
             midi,
             index,
             pointer,
+            free: false,
         };
         // The rows' size, for the commands that zoom to fit and scroll
         // notes into sight, and the scrolling, kept within the keys.
@@ -760,6 +773,7 @@ impl PianoRoll {
             set_viewport(actions, &viewport, key_height, height);
             scene.layout = Layout::new(rect, theme, viewport, key_height);
         }
+        scene.free = self.drag.as_ref().is_some_and(|drag| drag.free);
         let plan = self.drag.as_ref().and_then(|drag| scene.plan(drag));
         self.cursor(ui, &scene);
 

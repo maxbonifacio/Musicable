@@ -6,8 +6,8 @@ warp markers along it and one of its curves under it. It shows the audio clip
 selected last in the arrangement, or opened with a double-click, in a tab
 beside the devices panel and the piano roll. Across, it shows song
 positions, as the arrangement does, so the start marker, the playhead and
-the grid line up with it; its zoom and scrolling are its own. Everything you
-do in it can be undone, and a whole drag is one step in the undo history.
+the grid line up with it, its lines dashed while nothing snaps to them; its
+zoom and scrolling are its own. Everything you do in it can be undone, and a whole drag is one step in the undo history.
 
 [Warping](../using/warping.md) says what warping a clip does.
 

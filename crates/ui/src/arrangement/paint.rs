@@ -65,7 +65,8 @@ pub(super) fn lanes(painter: &Painter, scene: &Scene<'_>, plan: Option<&Plan>) {
         let shade = Rect::from_x_y_ranges(x, tracks.y_range());
         painter.rect_filled(shade, 0.0, theme.loop_shade);
     }
-    timeline::grid(painter, theme, &self::timeline(scene), editor.grid, tracks);
+    let grid = scene.drawn_grid();
+    timeline::grid(painter, theme, &self::timeline(scene), grid, tracks);
     let bottoms = (layout.visible_rows().map(Row::bottom))
         .chain(layout.visible_takes().map(TakeRow::bottom))
         .chain(layout.visible_automation().map(AutoRow::bottom));
@@ -136,7 +137,8 @@ fn master(painter: &Painter, scene: &Scene<'_>) -> Rect {
         let shade = Rect::from_x_y_ranges(x, filled.y_range());
         painter.rect_filled(shade, 0.0, theme.loop_shade);
     }
-    timeline::grid(painter, theme, &self::timeline(scene), editor.grid, filled);
+    let grid = scene.drawn_grid();
+    timeline::grid(painter, theme, &self::timeline(scene), grid, filled);
     let bottoms =
         std::iter::once(row.bottom()).chain(layout.master_automation.iter().map(AutoRow::bottom));
     for bottom in bottoms {
