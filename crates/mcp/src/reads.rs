@@ -1,10 +1,11 @@
 //! What the read tools give back, as JSON: the commands, the project, a
 //! clip, a device, a modulator, a lane of automation, the editor's state,
-//! the undo history and what the project costs the CPU. Positions and
+//! the undo history, what the project costs the CPU, and what plays and
+//! what's under way. Positions and
 //! lengths are numbers of beats, gains are linear, and ids are whole
 //! numbers, as commands take them.
 
-use musicable_commands::editor::Lane as PianoRollLane;
+use musicable_commands::editor::{Lane as PianoRollLane, Viewport};
 use musicable_commands::{
     Command, CommandId, FromValue, Keymap, Param, Registry, Scope, Value, device, json, param_text,
 };
@@ -16,6 +17,7 @@ use musicable_model::native::{NativeDevice, ParamInfo, Unit};
 use musicable_model::param::ParamAddress;
 use musicable_model::routing::{Port, Tap, Wire};
 use musicable_model::time::Beats;
+use musicable_model::warp::Origin;
 use musicable_model::{
     Chain, ClipType, Device, DeviceId, DeviceKind, Input, Monitor, PluginFormat, Project, Track,
     TrackId, TrackKind,
@@ -541,6 +543,20 @@ pub(crate) fn clip(window: &impl Window, id: ClipId) -> Result<Json, String> {
                             "fluctuation": json::to_json(&Value::Number(warp.granular.fluctuation)),
                         },
                     });
+                    // Until the clip takes them from analysis, it has none.
+                    entry["warp"]["transients"] = match &warp.onsets {
+                        Some(onsets) => (onsets.visible())
+                            .map(|onset| {
+                                json!({
+                                    "frame": onset.frame,
+                                    "strength": short(onset.strength),
+                                    "added": onset.origin == Origin::Added,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                            .into(),
+                        None => Json::Null,
+                    };
                 }
                 (offset, _) => entry["offset_frames"] = offset.frames().unwrap_or(0).into(),
             }
@@ -618,7 +634,11 @@ fn points(curve: &[Point]) -> Json {
 /// One device: what it is, each of its parameters' number, name, range,
 /// unit and value, and its ports with the wires into each, its note input
 /// last.
-pub(crate) fn device(window: &impl Window, id: DeviceId) -> Result<Json, String> {
+pub(crate) fn device(
+    window: &impl Window,
+    id: DeviceId,
+    filter: Option<&str>,
+) -> Result<Json, String> {
     let project = window.project();
     let Some((chain, index, device)) = project.find_device(id) else {
         return Err(format!("There's no device {}.", id.0));
@@ -667,6 +687,12 @@ pub(crate) fn device(window: &impl Window, id: DeviceId) -> Result<Json, String>
             if window.plugin_params(id).is_none() {
                 entry["loaded"] = false.into();
             }
+            if let Some(state) = window.plugin_state(id) {
+                entry["loaded"] = state.loaded.into();
+                entry["problem"] = state.problem.into();
+                entry["has_window"] = state.has_window.into();
+                entry["window_open"] = state.window_open.into();
+            }
         }
         DeviceKind::TestGain { gain } => entry["gain"] = short(*gain),
         DeviceKind::TestInstrument { level } => entry["level"] = short(*level),
@@ -691,6 +717,15 @@ pub(crate) fn device(window: &impl Window, id: DeviceId) -> Result<Json, String>
         .collect();
     if !ports.is_empty() {
         entry["ports"] = ports.into();
+    }
+    // Only the parameters whose names hold the filter, for a plugin with
+    // thousands of them.
+    if let Some(filter) = filter.map(str::to_lowercase)
+        && let Some(Json::Array(params)) = entry.get_mut("params")
+    {
+        params.retain(|param| {
+            (param["name"].as_str()).is_some_and(|name| name.to_lowercase().contains(&filter))
+        });
     }
     Ok(entry)
 }
@@ -853,9 +888,17 @@ pub(crate) fn editor(window: &impl Window) -> Json {
     let selected_track = editor.selected_track.map(chain_entry);
     let grid = &editor.grid;
     let viewport = &editor.viewport;
-    let width = f64::from(viewport.width) / viewport.zoom.max(f64::MIN_POSITIVE);
     let roll = &editor.piano_roll;
     let sample = &editor.sample_editor;
+    let track_heights: Vec<Json> = (editor.track_heights.iter())
+        .map(|(chain, height)| json!({ "chain": chain_entry(*chain), "height": short(*height) }))
+        .collect();
+    let automation_lanes: Vec<Json> = (editor.automation.iter())
+        .map(|(chain, params)| {
+            let params: Vec<String> = params.iter().map(|param| param_text(*param)).collect();
+            json!({ "chain": chain_entry(*chain), "params": params })
+        })
+        .collect();
     let lane = match roll.lane {
         PianoRollLane::Velocity => json!("velocity"),
         PianoRollLane::Controller(controller) => controller_entry(controller, &[]),
@@ -874,26 +917,45 @@ pub(crate) fn editor(window: &impl Window) -> Json {
             "triplet": grid.triplet,
             "snap": grid.snap,
         },
-        "in_sight": {
-            "start": beats(viewport.start),
-            "end": viewport.start.to_f64() + width,
-        },
+        "in_sight": in_sight(viewport),
         "follow": editor.follow,
         "piano_roll": {
             "clip": roll.clip.map(|clip| clip.0),
             "notes": ids(&mut roll.notes.iter().map(|n| n.0)),
             "draw": roll.draw,
             "lane": lane,
+            "in_sight": in_sight(&roll.viewport),
         },
         "sample_editor": {
             "clip": sample.clip.map(|clip| clip.0),
             "markers": sample.markers.iter().map(|&beat| beats(beat)).collect::<Vec<_>>(),
+            "time": sample.time.map(|time| json!({ "start": beats(time.start), "end": beats(time.end) })),
             "lane": sample.lane.key(),
+            "in_sight": in_sight(&sample.viewport),
         },
+        "clip_editor": editor.clip_editor,
         "devices": {
             "selected": ids(&mut editor.selected_devices(window.project()).iter().map(|d| d.0)),
         },
+        "track_heights": track_heights,
+        "take_lanes": ids(&mut editor.take_lanes.iter().map(|t| t.0)),
+        "automation_lanes": automation_lanes,
+        "clipboards": {
+            "clips": (editor.clipboard.as_ref()).map(|taken| json!({
+                "clips": taken.clips.len(),
+                "length": beats(taken.range.end - taken.range.start),
+            })),
+            "notes": (roll.clipboard.as_ref()).map(|taken| json!({ "notes": taken.notes.len() })),
+            "devices": (editor.devices.clipboard.as_ref())
+                .map(|taken| json!({ "devices": taken.devices.len() })),
+        },
     })
+}
+
+/// The stretch of song a panel shows, by its viewport.
+fn in_sight(viewport: &Viewport) -> Json {
+    let width = f64::from(viewport.width) / viewport.zoom.max(f64::MIN_POSITIVE);
+    json!({ "start": beats(viewport.start), "end": viewport.start.to_f64() + width })
 }
 
 /// The undo history: each step's name, oldest first, and how many are
@@ -962,6 +1024,58 @@ pub(crate) fn performance(window: &impl Window) -> Json {
         "render_ahead": ahead,
         "total": share(performance.total),
         "rows": rows,
+    })
+}
+
+/// What plays and what's under way, and whether nothing is.
+pub(crate) fn status(window: &impl Window) -> Json {
+    let status = window.status();
+    let takes: Vec<Json> = (status.takes.iter())
+        .map(|(track, range)| {
+            json!({ "track": track.0, "start": beats(range.start), "end": beats(range.end) })
+        })
+        .collect();
+    let export = (status.export.as_ref()).map(|export| {
+        json!({
+            "stage": export.stage,
+            "pass": export.pass,
+            "passes": export.passes,
+            "done": share(export.done),
+            "speed": export.speed.map(|speed| (speed * 10.0).round() / 10.0),
+        })
+    });
+    let folders = |folders: &[(String, usize)], count: &str| -> Json {
+        (folders.iter())
+            .map(|(folder, files)| json!({ "folder": folder, count: files }))
+            .collect()
+    };
+    let idle = status.analysing.is_empty()
+        && status.rendering == 0
+        && !status.compiling
+        && status.export.is_none()
+        && !status.scanning_plugins
+        && status.scanning_folders.is_empty()
+        && status.reading_folders.is_empty()
+        && !status.finding_presets;
+    json!({
+        "playing": status.playing,
+        "recording": status.recording,
+        "playhead": beats(status.playhead),
+        "playhead_seconds": (status.seconds * 1000.0).round() / 1000.0,
+        "takes": takes,
+        "question": status.question,
+        "idle": idle,
+        "analysing": status.analysing,
+        "rendering_segments": status.rendering,
+        "compiling": status.compiling,
+        "export": export,
+        "scanning_plugins": status.scanning_plugins,
+        "library": {
+            "scanning": folders(&status.scanning_folders, "found"),
+            "reading": folders(&status.reading_folders, "left"),
+            "finding_presets": status.finding_presets,
+        },
+        "revision": status.revision,
     })
 }
 

@@ -15,11 +15,11 @@
 //! over its standard input and output and passes each tool call on to the
 //! Musicable that's running, through the pipe. While none is, or it doesn't
 //! let agents in, the tools say so. The bridge runs [local tools](local)
-//! itself, the app's audio commands, which need no window.
+//! itself, the app's audio commands and the log, which need no window.
 //!
 //! `docs/agents.md` describes the tools, and what they take and give back.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use musicable_commands::{
     Args, BatchError, CommandError, CommandId, Editor, Keymap, Registry, Steps, Value, edit,
@@ -28,6 +28,7 @@ use musicable_commands::{
 use musicable_model::clip::ClipId;
 use musicable_model::modulation::ModulatorId;
 use musicable_model::param::{ParamAddress, ParamSpec};
+use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{Chain, DeviceId, Project, TrackId};
 use serde_json::{Map, Value as Json};
 use tokio::sync::oneshot;
@@ -40,6 +41,7 @@ mod reads;
 #[cfg(test)]
 mod tests;
 pub mod tools;
+mod waiting;
 
 pub use host::Host;
 pub use reads::catalogue;
@@ -61,7 +63,9 @@ enum Asked {
     Command(CommandId),
     Project,
     Clip(ClipId),
-    Device(DeviceId),
+    /// A device, with only the parameters whose names hold the text, if
+    /// there is one.
+    Device(DeviceId, Option<String>),
     Modulator(ModulatorId),
     /// A parameter's automation.
     Automation(ParamAddress),
@@ -69,6 +73,34 @@ enum Asked {
     History,
     /// What the project costs the CPU.
     Performance,
+    /// What plays, and what's under way.
+    Status,
+    /// The settings, and what plays.
+    Settings,
+    /// The audio devices there are.
+    AudioDevices,
+    /// The plugins installed, or those whose names, vendors or ids hold
+    /// the text.
+    Plugins(Option<String>),
+    /// How the panels and windows are laid out.
+    Layout,
+    /// The meters.
+    Levels,
+    /// The commands run this session: those after the entry numbered
+    /// `since`, if it says, at most the `last`.
+    CommandLog {
+        since: Option<u64>,
+        last: usize,
+    },
+    /// The windows.
+    Windows,
+    /// A picture of a window or a panel.
+    Screenshot(Shot),
+    /// The messages the window shows the user, and whether to clear them
+    /// once read.
+    Messages {
+        clear: bool,
+    },
     Run(Run),
 }
 
@@ -273,6 +305,89 @@ pub enum CpuPart {
     Metronome,
 }
 
+/// What plays, and what's under way that lands later, as the transport
+/// bar and the status bar show it: see [`Window::status`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Status {
+    /// Whether the transport plays, from the moment Play is pressed.
+    pub playing: bool,
+    /// Whether playing records the armed tracks.
+    pub recording: bool,
+    /// Where the playhead is in what's heard, in beats and in seconds from
+    /// the start of the song.
+    pub playhead: Beats,
+    pub seconds: f64,
+    /// The takes being recorded: each track's, and what it covers so far.
+    pub takes: Vec<(TrackId, BeatRange)>,
+    /// The question the window waits for the user to answer, if it asks
+    /// one, such as whether to save their changes.
+    pub question: Option<String>,
+    /// The audio files being analysed for warping, by their names in the
+    /// project.
+    pub analysing: Vec<String>,
+    /// The segments of clips still to render, such as Spectral's.
+    pub rendering: usize,
+    /// Whether a graph the window asked the engine for still compiles.
+    pub compiling: bool,
+    /// The export under way, if one is.
+    pub export: Option<Exporting>,
+    /// Whether the plugins are being scanned.
+    pub scanning_plugins: bool,
+    /// The library's folders being scanned, with the files found in each
+    /// so far.
+    pub scanning_folders: Vec<(String, usize)>,
+    /// The library's folders whose files are being read, with the files
+    /// left in each.
+    pub reading_folders: Vec<(String, usize)>,
+    /// Whether the library looks for presets.
+    pub finding_presets: bool,
+    /// Goes up with every change to the project, undone and redone ones
+    /// too, and when another project opens.
+    pub revision: u64,
+}
+
+/// What to take a picture of, and where to save it: see
+/// [`Window::screenshot`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Shot {
+    /// The window: the main window with `None`, or else a window of its
+    /// own, counted from 0.
+    pub window: Option<usize>,
+    /// The panel, by its id, in place of a whole window.
+    pub panel: Option<String>,
+    /// The plugin device whose plugin's window to take, in place of one of
+    /// Musicable's.
+    pub device: Option<DeviceId>,
+    /// Where to save it as a PNG file too, if anywhere.
+    pub file: Option<PathBuf>,
+}
+
+/// How a plugin device's plugin is doing: see [`Window::plugin_state`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginState {
+    /// Its plugin loaded, and plays.
+    pub loaded: bool,
+    /// Why it plays nothing, if it doesn't, such as the plugin missing.
+    pub problem: Option<String>,
+    /// It has a window of its own, and whether that's open.
+    pub has_window: bool,
+    pub window_open: bool,
+}
+
+/// How an export is going, as its window's progress bar shows it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Exporting {
+    /// What it does: "preparing", "rendering", "normalising" or "finished".
+    pub stage: &'static str,
+    /// The pass it's on, from 1, of how many.
+    pub pass: usize,
+    pub passes: usize,
+    /// How much of the whole export is done, from 0 to 1.
+    pub done: f32,
+    /// While it renders, how many times faster than real time.
+    pub speed: Option<f64>,
+}
+
 /// What the tools read and run, on the window's thread.
 pub trait Window {
     /// Every command, as the window runs them.
@@ -299,6 +414,72 @@ pub trait Window {
         Performance::default()
     }
 
+    /// What plays, and what's under way.
+    fn status(&self) -> Status {
+        Status::default()
+    }
+
+    /// How the plugin device `device`'s plugin is doing, or `None` if the
+    /// window doesn't know.
+    fn plugin_state(&self, _device: DeviceId) -> Option<PluginState> {
+        None
+    }
+
+    /// The plugins installed, as the browser lists them, or those whose
+    /// names, vendors or ids hold `filter`, as JSON.
+    fn plugins(&self, _filter: Option<&str>) -> Json {
+        Json::Object(Map::new())
+    }
+
+    /// How the panels and the windows of their own are laid out, as JSON.
+    fn layout(&self) -> Json {
+        Json::Object(Map::new())
+    }
+
+    /// What the meters read, as JSON.
+    fn levels(&self) -> Json {
+        Json::Object(Map::new())
+    }
+
+    /// The commands run this session, after the entry numbered `since`,
+    /// if it says, at most the `last`, as JSON.
+    fn command_log(&self, _since: Option<u64>, _last: usize) -> Json {
+        serde_json::json!({ "entries": [], "count": 0, "file": null })
+    }
+
+    /// The windows, as JSON.
+    fn windows(&self) -> Json {
+        serde_json::json!({ "windows": [] })
+    }
+
+    /// Takes a picture of `shot`, and answers `reply` once it has: with
+    /// what it took, and the picture as a PNG file in base64 as `png`,
+    /// which the tool hands the agent as an image.
+    fn screenshot(&mut self, _shot: Shot, reply: Reply) {
+        reply.failed("This window can't take pictures.");
+    }
+
+    /// The settings, as the settings file has them, with the profile in
+    /// use's, and what plays, as JSON.
+    fn settings(&self) -> Json {
+        Json::Object(Map::new())
+    }
+
+    /// The audio devices there are to play through and record from, listed
+    /// again, as JSON.
+    fn audio_devices(&mut self) -> Json {
+        Json::Object(Map::new())
+    }
+
+    /// The messages the window shows the user, oldest first: errors and
+    /// notices, such as a file that's missing.
+    fn messages(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Clears the messages, as Dismiss does.
+    fn clear_messages(&mut self) {}
+
     /// Runs `run`, as the agent `reply` names asked, and answers with
     /// [`Reply::ran`] or [`Reply::ran_batch`], at once or once it knows.
     fn run(&mut self, run: Run, reply: Reply);
@@ -314,16 +495,32 @@ pub fn answer(call: Call, window: &mut impl Window) {
     }
     let answer = match asked {
         Asked::Run(run) => return window.run(run, reply),
+        Asked::Screenshot(shot) => return window.screenshot(shot, reply),
+        Asked::Windows => Ok(window.windows()),
         Asked::Commands(filter) => Ok(reads::commands(window, filter.as_deref())),
         Asked::Command(id) => reads::command(window, &id),
         Asked::Project => Ok(reads::project(window)),
         Asked::Clip(clip) => reads::clip(window, clip),
-        Asked::Device(device) => reads::device(window, device),
+        Asked::Device(device, filter) => reads::device(window, device, filter.as_deref()),
         Asked::Modulator(modulator) => reads::modulator(window, modulator),
         Asked::Automation(param) => reads::automation(window, param),
         Asked::Editor => Ok(reads::editor(window)),
         Asked::History => Ok(reads::history(window)),
         Asked::Performance => Ok(reads::performance(window)),
+        Asked::Status => Ok(reads::status(window)),
+        Asked::Settings => Ok(window.settings()),
+        Asked::AudioDevices => Ok(window.audio_devices()),
+        Asked::Plugins(filter) => Ok(window.plugins(filter.as_deref())),
+        Asked::Layout => Ok(window.layout()),
+        Asked::Levels => Ok(window.levels()),
+        Asked::CommandLog { since, last } => Ok(window.command_log(since, last)),
+        Asked::Messages { clear } => {
+            let messages = window.messages();
+            if clear {
+                window.clear_messages();
+            }
+            Ok(serde_json::json!({ "messages": messages }))
+        }
     };
     reply.send(answer);
 }

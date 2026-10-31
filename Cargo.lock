@@ -2108,6 +2108,7 @@ dependencies = [
 name = "musicable-app"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "eframe",
  "egui-winit",
  "egui_kittest",
@@ -2124,6 +2125,7 @@ dependencies = [
  "musicable-plugins",
  "musicable-test-plugins",
  "musicable-ui",
+ "png",
  "raw-window-handle",
  "rfd",
  "rmcp",

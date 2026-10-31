@@ -8,7 +8,7 @@
 //! that runs it, stay the same as others come and go. Workspaces are the
 //! app's, not the project's, so these ask the app, with a [`Request`].
 
-use crate::{CommandId, Registry, Request};
+use crate::{Command, CommandError, CommandId, Param, Registry, Request, Type, Value};
 
 /// Switches to the workspace in the first slot, Default.
 pub const SWITCH_1: CommandId = CommandId::new("workspace.switch_1");
@@ -25,10 +25,12 @@ pub const SWITCH_9: CommandId = CommandId::new("workspace.switch_9");
 pub const SWITCH: [CommandId; SLOTS as usize] = [
     SWITCH_1, SWITCH_2, SWITCH_3, SWITCH_4, SWITCH_5, SWITCH_6, SWITCH_7, SWITCH_8, SWITCH_9,
 ];
-/// Asks for a name, and keeps the panels' layout and the views' parts as a
-/// new workspace under it, which is the one in use from then on.
+/// Keeps the panels' layout and the views' parts as a new workspace under
+/// the name it's given, or asks for one, which is the one in use from then
+/// on.
 pub const SAVE_AS: CommandId = CommandId::new("workspace.save_as");
-/// Asks for a new name for the workspace in use. Default keeps its name.
+/// Gives the workspace in use the name it's given, or asks for one.
+/// Default keeps its name.
 pub const RENAME: CommandId = CommandId::new("workspace.rename");
 /// Deletes the workspace in use, once the user says so, and switches to
 /// Default, which can't be deleted.
@@ -40,11 +42,9 @@ pub const RESET: CommandId = CommandId::new("workspace.reset");
 /// How many workspaces there can be.
 pub const SLOTS: u8 = 9;
 
-/// The workspace commands but for switching, with their titles and what
-/// they ask for.
-const COMMANDS: [(CommandId, &str, Request); 4] = [
-    (SAVE_AS, "Save Workspace As...", Request::SaveWorkspaceAs),
-    (RENAME, "Rename Workspace...", Request::RenameWorkspace),
+/// The workspace commands but for switching and those that take a name,
+/// with their titles and what they ask for.
+const COMMANDS: [(CommandId, &str, Request); 2] = [
     (DELETE, "Delete Workspace...", Request::DeleteWorkspace),
     (RESET, "Reset Workspace", Request::ResetWorkspace),
 ];
@@ -77,6 +77,36 @@ pub fn register(registry: &mut Registry) {
         .collect();
     crate::register_requests(registry, &switches);
     crate::register_requests(registry, &COMMANDS);
+    type Named = fn(Option<String>) -> Request;
+    let named: [(CommandId, &str, Named, &str); 2] = [
+        (
+            SAVE_AS,
+            "Save Workspace As...",
+            Request::SaveWorkspaceAs,
+            "The new workspace's name: the app asks for one without it.",
+        ),
+        (
+            RENAME,
+            "Rename Workspace...",
+            Request::RenameWorkspace,
+            "The workspace's new name: the app asks for one without it.",
+        ),
+    ];
+    for (id, title, request, about) in named {
+        registry.add(
+            Command::new(id, title)
+                .with_params(&[Param::asked("name", Type::Text, about)])
+                .alone(),
+            move |ctx, args| {
+                let name = args.opt::<String>("name")?;
+                if name.as_ref().is_some_and(|name| name.trim().is_empty()) {
+                    return Err(CommandError::invalid("a workspace's name can't be empty"));
+                }
+                ctx.requests.push(request(name));
+                Ok(Value::None)
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -85,7 +115,7 @@ mod tests {
 
     use super::*;
     use crate::testing::StubTransport;
-    use crate::{Context, Document, Keymap, NoLibrary};
+    use crate::{Args, Context, Document, Keymap, NoLibrary};
 
     fn run(registry: &Registry, id: &CommandId) -> Vec<Request> {
         let mut document = Document::new(Project::new());
@@ -112,12 +142,33 @@ mod tests {
         assert_eq!(slot_of(&SAVE_AS), None);
         let asked = [SAVE_AS, RENAME, DELETE, RESET].map(|id| run(&registry, &id));
         let expected = [
-            Request::SaveWorkspaceAs,
-            Request::RenameWorkspace,
+            Request::SaveWorkspaceAs(None),
+            Request::RenameWorkspace(None),
             Request::DeleteWorkspace,
             Request::ResetWorkspace,
         ];
         assert_eq!(asked, expected.map(|request| vec![request]));
+        // Given a name, the app asks the user nothing.
+        let mut document = Document::new(Project::new());
+        let mut requests = Vec::new();
+        let mut ctx = Context {
+            document: &mut document,
+            transport: &mut StubTransport::default(),
+            requests: &mut requests,
+            library: &mut NoLibrary,
+        };
+        let named = Args::new().with("name", "Mixing");
+        registry.run_with(&SAVE_AS, &named, &mut ctx).unwrap();
+        registry.run_with(&RENAME, &named, &mut ctx).unwrap();
+        let empty = Args::new().with("name", " ");
+        assert!(registry.run_with(&SAVE_AS, &empty, &mut ctx).is_err());
+        assert_eq!(
+            requests,
+            [
+                Request::SaveWorkspaceAs(Some("Mixing".into())),
+                Request::RenameWorkspace(Some("Mixing".into())),
+            ]
+        );
         // Alt and the slot's number switch.
         let keymap = Keymap::default_keymap();
         let keys: Vec<String> = (SWITCH.iter())

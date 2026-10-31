@@ -146,8 +146,8 @@ counter:
   The tooltip says how far ahead Musicable was, and how many blocks the
   audio thread had to render itself since the device started.
 - **Dropouts** counts the times the device ran out of audio since it
-  started, which you hear as clicks or gaps. Click it to count from zero
-  again. Its tooltip says how much audio they lost, how many of them were
+  started, which you hear as clicks or gaps. Click it, or pick
+  **Transport > Reset Dropouts**, to count from zero again. Its tooltip says how much audio they lost, how many of them were
   in the system's audio engine or driver, and how often the audio thread
   woke up late.
 

@@ -10,7 +10,9 @@
 
 use std::path::PathBuf;
 
-use crate::{Args, Command, CommandError, CommandId, Param, Registry, Request, Type, Value};
+use crate::{
+    Args, Command, CommandError, CommandId, ExportOptions, Param, Registry, Request, Type, Value,
+};
 
 /// Starts a new, empty project.
 pub const NEW: CommandId = CommandId::new("file.new");
@@ -121,20 +123,105 @@ pub fn register(registry: &mut Registry) {
     );
     registry.add(
         Command::new(EXPORT_AUDIO, "Export Audio...")
-            .with_params(&[Param::asked(
-                "file",
-                Type::Text,
-                "The audio file to render the mix to, with the export window's last \
-                 settings, from what the window starts out with: the time selection, or \
-                 else the song. Its extension picks the format: wav, aiff or flac. \
-                 Without it, the app shows the export window.",
-            )])
+            .with_params(&[
+                Param::asked(
+                    "file",
+                    Type::Text,
+                    "The audio file to render to. Its extension picks the format: wav, aiff \
+                     or flac. Stems go next to it, named after it and the tracks. Without \
+                     it, the app shows the export window, and the rest are left out. What \
+                     the rest leave out is as the export window last had it.",
+                ),
+                Param::optional(
+                    "range",
+                    Type::Choice(RANGES),
+                    "song, from its start to the end of its last clip, loop, the loop \
+                     region, or selection, the time selection or else the selected clips. \
+                     Without it, the time selection, or else the song.",
+                ),
+                Param::optional(
+                    "bits",
+                    Type::Int,
+                    "16, 24, or 32 for floats, which FLAC hasn't got.",
+                ),
+                Param::optional(
+                    "sample_rate",
+                    Type::Int,
+                    "The files' sample rate, such as 44100: the project's without it.",
+                ),
+                Param::optional("dither", Type::Bool, "Dither integer samples."),
+                Param::optional(
+                    "normalize",
+                    Type::Bool,
+                    "Raise or lower each file so its peak is at full scale.",
+                ),
+                Param::optional(
+                    "tail",
+                    Type::Bool,
+                    "Render on after the range until everything is quiet.",
+                ),
+                Param::optional("mix", Type::Bool, "Write the mix: it's written without it."),
+                Param::optional(
+                    "stems",
+                    Type::Bool,
+                    "Write each of the tracks on its own too.",
+                ),
+                Param::optional(
+                    "tracks",
+                    Type::TRACKS,
+                    "The tracks stems writes: all of them without it.",
+                ),
+            ])
             .alone(),
         |ctx, args| {
-            ctx.requests.push(Request::ExportAudio(file(args)?));
+            let file = file(args)?;
+            let options = export_options(args)?;
+            if file.is_none() && options != ExportOptions::default() {
+                return Err(CommandError::invalid(
+                    "give the file too: without it, the app shows the export window",
+                ));
+            }
+            ctx.requests.push(Request::ExportAudio { file, options });
             Ok(Value::None)
         },
     );
+}
+
+/// The ranges [`EXPORT_AUDIO`] renders.
+pub const RANGES: &[&str] = &["song", "loop", "selection"];
+
+/// What [`EXPORT_AUDIO`]'s arguments but its file say.
+fn export_options(args: &Args) -> Result<ExportOptions, CommandError> {
+    let bits = match args.opt::<i64>("bits")? {
+        None => None,
+        Some(bits @ (16 | 24 | 32)) => Some(bits as u8),
+        Some(_) => return Err(CommandError::invalid("bits is 16, 24 or 32")),
+    };
+    let sample_rate = match args.opt::<i64>("sample_rate")? {
+        None => None,
+        Some(rate) => Some(
+            (u32::try_from(rate).ok())
+                .filter(|rate| (8_000..=384_000).contains(rate))
+                .ok_or_else(|| CommandError::invalid("sample_rate is from 8000 to 384000"))?,
+        ),
+    };
+    let options = ExportOptions {
+        range: args.opt("range")?,
+        bits,
+        sample_rate,
+        dither: args.opt("dither")?,
+        normalize: args.opt("normalize")?,
+        tail: args.opt("tail")?,
+        mix: args.opt("mix")?,
+        stems: args.opt("stems")?,
+        tracks: args.opt("tracks")?,
+    };
+    if options.mix == Some(false) && options.stems != Some(true) {
+        return Err(CommandError::invalid(
+            "with mix off, say stems: true, or there's nothing to write",
+        ));
+    }
+    Ok(options)
 }
 
 /// The `file` argument, a path, if it was given.
@@ -198,7 +285,10 @@ mod tests {
             Request::Save,
             Request::SaveAs(None),
             import,
-            Request::ExportAudio(None),
+            Request::ExportAudio {
+                file: None,
+                options: ExportOptions::default(),
+            },
             Request::Quit,
         ];
         assert_eq!(requests, expected);
@@ -224,7 +314,10 @@ mod tests {
             [
                 Request::Open(Some("/songs/a.musicable".into())),
                 Request::SaveAs(Some("/songs/b".into())),
-                Request::ExportAudio(Some("/out/mix.flac".into())),
+                Request::ExportAudio {
+                    file: Some("/out/mix.flac".into()),
+                    options: ExportOptions::default(),
+                },
                 Request::ImportAudio {
                     files: Some(vec!["/samples/kick.wav".into(), "loop.wav".into()]),
                     track: Some(TrackId(3)),
@@ -254,6 +347,60 @@ mod tests {
             let params = &registry.get(&id).unwrap().params;
             assert!(params[0].asked && params[0].optional, "{id}");
         }
+    }
+
+    #[test]
+    fn an_export_says_how_to_render() {
+        let mut setup = Setup::new(Project::new());
+        let stems = Args::new()
+            .with("file", "/out/song.wav")
+            .with("range", "loop")
+            .with("bits", 16_i64)
+            .with("sample_rate", 44_100_i64)
+            .with("dither", false)
+            .with("normalize", true)
+            .with("tail", false)
+            .with("mix", false)
+            .with("stems", true)
+            .with("tracks", vec![TrackId(1), TrackId(3)]);
+        setup.run_with(&EXPORT_AUDIO, stems).unwrap();
+        assert_eq!(
+            setup.requests,
+            [Request::ExportAudio {
+                file: Some("/out/song.wav".into()),
+                options: ExportOptions {
+                    range: Some("loop".into()),
+                    bits: Some(16),
+                    sample_rate: Some(44_100),
+                    dither: Some(false),
+                    normalize: Some(true),
+                    tail: Some(false),
+                    mix: Some(false),
+                    stems: Some(true),
+                    tracks: Some(vec![TrackId(1), TrackId(3)]),
+                },
+            }]
+        );
+        let invalid = |message: &str| Err(CommandError::invalid(message));
+        let file = || Args::new().with("file", "/out/song.wav");
+        assert_eq!(
+            setup.run_with(&EXPORT_AUDIO, file().with("bits", 8_i64)),
+            invalid("bits is 16, 24 or 32")
+        );
+        assert_eq!(
+            setup.run_with(&EXPORT_AUDIO, file().with("sample_rate", 0_i64)),
+            invalid("sample_rate is from 8000 to 384000")
+        );
+        assert_eq!(
+            setup.run_with(&EXPORT_AUDIO, file().with("mix", false)),
+            invalid("with mix off, say stems: true, or there's nothing to write")
+        );
+        assert_eq!(
+            setup.run_with(&EXPORT_AUDIO, Args::new().with("stems", true)),
+            invalid("give the file too: without it, the app shows the export window")
+        );
+        assert!((setup.run_with(&EXPORT_AUDIO, file().with("range", "verse"))).is_err());
+        assert_eq!(setup.requests.len(), 1);
     }
 
     #[test]

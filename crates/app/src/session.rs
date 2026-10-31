@@ -33,6 +33,7 @@ use musicable_model::warp::WarpMode;
 use musicable_model::{DeviceId, Input, Monitor, PluginFormat, Project, TrackId, TrackKind};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
 
+use crate::command_log::{CommandLog, Ran};
 use crate::library::{Library, LibraryLink, ToEngine};
 use crate::media::{MediaPool, follows_pitch};
 use crate::plugins::{Change, Plugins};
@@ -118,6 +119,8 @@ pub struct Session {
     preview_gain: f32,
     /// How far ahead of the device the engine renders.
     lead: Lead,
+    /// The commands run this session.
+    command_log: CommandLog,
 }
 
 impl Session {
@@ -281,6 +284,7 @@ impl Session {
             library: Library::none(),
             preview_gain: 1.0,
             lead: Lead::Off,
+            command_log: CommandLog::default(),
         };
         session.arm();
         session
@@ -805,7 +809,12 @@ impl Session {
             requests: &mut self.requests,
             library: &mut library,
         };
-        self.commands.run(id, &mut context)?;
+        let ran = self.commands.run_with(id, &Args::new(), &mut context);
+        if let Err(CommandError::Unknown(_)) = ran {
+            return Err(UnknownCommand(id.clone()));
+        }
+        let error = ran.err().map(|error| error.to_string());
+        self.command_log.add(Ran::One(id, &Args::new()), error);
         self.sync();
         Ok(())
     }
@@ -826,6 +835,8 @@ impl Session {
             library: &mut library,
         };
         let result = self.commands.run_with(id, args, &mut context);
+        let error = result.as_ref().err().map(ToString::to_string);
+        self.command_log.add(Ran::One(id, args), error);
         self.sync();
         result
     }
@@ -850,8 +861,19 @@ impl Session {
             library: &mut library,
         };
         let result = self.commands.run_batch(name, commands, &mut context);
+        let error = result.as_ref().err().map(ToString::to_string);
+        self.command_log.add(Ran::Batch(name, commands), error);
         self.sync();
         result
+    }
+
+    /// The commands run this session.
+    pub(crate) fn command_log(&self) -> &CommandLog {
+        &self.command_log
+    }
+
+    pub(crate) fn command_log_mut(&mut self) -> &mut CommandLog {
+        &mut self.command_log
     }
 
     /// What the commands run so far asked the app to do, such as opening a

@@ -1,7 +1,8 @@
 //! The tools agents call: a few general ones that cover every command, so
 //! a new command reaches agents with no change here, and reads of the
 //! project, a clip, a device, a modulator, a lane of automation, the
-//! editor's state, the undo history and what the project costs the CPU.
+//! editor's state, the undo history, what the project costs the CPU, what
+//! plays and what's under way, and the messages the window shows.
 //!
 //! A call's arguments are checked on the server's thread, against the
 //! commands' parameters for the commands it runs. The window then answers
@@ -24,7 +25,8 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use serde_json::{Map, Value as Json, json};
 
-use crate::{Asked, Call, Reply, Run, reads};
+use crate::waiting::{self, Until};
+use crate::{Asked, Call, Reply, Run, Shot, reads};
 
 pub const LIST_COMMANDS: &str = "list_commands";
 pub const DESCRIBE_COMMAND: &str = "describe_command";
@@ -38,6 +40,17 @@ pub const GET_AUTOMATION: &str = "get_automation";
 pub const GET_EDITOR: &str = "get_editor";
 pub const GET_HISTORY: &str = "get_history";
 pub const GET_PERFORMANCE: &str = "get_performance";
+pub const GET_STATUS: &str = "get_status";
+pub const GET_MESSAGES: &str = "get_messages";
+pub const GET_SETTINGS: &str = "get_settings";
+pub const LIST_AUDIO_DEVICES: &str = "list_audio_devices";
+pub const GET_PLUGINS: &str = "get_plugins";
+pub const GET_LAYOUT: &str = "get_layout";
+pub const GET_LEVELS: &str = "get_levels";
+pub const WAIT_FOR: &str = "wait_for";
+pub const GET_COMMAND_LOG: &str = "get_command_log";
+pub const GET_WINDOWS: &str = "get_windows";
+pub const GET_SCREENSHOT: &str = "get_screenshot";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -178,7 +191,8 @@ pub fn list() -> Vec<Tool> {
             "Reads one clip: where it is, and its notes, with their expression, and its \
              controllers' curves, in the clip's own time, or its audio file, with its warp \
              (its markers, mode, transpose, detune, and Slice's, Spectral's and Granular's \
-             settings) and its curves, by parameter, if it has them.",
+             settings, and the transients analysis found, once it has) and its curves, by \
+             parameter, if it has them.",
             object(json!({ "clip": id_number("The clip's id.") }), &["clip"]),
         ),
         read(
@@ -190,9 +204,17 @@ pub fn list() -> Vec<Tool> {
              param 2\" and its Bypass as \"device 4 bypass\", and its ports, with the wires \
              into each: a Compressor's or a Gate's Sidechain, or a plugin's side inputs, by the \
              plugin's ids and names for them, and an instrument's or a MIDI effect's note \
-             input, last, as wire.connect takes them.",
+             input, last, as wire.connect takes them. A plugin's says whether it loaded, why \
+             it plays nothing if it doesn't, and whether its window is open. filter keeps the \
+             parameters whose names hold it, for a plugin with thousands.",
             object(
-                json!({ "device": id_number("The device's id.") }),
+                json!({
+                    "device": id_number("The device's id."),
+                    "filter": {
+                        "type": "string",
+                        "description": "Text the parameters' names hold, in any case.",
+                    },
+                }),
                 &["device"],
             ),
         ),
@@ -232,7 +254,9 @@ pub fn list() -> Vec<Tool> {
             "Reads the editor's state: what's selected, the selected track, which panel has \
              the focus, where the start marker is, the grid, what's in sight, the clip the \
              piano roll shows and its selected notes, and the devices selected in the devices \
-             panel, which shows the selected track's, in the order they play.",
+             panel, which shows the selected track's, in the order they play; what the piano \
+             roll and the Sample Editor have in sight, the tracks' heights, take and \
+             automation lanes, and what's on the clipboards.",
             object(json!({}), &[]),
         ),
         read(
@@ -257,6 +281,215 @@ pub fn list() -> Vec<Tool> {
              device the engine rendered lately and aimed to, the share of a core of what \
              rendered ahead, and the blocks the audio thread had to render itself as the lead \
              ran out, which come before dropouts.",
+            object(json!({}), &[]),
+        ),
+        read(
+            GET_STATUS,
+            "Get Status",
+            "Reads what plays and what's under way: whether the transport plays and records, \
+             where the playhead is, in beats and seconds, the takes being recorded, the \
+             question the window waits for the user to answer, if it asks one, and the work \
+             that lands later, with nothing to wait on: audio files being analysed, segments \
+             still to render, a graph compiling, an export, with how much of it is done, and \
+             the plugins' and the library's scans. idle is true once none of that work is \
+             under way, and wait_for waits until then. revision goes up with every change to \
+             the project.",
+            object(json!({}), &[]),
+        ),
+        read(
+            WAIT_FOR,
+            "Wait For",
+            "Waits until what lands later has, then answers with met, true, the seconds it \
+             waited, and the status as get_status reads it. until says what for: idle, no work \
+             under way, as get_status's idle says; stopped, the transport not playing; \
+             recorded, the takes in the project after Stop; analysed, no audio file being \
+             analysed; scanned, no plugin scan and no library scan, file reading or presets \
+             search; rendered, no segment left to render and no graph compiling; changed, the \
+             project changed since the revision since, from get_status, or since the wait \
+             began, as when the user edits it; answered, no question waiting for the user. \
+             After timeout seconds, it answers with met false. Cancelling the call stops the \
+             wait.",
+            object(
+                json!({
+                    "until": {
+                        "type": "string",
+                        "enum": Until::names(),
+                        "description": "What to wait for.",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 600,
+                        "description": "The most seconds to wait: 60 unless it says. With 0, \
+                                        it reads the status once.",
+                    },
+                    "since": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "With changed, the revision the project should move on \
+                                        from, as get_status gave it.",
+                    },
+                }),
+                &["until"],
+            ),
+        ),
+        tool(
+            GET_MESSAGES,
+            "Reads the messages the window shows the user, oldest first: errors and notices, \
+             such as a file or a plugin that's missing, a device that failed, or an export's \
+             problems. With clear, it clears them too, as Dismiss does, so the next call gives \
+             only those that came after.",
+            object(
+                json!({
+                    "clear": {
+                        "type": "boolean",
+                        "description": "Whether to clear the messages once read, as Dismiss does.",
+                    }
+                }),
+                &[],
+            ),
+        )
+        .with_title("Get Messages")
+        .annotate(
+            ToolAnnotations::new()
+                .read_only(false)
+                .destructive(false)
+                .idempotent(false)
+                .open_world(false),
+        ),
+        read(
+            GET_SETTINGS,
+            "Get Settings",
+            "Reads the settings, as the settings file has them, by section: audio, behaviour \
+             (the profile in use's), export, browser, recording, analysis, render_cache and \
+             the rest; which of them options.set can change, by key, such as \
+             audio.render_ahead; the profile in use; the settings file; what plays, its device \
+             and driver type, sample rate, buffer, latency and inputs, or null when nothing \
+             does; and the recording offset of the device playing, in frames. Settings aren't \
+             steps in the undo history: an agent that changes one puts it back when it's done.",
+            object(json!({}), &[]),
+        ),
+        read(
+            GET_PLUGINS,
+            "Get Plugins",
+            "Lists the plugins installed, as the browser does, for device.add_plugin: each \
+             one's format, id, name, vendor, kind (instrument, midi_effect or audio_effect) \
+             and Render Ahead (auto, or never if it always renders live), and whether the \
+             plugins are being scanned. A filter keeps those whose names, vendors or ids \
+             hold it.",
+            object(
+                json!({
+                    "filter": {
+                        "type": "string",
+                        "description": "Text the name, the vendor or the id holds, in any case.",
+                    }
+                }),
+                &[],
+            ),
+        ),
+        read(
+            GET_LAYOUT,
+            "Get Layout",
+            "Reads how the window is laid out: each panel's id and title, which window it's \
+             in, the main one or a window of its own, whether it's hidden, and whether it's \
+             in sight, rather than hidden or behind another tab; each window of its own's \
+             place, size and panels; the monitors; and the workspace and the profile in use. \
+             view.toggle_* commands show and hide panels by these ids.",
+            object(json!({}), &[]),
+        ),
+        read(
+            GET_WINDOWS,
+            "Get Windows",
+            "Lists Musicable's windows: the main window and the windows of their own that panels \
+             moved to, each with its window, main or its number from 1, its title, where it is \
+             and how big, in pixels on the desktop, whether it's minimized or has the focus, and \
+             the panels in sight in it; the dialogs open over the main window, such as \
+             Settings; and the plugins' windows that are open, each with its device's id, its \
+             title and whether get_screenshot can take it.",
+            object(json!({}), &[]),
+        ),
+        read(
+            GET_SCREENSHOT,
+            "Get Screenshot",
+            "Takes a picture of a window, the main window unless window says, of a panel, or of \
+             a plugin device's window, as it's drawn, whatever covers it or wherever it is, and \
+             gives it as an image after the window, the panel or the device, and its size in \
+             pixels. With file, it saves it there as a PNG too. A minimized window can't be \
+             taken, and a panel only while it's in sight, as get_layout says. The windows \
+             panels moved to, and plugins' windows, are taken only on Windows so far.",
+            object(
+                json!({
+                    "window": {
+                        "description": "main, or a window of its own's number from 1, as \
+                                        get_windows gives it.",
+                        "anyOf": [
+                            { "type": "string", "enum": ["main"] },
+                            { "type": "integer", "minimum": 1 },
+                        ],
+                    },
+                    "panel": {
+                        "type": "string",
+                        "description": "A panel's id, as get_layout gives it, such as mixer, to \
+                                        take only it.",
+                    },
+                    "device": {
+                        "type": "integer",
+                        "description": "A plugin device's id, to take its plugin's window, \
+                                        which get_windows lists while it's open.",
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "A full path to a .png file to save it to.",
+                    },
+                }),
+                &[],
+            ),
+        ),
+        read(
+            GET_LEVELS,
+            "Get Levels",
+            "Reads the meters, as the mixer shows them: each track's and the master's peak \
+             and RMS, left and right, and the highest sample since the peaks were cleared, in \
+             dBFS, null for silence; where each modulator's outputs are now; and how far the \
+             routings move each parameter they move. The meters move only while an audio \
+             device plays, and fall back for a few seconds after the music stops.",
+            object(json!({}), &[]),
+        ),
+        read(
+            GET_COMMAND_LOG,
+            "Get Command Log",
+            "Reads the commands run this session, oldest first: the user's, from the menus, keys \
+             and panels, and agents', each with its number n, its time in UTC, by, user or the \
+             agent's name, the command and its args, or for run_commands the batch's name and \
+             its commands, and the error, if it failed. It gives the last 100 unless last says, \
+             and with since, only those after that number, to read what ran since the last call. \
+             count says how many have run, and file where the session's log is, one entry a \
+             line, which outlasts the app.",
+            object(
+                json!({
+                    "since": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "The number n of the entry to read after.",
+                    },
+                    "last": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": LONGEST_LOG,
+                        "description": "The most entries to give, the latest: 100 unless it says.",
+                    },
+                }),
+                &[],
+            ),
+        ),
+        read(
+            LIST_AUDIO_DEVICES,
+            "List Audio Devices",
+            "Lists the audio devices again, as the Audio settings and the mixer's input menus \
+             do: the driver types this build plays through; the outputs, each with its id, \
+             name, driver type, whether it's the system's default and whether it plays, for \
+             options.set_audio_device; the audio inputs, each with its id, name and channels, \
+             and the MIDI inputs, with their ids, for mixer.set_input.",
             object(json!({}), &[]),
         ),
     ]
@@ -323,10 +556,16 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         RUN_COMMAND => &["id", "args"],
         RUN_COMMANDS => &["name", "commands"],
         GET_CLIP => &["clip"],
-        GET_DEVICE => &["device"],
+        GET_DEVICE => &["device", "filter"],
+        GET_PLUGINS => &["filter"],
         GET_MODULATOR => &["modulator"],
         GET_AUTOMATION => &["param"],
-        GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE => &[],
+        GET_MESSAGES => &["clear"],
+        GET_COMMAND_LOG => &["since", "last"],
+        GET_SCREENSHOT => &["window", "panel", "device", "file"],
+        GET_WINDOWS => &[],
+        GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
+        | LIST_AUDIO_DEVICES | GET_LAYOUT | GET_LEVELS => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
     };
     if let Some(unknown) = arguments
@@ -373,7 +612,20 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         }
         GET_PROJECT => Asked::Project,
         GET_CLIP => Asked::Clip(ClipId(id(arguments, "clip")?)),
-        GET_DEVICE => Asked::Device(DeviceId(id(arguments, "device")?)),
+        GET_DEVICE => Asked::Device(
+            DeviceId(id(arguments, "device")?),
+            optional_text(arguments, "filter")?,
+        ),
+        GET_PLUGINS => Asked::Plugins(optional_text(arguments, "filter")?),
+        GET_LAYOUT => Asked::Layout,
+        GET_LEVELS => Asked::Levels,
+        GET_WINDOWS => Asked::Windows,
+        GET_SCREENSHOT => Asked::Screenshot(shot(arguments)?),
+        GET_COMMAND_LOG => Asked::CommandLog {
+            since: optional_number(arguments, "since", u64::MAX)?,
+            last: optional_number(arguments, "last", LONGEST_LOG)?
+                .map_or(LOG, |last| last as usize),
+        },
         GET_MODULATOR => Asked::Modulator(ModulatorId(id(arguments, "modulator")?)),
         GET_AUTOMATION => {
             let param = text(arguments, "param")?;
@@ -389,6 +641,12 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_EDITOR => Asked::Editor,
         GET_HISTORY => Asked::History,
         GET_PERFORMANCE => Asked::Performance,
+        GET_STATUS => Asked::Status,
+        GET_SETTINGS => Asked::Settings,
+        LIST_AUDIO_DEVICES => Asked::AudioDevices,
+        GET_MESSAGES => Asked::Messages {
+            clear: flag(arguments, "clear")?,
+        },
         _ => unreachable!("every tool is matched above"),
     };
     Ok(asked)
@@ -442,6 +700,85 @@ fn optional_text(arguments: &JsonObject, name: &str) -> Result<Option<String>, R
     }
 }
 
+fn flag(arguments: &JsonObject, name: &str) -> Result<bool, Refused> {
+    match arguments.get(name) {
+        None | Some(Json::Null) => Ok(false),
+        Some(Json::Bool(on)) => Ok(*on),
+        Some(_) => Err(Refused::Arguments(format!("{name} must be true or false."))),
+    }
+}
+
+/// What `get_screenshot`'s `arguments` ask a picture of.
+fn shot(arguments: &JsonObject) -> Result<Shot, Refused> {
+    let window = match arguments.get("window") {
+        None | Some(Json::Null) => None,
+        Some(Json::String(main)) if main == "main" => None,
+        Some(window) => match window.as_u64() {
+            Some(window @ 1..) => Some(window as usize - 1),
+            _ => {
+                let problem = "window is main, or a window of its own's number from 1, as \
+                               get_windows gives it.";
+                return Err(Refused::Arguments(problem.into()));
+            }
+        },
+    };
+    let panel = optional_text(arguments, "panel")?;
+    if panel.is_some()
+        && arguments
+            .get("window")
+            .is_some_and(|window| !window.is_null())
+    {
+        let problem = "Give the window or the panel, not both: a panel's picture comes from its \
+                       window.";
+        return Err(Refused::Arguments(problem.into()));
+    }
+    let device = match arguments.get("device") {
+        None | Some(Json::Null) => None,
+        Some(_) => Some(DeviceId(id(arguments, "device")?)),
+    };
+    let given = |name: &str| arguments.get(name).is_some_and(|value| !value.is_null());
+    if device.is_some() && (given("window") || given("panel")) {
+        let problem = "Give the device, the window or the panel, not more than one: a plugin's \
+                       window is a window of its own.";
+        return Err(Refused::Arguments(problem.into()));
+    }
+    let file = optional_text(arguments, "file")?.map(std::path::PathBuf::from);
+    if let Some(file) = &file {
+        if !file.is_absolute() {
+            let problem = "file must be a full path.";
+            return Err(Refused::Arguments(problem.into()));
+        }
+        if !(file.extension()).is_some_and(|extension| extension.eq_ignore_ascii_case("png")) {
+            let problem = "file must be a .png file.";
+            return Err(Refused::Arguments(problem.into()));
+        }
+    }
+    Ok(Shot {
+        window,
+        panel,
+        device,
+        file,
+    })
+}
+
+/// How many entries of the command log `get_command_log` gives unless it
+/// says, and the most it can say.
+const LOG: usize = 100;
+const LONGEST_LOG: u64 = 10_000;
+
+/// The whole number `name`, up to `most`, if it's there.
+fn optional_number(arguments: &JsonObject, name: &str, most: u64) -> Result<Option<u64>, Refused> {
+    match arguments.get(name) {
+        None | Some(Json::Null) => Ok(None),
+        Some(number) => match number.as_u64() {
+            Some(number) if number <= most => Ok(Some(number)),
+            _ => Err(Refused::Arguments(format!(
+                "{name} must be a whole number, from 0 to {most}."
+            ))),
+        },
+    }
+}
+
 fn id(arguments: &JsonObject, name: &str) -> Result<u32, Refused> {
     let id = (arguments.get(name))
         .and_then(Json::as_f64)
@@ -452,6 +789,18 @@ fn id(arguments: &JsonObject, name: &str) -> Result<u32, Refused> {
             "{name} must be an id: a whole number."
         ))),
     }
+}
+
+/// What the window answered, as the agent reads it: its JSON as text, and
+/// a picture it took, its `png`, as an image after it.
+fn content(mut json: Json) -> Vec<ContentBlock> {
+    let png = match json.as_object_mut().and_then(|json| json.remove("png")) {
+        Some(Json::String(png)) => Some(png),
+        _ => None,
+    };
+    let mut content = vec![ContentBlock::text(json.to_string())];
+    content.extend(png.map(|png| ContentBlock::image(png, "image/png")));
+    content
 }
 
 /// A failed call's result, saying why for the agent to read.
@@ -515,6 +864,13 @@ impl ServerHandler for Tools {
     ) -> Result<CallToolResponse, ErrorData> {
         let agent = self.agent(&context);
         let arguments = request.arguments.unwrap_or_default();
+        if request.name == WAIT_FOR {
+            let result = match waiting::wait(&arguments) {
+                Ok(wait) => self.wait_for(&agent, wait, &context).await,
+                Err(why) => failed(why),
+            };
+            return Ok(result.into());
+        }
         let asked = match asked(&request.name, &arguments, &self.link.commands) {
             Ok(asked) => asked,
             Err(Refused::NoTool(name)) => {
@@ -523,20 +879,30 @@ impl ServerHandler for Tools {
             }
             Err(Refused::Arguments(why)) => return Ok(failed(why).into()),
         };
-        let (reply, answer) = Reply::new(agent);
-        if self.link.calls.send(Call { asked, reply }).is_err() {
-            return Ok(failed("Musicable has stopped letting agents control it.").into());
-        }
-        (self.link.wake)();
-        let result = match answer.await {
-            Ok(Ok(json)) => CallToolResult::success(vec![ContentBlock::text(json.to_string())]),
-            Ok(Err(why)) => failed(why),
-            Err(_) => failed(
-                "Musicable stopped letting agents control it before it answered: \
-                 get_history says whether the change was made.",
-            ),
+        let result = match self.ask(&agent, asked).await {
+            Ok(json) => CallToolResult::success(content(json)),
+            Err(why) => failed(why),
         };
         Ok(result.into())
+    }
+}
+
+impl Tools {
+    /// Asks the window `asked` for `agent`, and waits for its answer.
+    pub(crate) async fn ask(&self, agent: &str, asked: Asked) -> Result<Json, String> {
+        let (reply, answer) = Reply::new(agent.to_owned());
+        if self.link.calls.send(Call { asked, reply }).is_err() {
+            return Err("Musicable has stopped letting agents control it.".into());
+        }
+        (self.link.wake)();
+        match answer.await {
+            Ok(answer) => answer,
+            Err(_) => Err(
+                "Musicable stopped letting agents control it before it answered: \
+                           get_history says whether the change was made."
+                    .into(),
+            ),
+        }
     }
 }
 
@@ -669,6 +1035,129 @@ mod tests {
         );
         assert_eq!(call(GET_HISTORY, json!({})), Ok(Asked::History));
         assert_eq!(call(GET_PERFORMANCE, json!({})), Ok(Asked::Performance));
+        assert_eq!(call(GET_STATUS, json!({})), Ok(Asked::Status));
+        assert_eq!(call(GET_SETTINGS, json!({})), Ok(Asked::Settings));
+        assert_eq!(call(GET_LAYOUT, json!({})), Ok(Asked::Layout));
+        assert_eq!(call(GET_LEVELS, json!({})), Ok(Asked::Levels));
+        assert_eq!(call(GET_WINDOWS, json!({})), Ok(Asked::Windows));
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({})),
+            Ok(Asked::Screenshot(Shot::default()))
+        );
+        let file = if cfg!(windows) {
+            "C:\\shots\\mixer.PNG"
+        } else {
+            "/shots/mixer.PNG"
+        };
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"panel": "mixer", "file": file})),
+            Ok(Asked::Screenshot(Shot {
+                window: None,
+                panel: Some("mixer".into()),
+                device: None,
+                file: Some(file.into()),
+            }))
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"device": 7})),
+            Ok(Asked::Screenshot(Shot {
+                device: Some(DeviceId(7)),
+                ..Shot::default()
+            }))
+        );
+        let one = "Give the device, the window or the panel, not more than one: a plugin's \
+                   window is a window of its own.";
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"device": 7, "window": 1})),
+            refused(one)
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"device": 7, "panel": "mixer"})),
+            refused(one)
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"device": "eq"})),
+            refused("device must be an id: a whole number.")
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"window": 2})),
+            Ok(Asked::Screenshot(Shot {
+                window: Some(1),
+                ..Shot::default()
+            }))
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"window": "main"})),
+            Ok(Asked::Screenshot(Shot::default()))
+        );
+        let window = "window is main, or a window of its own's number from 1, as get_windows \
+                      gives it.";
+        assert_eq!(call(GET_SCREENSHOT, json!({"window": 0})), refused(window));
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"window": "side"})),
+            refused(window)
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"window": 1, "panel": "mixer"})),
+            refused(
+                "Give the window or the panel, not both: a panel's picture comes from its window."
+            )
+        );
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"file": "mixer.png"})),
+            refused("file must be a full path.")
+        );
+        let jpeg = if cfg!(windows) {
+            "C:\\mixer.jpg"
+        } else {
+            "/mixer.jpg"
+        };
+        assert_eq!(
+            call(GET_SCREENSHOT, json!({"file": jpeg})),
+            refused("file must be a .png file.")
+        );
+        assert_eq!(
+            call(GET_COMMAND_LOG, json!({})),
+            Ok(Asked::CommandLog {
+                since: None,
+                last: 100
+            })
+        );
+        assert_eq!(
+            call(GET_COMMAND_LOG, json!({"since": 12, "last": 5})),
+            Ok(Asked::CommandLog {
+                since: Some(12),
+                last: 5
+            })
+        );
+        assert_eq!(
+            call(GET_COMMAND_LOG, json!({"last": 10_001})),
+            refused("last must be a whole number, from 0 to 10000.")
+        );
+        assert_eq!(
+            call(GET_COMMAND_LOG, json!({"since": -1})),
+            refused(&format!(
+                "since must be a whole number, from 0 to {}.",
+                u64::MAX
+            ))
+        );
+        assert_eq!(
+            call(GET_PLUGINS, json!({"filter": "surge"})),
+            Ok(Asked::Plugins(Some("surge".into())))
+        );
+        assert_eq!(
+            call(GET_DEVICE, json!({"device": 4, "filter": "cutoff"})),
+            Ok(Asked::Device(DeviceId(4), Some("cutoff".into())))
+        );
+        assert_eq!(call(LIST_AUDIO_DEVICES, json!({})), Ok(Asked::AudioDevices));
+        assert_eq!(
+            call(GET_MESSAGES, json!({})),
+            Ok(Asked::Messages { clear: false })
+        );
+        assert_eq!(
+            call(GET_MESSAGES, json!({"clear": true})),
+            Ok(Asked::Messages { clear: true })
+        );
         assert_eq!(
             call("get_mood", json!({})),
             Err(Refused::NoTool("get_mood".into()))
@@ -676,9 +1165,22 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_comes_after_the_answer_as_an_image() {
+        let answer = content(json!({"window": "main", "png": "iVBORw0KGgo="}));
+        assert_eq!(answer.len(), 2);
+        assert_eq!(answer[0].as_text().unwrap().text, r#"{"window":"main"}"#);
+        let image = answer[1].as_image().unwrap();
+        assert_eq!(
+            (image.data.as_str(), image.mime_type.as_str()),
+            ("iVBORw0KGgo=", "image/png")
+        );
+        assert_eq!(content(json!({"window": "main"})).len(), 1);
+    }
+
+    #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 23);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

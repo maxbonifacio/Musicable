@@ -7,6 +7,8 @@ mod app;
 mod appearance_page;
 mod audio_files;
 mod audio_page;
+pub mod bridge_tools;
+mod command_log;
 pub mod export;
 mod export_window;
 mod frame_times;
@@ -31,6 +33,7 @@ mod settings;
 mod settings_window;
 mod theme_file;
 pub mod toolkit;
+mod window_capture;
 mod workspaces;
 
 pub use app::App;

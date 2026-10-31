@@ -5,10 +5,12 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use musicable_commands::{Args, Editor, Keymap, Registry, Request, Steps, arrange};
+use musicable_commands::{Args, Editor, ExportOptions, Keymap, Registry, Request, Steps, arrange};
 use musicable_engine::Lead;
 use musicable_mcp::pipe::Address;
-use musicable_mcp::{CpuPart, CpuRow, Host, Performance, RenderingAhead, Reply, Run};
+use musicable_mcp::{
+    CpuPart, CpuRow, Exporting, Host, Performance, PluginState, RenderingAhead, Reply, Run, Status,
+};
 use musicable_model::param::ParamSpec;
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, Project, TrackId};
@@ -17,7 +19,8 @@ use serde_json::json;
 
 use super::{App, with_extension};
 use crate::audio_files::clip_path;
-use crate::export::Report;
+use crate::export::{Report, Stage};
+use crate::renders::RenderCache;
 
 /// What an agent's command hears while the window asks the user something.
 const ASKING: &str = "Musicable is waiting for the user to answer a question in its window. Try \
@@ -166,7 +169,8 @@ impl App {
 
     /// Runs what an agent asked for, as a menu or a key runs it, and
     /// answers: at once, or once the user has said whether to save their
-    /// changes, or once an export has finished.
+    /// changes, or once an export has finished. The command log says the
+    /// agent ran it.
     fn run_for_agent(
         &mut self,
         run: Run,
@@ -174,6 +178,13 @@ impl App {
         ctx: &egui::Context,
         frame: &eframe::Frame,
     ) {
+        let agent = reply.agent().to_owned();
+        self.session.command_log_mut().set_by(Some(agent));
+        self.run_as_agent(run, reply, ctx, frame);
+        self.session.command_log_mut().set_by(None);
+    }
+
+    fn run_as_agent(&mut self, run: Run, reply: Reply, ctx: &egui::Context, frame: &eframe::Frame) {
         if self.pending.is_some() {
             return reply.failed(ASKING);
         }
@@ -190,9 +201,9 @@ impl App {
                 let ran = result.is_ok();
                 let mut reply = Some(reply);
                 for request in self.session.take_requests() {
-                    if is_file(&request) {
+                    if answers(&request) {
                         if let Some(reply) = reply.take() {
-                            self.file_for_agent(request, reply, ctx);
+                            self.answer_request(request, reply, ctx, frame);
                         }
                     } else if request.for_agents() {
                         self.carry_out(request, ctx, frame);
@@ -208,10 +219,10 @@ impl App {
             Run::Batch(name, commands) => {
                 let result = self.session.run_batch(&name, &commands);
                 let ran = result.is_ok();
-                // Commands that run alone, as those that ask for files do,
-                // can't be part of a batch.
+                // Commands that run alone, as those that ask for files or
+                // change settings do, can't be part of a batch.
                 for request in self.session.take_requests() {
-                    if request.for_agents() && !is_file(&request) {
+                    if request.for_agents() && !answers(&request) {
                         self.carry_out(request, ctx, frame);
                     }
                 }
@@ -237,6 +248,37 @@ impl App {
     fn note_change(&mut self, revision: u64, stepping: bool, done: Option<String>) {
         if let Some(change) = self.step_since(revision, stepping).or(done) {
             self.agents.change = Some(change);
+        }
+    }
+
+    /// Carries out a request an agent's command made that answers it: for
+    /// a file, or to change a setting.
+    fn answer_request(
+        &mut self,
+        request: Request,
+        reply: Reply,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        let answer = match request {
+            Request::SetSetting { key, value } => self.set_setting(&key, &value, ctx, frame),
+            Request::SetAudioDevice(device) => self.set_audio_device(device),
+            Request::SetKeys { command, keys } => self.set_keys(&command, keys),
+            Request::ResetKeys(command) => self.reset_keys(&command),
+            Request::SaveWorkspaceAs(Some(name)) => {
+                (self.save_workspace_as(&name)).map(|()| json!({ "workspace": name }))
+            }
+            Request::RenameWorkspace(Some(name)) => {
+                (self.rename_workspace(&name)).map(|()| json!({ "workspace": name }))
+            }
+            Request::SaveWorkspaceAs(None) | Request::RenameWorkspace(None) => {
+                Err("Give the workspace its name.".into())
+            }
+            request => return self.file_for_agent(request, reply, ctx),
+        };
+        match answer {
+            Ok(answer) => reply.done(json!({ "result": answer })),
+            Err(why) => reply.failed(full_stop(why)),
         }
     }
 
@@ -276,7 +318,10 @@ impl App {
                 track,
                 at,
             } => self.import_for_agent(files, track, at, reply),
-            Request::ExportAudio(Some(file)) => self.export_for_agent(file, reply, ctx),
+            Request::ExportAudio {
+                file: Some(file),
+                options,
+            } => self.export_for_agent(file, &options, reply, ctx),
             // The file commands' arguments for files are ones agents must
             // give.
             _ => reply.failed("Give the command its file."),
@@ -341,8 +386,14 @@ impl App {
 
     /// Renders the mix to `file` for an agent, as a script would: see
     /// [`App::export_mix_to`]. The agent hears the file once it's written.
-    fn export_for_agent(&mut self, file: PathBuf, reply: Reply, ctx: &egui::Context) {
-        match self.export_mix_to(&file, ctx) {
+    fn export_for_agent(
+        &mut self,
+        file: PathBuf,
+        options: &ExportOptions,
+        reply: Reply,
+        ctx: &egui::Context,
+    ) {
+        match self.export_audio_to(&file, options, ctx) {
             Ok(()) => self.agents.exporting = Some(reply),
             Err(why) => reply.failed(why),
         }
@@ -476,14 +527,129 @@ impl musicable_mcp::Window for Agent<'_> {
         }
     }
 
+    fn status(&self) -> Status {
+        let app = &self.app;
+        let session = &app.session;
+        let heard = session.heard_position(app.output.latency());
+        let rate = session.engine_config().sample_rate;
+        let takes = (super::recordings(session).into_iter())
+            .map(|recording| (recording.track, recording.range))
+            .collect();
+        let question = (app.pending.as_ref()).map(|request| {
+            let before = match request {
+                Request::New | Request::NewDemo => " before starting a new project",
+                Request::Open(_) => " before opening another project",
+                Request::Quit => " before quitting",
+                _ => "",
+            };
+            format!("Save the changes to {}{before}?", app.name())
+        });
+        let export = (app.export.as_ref()).map(|export| {
+            let stage = export.stage();
+            let (name, pass, passes, speed) = match stage {
+                Stage::Preparing { pass, passes } => ("preparing", pass, passes, None),
+                Stage::Rendering {
+                    pass,
+                    passes,
+                    speed,
+                    ..
+                } => ("rendering", pass, passes, Some(speed)),
+                Stage::Normalising { pass, passes, .. } => ("normalising", pass, passes, None),
+                Stage::Finished => ("finished", 0, 0, None),
+            };
+            Exporting {
+                stage: name,
+                pass,
+                passes,
+                done: stage.fraction(),
+                speed,
+            }
+        });
+        let library = session.library();
+        let folders = |folders: Vec<(PathBuf, usize)>| {
+            (folders.into_iter())
+                .map(|(folder, files)| (folder.display().to_string(), files))
+                .collect()
+        };
+        Status {
+            playing: session.is_playing(),
+            recording: session.is_recording(),
+            playhead: session.beats_at(heard),
+            seconds: heard as f64 / f64::from(rate),
+            takes,
+            question,
+            analysing: app.analyses.analysing(),
+            rendering: RenderCache::global().pending(),
+            compiling: session.compiling(),
+            export,
+            scanning_plugins: app.plugin_scan.is_running(),
+            scanning_folders: folders(library.scanning()),
+            reading_folders: folders(library.reading()),
+            finding_presets: library.is_finding_presets(),
+            revision: session.revision(),
+        }
+    }
+
+    fn plugin_state(&self, device: DeviceId) -> Option<PluginState> {
+        let status = self.app.plugin_status.get(&device)?;
+        Some(PluginState {
+            loaded: status.loaded,
+            problem: status.problem.clone(),
+            has_window: status.has_window,
+            window_open: status.window_open,
+        })
+    }
+
+    fn plugins(&self, filter: Option<&str>) -> serde_json::Value {
+        self.app.plugins_for_agent(filter)
+    }
+
+    fn command_log(&self, since: Option<u64>, last: usize) -> serde_json::Value {
+        self.app.session.command_log().read(since, last)
+    }
+
+    fn layout(&self) -> serde_json::Value {
+        self.app.layout_for_agent()
+    }
+
+    fn levels(&self) -> serde_json::Value {
+        self.app.levels_for_agent()
+    }
+
+    fn settings(&self) -> serde_json::Value {
+        self.app.settings_for_agent()
+    }
+
+    fn audio_devices(&mut self) -> serde_json::Value {
+        self.app.audio_devices_for_agent()
+    }
+
+    fn messages(&self) -> Vec<String> {
+        self.app.messages.clone()
+    }
+
+    fn clear_messages(&mut self) {
+        self.app.messages.clear();
+    }
+
     fn run(&mut self, run: Run, reply: Reply) {
         self.app.run_for_agent(run, reply, self.ctx, self.frame);
     }
+
+    fn windows(&self) -> serde_json::Value {
+        self.app.windows_for_agent(self.ctx)
+    }
+
+    fn screenshot(&mut self, shot: musicable_mcp::Shot, reply: Reply) {
+        self.app.screenshot_for_agent(shot, reply, self.ctx);
+    }
 }
 
-/// Whether `request` is for a file: one an agent's command gives, where
-/// the user's would ask for one.
-fn is_file(request: &Request) -> bool {
+/// Whether the app answers the agent whose command made `request`, rather
+/// than the command: it's for a file, one an agent's command gives, where
+/// the user's would ask for one, or it changes a setting, which says what
+/// it was.
+fn answers(request: &Request) -> bool {
     matches!(
         request,
         Request::New
@@ -492,7 +658,13 @@ fn is_file(request: &Request) -> bool {
             | Request::Save
             | Request::SaveAs(_)
             | Request::ImportAudio { .. }
-            | Request::ExportAudio(_)
+            | Request::ExportAudio { .. }
+            | Request::SetSetting { .. }
+            | Request::SetAudioDevice(_)
+            | Request::SetKeys { .. }
+            | Request::ResetKeys(_)
+            | Request::SaveWorkspaceAs(_)
+            | Request::RenameWorkspace(_)
     )
 }
 
@@ -502,7 +674,9 @@ fn relative_path(request: &Request) -> Option<&Path> {
     let paths: Vec<&Path> = match request {
         Request::Open(Some(path))
         | Request::SaveAs(Some(path))
-        | Request::ExportAudio(Some(path)) => {
+        | Request::ExportAudio {
+            file: Some(path), ..
+        } => {
             vec![path]
         }
         Request::ImportAudio {

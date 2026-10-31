@@ -22,6 +22,8 @@ musicable-analysis = { path = "crates/analysis" }
 musicable-stretch = { path = "crates/stretch" }
 rtrb = "0.4"
 base64 = "0.22"
+# Encodes the pictures agents take of the windows.
+png = "0.18"
 # Decodes FLAC frames; finding them is ours (io::audio).
 claxon = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -48,7 +50,7 @@ memchr = "2.8"
 # official Rust SDK, its server in the app and its client in the bridge.
 rmcp = { version = "3.7", default-features = false, features = ["client", "server"] }
 # The MCP server's runtime, on a thread of its own, and the bridge's.
-tokio = { version = "1.54", features = ["io-std", "io-util", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.54", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 # The analysis's spectral flux, which finds onsets and the tempo.
 realfft = "3.5"
 # The Beat This! beat and downbeat network, on the pure-Rust rten runtime.

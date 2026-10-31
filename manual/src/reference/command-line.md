@@ -99,6 +99,44 @@ Agents can read what each device costs the CPU too, as the
 to freeze or take out, and how far ahead of the audio device Musicable
 renders ([Render Ahead](../getting-started/audio.md#render-ahead)).
 
+They can read what plays and what's under way: whether the transport plays
+or records, where the playhead is, the takes being recorded, a question the
+window asks you, and work that finishes later, such as analysing audio files
+for warping, rendering, an export or a scan. They can wait for that work
+to finish, for the takes to land after you stop recording, for you to answer
+the window's question, or for you to change the project, then carry on,
+without asking you whether it's done. They can read the messages in
+the status bar, and clear them, as **Dismiss** (×) does. And they can read
+the [log file](troubleshooting.md#the-log-file), which `musicable mcp` reads
+itself, so they can see why Musicable stopped after it has. They can read the
+[command log](troubleshooting.md#the-command-log) too: each command run this
+session, yours and theirs, with its arguments, and who ran it.
+
+Agents can read your settings and the audio devices there are, and change
+the settings the Settings window has, such as the audio device, its buffer
+size and [Render Ahead](../getting-started/audio.md#render-ahead), with the
+commands Change Setting, Set Audio Device and Set Render Ahead. Changing a
+setting isn't a step in the undo history, so the status bar says when an
+agent did, and the agent hears what the setting was, to put it back when
+it's done. They can change a command's keys too, with Set Keys and Reset
+Keys, as the [Keys page](../customising/keys.md) does, save the layout as a
+new workspace, or rename the one in use, by the name they give. Agents
+can't change the theme or your profiles, delete a workspace, or change
+whether they're let in.
+
+When they export, they can say the range, bits, sample rate, dither,
+normalizing, tail, and which stems to write, as the export window does;
+your export settings stay as they were.
+
+They can also read the plugins the browser lists, to add one by its id;
+whether a plugin device's plugin loaded, or why not, and whether its window
+is open; which panels are in sight, in which window, with your workspace
+and profile; and the meters, as the [mixer](../window/mixer.md) shows them. They can
+list the windows, and take a picture of the main window or of a panel in
+it, which they see as an image, as it's drawn, even if another window
+covers it. On Windows, they can take pictures of the windows you moved
+panels to, and of plugins' windows, too.
+
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,
 so they work while Musicable is closed or doesn't let agents in, and they

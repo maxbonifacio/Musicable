@@ -206,6 +206,39 @@ impl Workspaces<'_> {
 /// The name of the first workspace, which every user has.
 pub const DEFAULT_WORKSPACE: &str = "Default";
 
+/// How the panels and the windows of their own are laid out: see
+/// [`Shell::layout`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelLayout {
+    pub panels: Vec<PanelPlace>,
+    pub windows: Vec<WindowPlace>,
+}
+
+/// Where a panel is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelPlace {
+    pub id: &'static str,
+    pub title: &'static str,
+    /// The window of its own it's in, from 1, or `None` for the main
+    /// window.
+    pub window: Option<usize>,
+    /// Whether it's hidden, keeping its place, or not placed at all.
+    pub hidden: bool,
+    /// Whether it's in sight: not hidden, nor behind another tab.
+    pub in_sight: bool,
+}
+
+/// A window of its own: where it is, how big, and the panels in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowPlace {
+    /// Its top left corner on the desktop, in pixels, once known.
+    pub at: Option<[i32; 2]>,
+    /// How big its inside is, in pixels at 100% scaling, once known.
+    pub size: Option<[u32; 2]>,
+    pub maximized: bool,
+    pub panels: Vec<&'static str>,
+}
+
 /// Something the user asked for, for the app to carry out.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -790,6 +823,67 @@ impl Shell {
     /// How many windows of their own are open.
     pub fn windows(&self) -> usize {
         self.windows.len()
+    }
+
+    /// The viewport of the window `window`: the main window's with `None`,
+    /// or else that of the window of its own `window`, counted from 0, if
+    /// there's one.
+    pub fn window_viewport(&self, window: Option<usize>) -> Option<egui::ViewportId> {
+        match window {
+            None => Some(egui::ViewportId::ROOT),
+            Some(index) => self.windows.get(index).map(|window| window.id),
+        }
+    }
+
+    /// The title of the window of its own `index`, counted from 0, as its
+    /// title bar shows it, if there's one.
+    pub fn window_title(&self, index: usize, name: &str) -> Option<String> {
+        (self.windows.get(index)).map(|window| title(&window.dock, &self.registry, name))
+    }
+
+    /// Where the panel with id `id` is, while it's in sight: the window
+    /// it's in, as [`window_viewport`] counts them, and its place in it as
+    /// last drawn, with its tab bar, in points.
+    ///
+    /// [`window_viewport`]: Self::window_viewport
+    pub fn panel_rect(&self, id: &str) -> Option<(Option<usize>, egui::Rect)> {
+        if !self.panel_shown(id) {
+            return None;
+        }
+        let window = self.window_of(id);
+        let dock = window.map_or(&self.dock, |index| &self.windows[index].dock);
+        Some((window, dock.panel_rect(id, &self.theme)?))
+    }
+
+    /// Where each panel is, as agents read it: in which window, and
+    /// whether it's hidden or in sight, in the order the View menu lists
+    /// them; and each window of its own's place, with its panels.
+    pub fn layout(&self) -> PanelLayout {
+        let panels = (self.registry.iter())
+            .map(|panel| {
+                let window = self.window_of(panel.id);
+                let dock = window.map_or(&self.dock, |index| &self.windows[index].dock);
+                let placed = (dock.panels().into_iter()).find(|(id, _)| *id == panel.id);
+                PanelPlace {
+                    id: panel.id,
+                    title: panel.title,
+                    window: window.map(|index| index + 1),
+                    hidden: !placed.is_some_and(|(_, shown)| shown),
+                    in_sight: self.panel_shown(panel.id),
+                }
+            })
+            .collect();
+        let windows = (self.windows.iter())
+            .map(|window| WindowPlace {
+                at: window.placement.place.at,
+                size: window.placement.place.size,
+                maximized: window.placement.place.maximized,
+                panels: (window.dock.panels().into_iter())
+                    .map(|(id, _)| id)
+                    .collect(),
+            })
+            .collect();
+        PanelLayout { panels, windows }
     }
 
     /// Moves the panel with id `id` to a new window of its own, a little

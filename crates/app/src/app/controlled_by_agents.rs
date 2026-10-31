@@ -8,16 +8,20 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use musicable_commands::editor::PlayFrom;
 use musicable_commands::options;
 use musicable_io::audio::Decoder;
 use musicable_io::project;
 use musicable_mcp::bridge::{self, Bridge};
 use musicable_mcp::pipe::Address;
 use musicable_model::clip::{ClipContent, MidiClip};
+use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{DeviceKind, Project, TrackKind};
+use musicable_model::{DeviceKind, PluginFormat, Project, TrackKind};
+use musicable_ui::PluginEntry;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
 };
@@ -257,6 +261,12 @@ fn opening_asks_the_user_about_unsaved_changes_first() {
     let call = agent.start("run_command", open.clone());
     wait_for(&mut window, "the question", |app| app.pending.is_some());
     window.get_by_label("Save the changes to Untitled?");
+    // Reads go on, and the status says what the window asks.
+    let status = agent.call(&mut window, "get_status", json!({})).unwrap();
+    assert_eq!(
+        status["question"],
+        "Save the changes to Untitled before opening another project?"
+    );
     let meanwhile = agent.call(
         &mut window,
         "run_command",
@@ -303,4 +313,634 @@ fn opening_asks_the_user_about_unsaved_changes_first() {
         Err("Musicable exports WAV, AIFF and FLAC files, not .mp3 files.".to_owned())
     );
     assert!(fs::metadata(dir.0.join("Mix.mp3")).is_err());
+}
+
+#[test]
+fn agents_read_what_plays_and_what_the_window_says() {
+    let dir = TempDir::new("agents-status");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let status = agent.call(&mut window, "get_status", json!({})).unwrap();
+    assert_eq!(status["playing"], false, "{status}");
+    assert_eq!(status["takes"], json!([]), "{status}");
+    assert_eq!(status["question"], Json::Null, "{status}");
+
+    // The messages the status bar shows, until an agent clears them.
+    window.state_mut().messages.clear();
+    let missing = "Couldn't find the audio file kick.wav.".to_owned();
+    window.state_mut().messages.push(missing.clone());
+    window.run();
+    window.get_by_label(&missing);
+    let read = agent.call(&mut window, "get_messages", json!({})).unwrap();
+    assert_eq!(read, json!({"messages": [missing]}));
+    let cleared = agent.call(&mut window, "get_messages", json!({"clear": true}));
+    assert_eq!(cleared.unwrap(), read);
+    assert!(window.state().messages.is_empty());
+    assert!(window.query_by_label(&missing).is_none());
+}
+
+#[test]
+fn agents_change_settings_and_hear_what_they_were() {
+    let dir = TempDir::new("agents-settings");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let read = agent.call(&mut window, "get_settings", json!({})).unwrap();
+    assert_eq!(
+        read["settings"]["audio"]["render_ahead"], "normal",
+        "{read}"
+    );
+    assert_eq!(read["profile"], "Default", "{read}");
+    assert_eq!(read["playing"], Json::Null, "{read}");
+    let changeable = read["changeable"].as_array().unwrap();
+    assert!(changeable.contains(&json!("audio.render_ahead")), "{read}");
+    assert!(!changeable.contains(&json!("agents.enabled")), "{read}");
+
+    // Render Ahead, as its own command, and the status bar says so.
+    let long = json!({"id": "options.set_render_ahead", "args": {"render_ahead": "long"}});
+    let changed = agent.call(&mut window, "run_command", long).unwrap();
+    assert_eq!(
+        changed,
+        json!({"result": {"key": "audio.render_ahead", "was": "normal", "now": "long"}})
+    );
+    window.get_by_label("Agent: Set Render Ahead");
+    let kept = Settings::read(&dir.0.join(SETTINGS_FILE)).unwrap();
+    assert_eq!(kept.audio.render_ahead, crate::settings::RenderAhead::Long);
+
+    // Any setting agents may change, by its name in the file.
+    let set =
+        |key: &str, value: &str| json!({"id": "options.set", "args": {"key": key, "value": value}});
+    let capture = agent.call(
+        &mut window,
+        "run_command",
+        set("recording.capture_minutes", "10"),
+    );
+    assert_eq!(
+        capture.unwrap()["result"],
+        json!({"key": "recording.capture_minutes", "was": 5, "now": 10})
+    );
+    let play_from = set("behaviour.play_from", "playhead");
+    let play_from = agent.call(&mut window, "run_command", play_from).unwrap();
+    assert_eq!(play_from["result"]["was"], "start_marker");
+    assert_eq!(
+        window.state().session.editor().behaviour.play_from,
+        PlayFrom::Playhead
+    );
+    let rate = agent.call(
+        &mut window,
+        "run_command",
+        set("export.sample_rate", "44100"),
+    );
+    assert_eq!(rate.unwrap()["result"]["was"], Json::Null);
+    assert_eq!(window.state().settings.export.sample_rate, Some(44_100));
+    let rate = agent.call(
+        &mut window,
+        "run_command",
+        set("export.sample_rate", "none"),
+    );
+    assert_eq!(rate.unwrap()["result"]["now"], Json::Null);
+
+    // What isn't a setting, isn't theirs to change, or can't be so, fails
+    // and changes nothing.
+    for (key, value, starts) in [
+        (
+            "audio.colour",
+            "red",
+            "There's no setting called audio.colour",
+        ),
+        (
+            "agents.enabled",
+            "false",
+            "There's no setting called agents.enabled",
+        ),
+        (
+            "render_ahead",
+            "long",
+            "There's no setting called render_ahead",
+        ),
+        (
+            "analysis.fast",
+            "maybe",
+            "analysis.fast can't be maybe. It's true or false.",
+        ),
+        (
+            "audio.render_ahead",
+            "huge",
+            "audio.render_ahead can't be huge.",
+        ),
+        (
+            "browser.preview_volume",
+            "40",
+            "browser.preview_volume must be from",
+        ),
+    ] {
+        let why = agent.call(&mut window, "run_command", set(key, value));
+        let why = why.unwrap_err();
+        assert!(why.starts_with(starts), "{key}: {why}");
+    }
+    assert!(window.state().settings.agents.enabled);
+    assert_eq!(
+        window.state().settings.audio.render_ahead,
+        crate::settings::RenderAhead::Long
+    );
+
+    // A device that isn't there leaves the one playing.
+    let device = json!({"id": "options.set_audio_device", "args": {"device": "No Such Card"}});
+    let why = agent.call(&mut window, "run_command", device).unwrap_err();
+    assert!(
+        why.contains("No Such Card") || why.contains("couldn't be listed"),
+        "{why}"
+    );
+    let nothing = json!({"id": "options.set_audio_device", "args": {}});
+    let why = agent.call(&mut window, "run_command", nothing).unwrap_err();
+    assert!(why.starts_with("Say what to change"), "{why}");
+
+    // The devices there are, whatever this computer has.
+    let devices = agent.call(&mut window, "list_audio_devices", json!({}));
+    let devices = devices.unwrap();
+    assert!(devices["outputs"].is_array(), "{devices}");
+    assert!(devices["inputs"].is_array(), "{devices}");
+    assert_eq!(devices["driver_types"][0], "system", "{devices}");
+    let reset = json!({"id": "transport.reset_dropouts"});
+    assert_eq!(
+        agent.call(&mut window, "run_command", reset),
+        Ok(json!({"result": null}))
+    );
+}
+
+#[test]
+fn agents_read_the_plugins_the_layout_and_the_meters() {
+    let dir = TempDir::new("agents-reads");
+    let file = dir.0.join("Song.musicable");
+    let mut song = song();
+    // A plugin this computer hasn't got.
+    let missing = song.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: "org.example.missing".into(),
+        name: "Missing".into(),
+        kind: PluginKind::AudioEffect,
+        inputs: Vec::new(),
+        note_output: false,
+        settings: PluginSettings::default(),
+    }));
+    let missing_id = missing.id.0;
+    song.tracks[0].devices.push(missing);
+    project::save(&file, &song).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+
+    // The plugins the browser lists, all of them or those a filter finds.
+    let entry = |name: &str, vendor: &str, kind| PluginEntry {
+        format: PluginFormat::Clap,
+        id: format!("org.{}.{}", vendor.to_lowercase(), name.to_lowercase()),
+        name: name.into(),
+        vendor: vendor.into(),
+        kind,
+        never_ahead: false,
+    };
+    window.state_mut().plugin_entries = vec![
+        entry("Surge", "Surge", PluginKind::Instrument),
+        PluginEntry {
+            never_ahead: true,
+            ..entry("Delay", "Acme", PluginKind::AudioEffect)
+        },
+    ];
+    let plugins = agent.call(&mut window, "get_plugins", json!({})).unwrap();
+    assert_eq!(plugins["installed"], 2, "{plugins}");
+    assert_eq!(plugins["scanning"], false, "{plugins}");
+    let found = agent.call(&mut window, "get_plugins", json!({"filter": "ACME"}));
+    assert_eq!(
+        found.unwrap()["plugins"],
+        json!([{
+            "format": "clap",
+            "id": "org.acme.delay",
+            "name": "Delay",
+            "vendor": "Acme",
+            "kind": "audio_effect",
+            "render_ahead": "never",
+        }])
+    );
+
+    // A plugin device says whether it plays, and why not: here nothing
+    // tries to load it, with the plugins never scanned.
+    let device = agent.call(&mut window, "get_device", json!({"device": missing_id}));
+    let device = device.unwrap();
+    assert_eq!(device["loaded"], false, "{device}");
+    assert_eq!(device.get("problem"), Some(&Json::Null), "{device}");
+    assert_eq!(device["window_open"], false, "{device}");
+
+    // Where the panels are, and which are in sight.
+    let layout = agent.call(&mut window, "get_layout", json!({})).unwrap();
+    assert_eq!(layout["workspace"], "Default", "{layout}");
+    assert_eq!(layout["profile"], "Default", "{layout}");
+    assert_eq!(layout["windows"], json!([]), "{layout}");
+    let panels = layout["panels"].as_array().unwrap();
+    let mixer = |layout: &Json| {
+        let panels = layout["panels"].as_array().unwrap();
+        (panels.iter())
+            .find(|panel| panel["title"] == "Mixer")
+            .cloned()
+            .unwrap()
+    };
+    assert!(
+        panels.iter().all(|panel| panel["window"] == "main"),
+        "{layout}"
+    );
+    let shown = mixer(&layout)["in_sight"].as_bool().unwrap();
+    let toggle = json!({"id": "view.toggle_mixer"});
+    agent.call(&mut window, "run_command", toggle).unwrap();
+    let layout = agent.call(&mut window, "get_layout", json!({})).unwrap();
+    assert_eq!(mixer(&layout)["in_sight"], !shown, "{layout}");
+    assert_eq!(mixer(&layout)["hidden"], shown, "{layout}");
+
+    // The meters, silent with no audio device playing.
+    let levels = agent.call(&mut window, "get_levels", json!({})).unwrap();
+    assert_eq!(levels["playing"], false, "{levels}");
+    let silent = json!({"peak": [null, null], "rms": [null, null], "highest": null});
+    assert_eq!(levels["master"], silent, "{levels}");
+    assert_eq!(levels["tracks"][0]["name"], "Keys", "{levels}");
+    assert_eq!(levels["tracks"][0]["peak"], silent["peak"], "{levels}");
+}
+
+#[test]
+fn agents_clear_peaks_change_keys_name_workspaces_and_export_stems() {
+    let dir = TempDir::new("agents-shell");
+    let file = dir.0.join("Song.musicable");
+    project::save(&file, &song()).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let run = |window: &mut Window, id: &str, args: Json| {
+        agent.call(window, "run_command", json!({"id": id, "args": args}))
+    };
+
+    assert_eq!(
+        run(&mut window, "mixer.clear_peaks", json!({})),
+        Ok(json!({"result": null}))
+    );
+
+    // Keys, as the Keys page changes them, saying what they were.
+    let set = run(
+        &mut window,
+        "options.set_keys",
+        json!({"command": "transport.play_stop", "keys": ["Ctrl+Shift+Space", "Ctrl+K"]}),
+    );
+    assert_eq!(
+        set,
+        Ok(json!({"result": {
+            "command": "transport.play_stop",
+            "was": ["Space"],
+            "now": ["Ctrl+K", "Ctrl+Shift+Space"],
+            "taken": [{"key": "Ctrl+K", "from": "options.keyboard_shortcuts"}],
+        }}))
+    );
+    let keymap = window.state().session.keymap().clone();
+    let play_stop = musicable_commands::CommandId::from("transport.play_stop");
+    assert_eq!(keymap.chords_for(&play_stop).count(), 2);
+    let saved = fs::read_to_string(dir.0.join(crate::settings::KEYMAP_FILE)).unwrap();
+    assert!(saved.contains("Ctrl+Shift+Space"), "{saved}");
+    let reset = run(
+        &mut window,
+        "options.reset_keys",
+        json!({"command": "transport.play_stop"}),
+    );
+    assert_eq!(reset.unwrap()["result"]["now"], json!(["Space"]));
+    let unknown = run(
+        &mut window,
+        "options.set_keys",
+        json!({"command": "transport.nothing", "keys": []}),
+    );
+    assert_eq!(
+        unknown,
+        Err("There's no command transport.nothing.".to_owned())
+    );
+
+    // Workspaces by name, where the user would be asked for one.
+    let saved = run(&mut window, "workspace.save_as", json!({"name": "Mixing"}));
+    assert_eq!(saved, Ok(json!({"result": {"workspace": "Mixing"}})));
+    assert_eq!(window.state().workspaces.current_name(), "Mixing");
+    let renamed = run(&mut window, "workspace.rename", json!({"name": "Mixdown"}));
+    assert_eq!(renamed, Ok(json!({"result": {"workspace": "Mixdown"}})));
+    assert_eq!(window.state().workspaces.current_name(), "Mixdown");
+    let unnamed = run(&mut window, "workspace.save_as", json!({}));
+    let unnamed = unnamed.unwrap_err();
+    assert!(
+        unnamed.starts_with("The argument name is missing"),
+        "{unnamed}"
+    );
+
+    // Stems alone, at another rate and depth, without the tail.
+    let stems = dir.0.join("Stems.wav");
+    let exported = run(
+        &mut window,
+        "file.export_audio",
+        json!({
+            "file": stems,
+            "range": "song",
+            "bits": 16,
+            "sample_rate": 44100,
+            "tail": false,
+            "mix": false,
+            "stems": true,
+        }),
+    );
+    let keys = dir.0.join("Stems 01 Keys.wav");
+    assert_eq!(exported, Ok(json!({"result": [keys]})));
+    assert!(fs::metadata(&stems).is_err());
+    let info = Decoder::open(&keys).unwrap().info();
+    assert_eq!((info.sample_rate, info.frames), (44_100, 44_100));
+    let nowhere = run(
+        &mut window,
+        "file.export_audio",
+        json!({"file": dir.0.join("Selected.wav"), "range": "selection"}),
+    );
+    assert_eq!(
+        nowhere,
+        Err("There's nothing to export: nothing is selected.".to_owned())
+    );
+    let missing = run(
+        &mut window,
+        "file.export_audio",
+        json!({"file": stems, "stems": true, "tracks": [9]}),
+    );
+    assert_eq!(missing, Err("There's no track 9.".to_owned()));
+}
+
+#[test]
+fn agents_wait_for_the_work_under_way_and_for_the_user() {
+    let dir = TempDir::new("agents-wait");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let wait = |until: &str, timeout: f64| json!({"until": until, "timeout": timeout});
+    // Nothing is under way in a new window.
+    let idle = agent.call(&mut window, "wait_for", wait("idle", 10.0));
+    let idle = idle.unwrap();
+    assert_eq!(idle["met"], true, "{idle}");
+    let revision = idle["status"]["revision"].as_u64().unwrap();
+
+    // The user changes the project while the agent waits.
+    let call = agent.start("wait_for", wait("changed", 30.0));
+    for _ in 0..30 {
+        window.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !call.is_finished(),
+        "the wait is over before anything changed"
+    );
+    (window.state_mut().session)
+        .run(&musicable_commands::track::NEW_MIDI_TRACK)
+        .unwrap();
+    let changed = agent.answer(&mut window, call).unwrap();
+    assert_eq!(changed["met"], true, "{changed}");
+    let now = changed["status"]["revision"].as_u64().unwrap();
+    assert!(now > revision, "{changed}");
+    // Since a revision it has moved on from, it's over at once, and with
+    // nothing changing, it runs out of time.
+    let since = json!({"until": "changed", "since": revision});
+    let since = agent.call(&mut window, "wait_for", since).unwrap();
+    assert_eq!(since["met"], true, "{since}");
+    let still = agent.call(&mut window, "wait_for", wait("changed", 0.3));
+    let still = still.unwrap();
+    assert_eq!(still["met"], false, "{still}");
+    assert_eq!(still["status"]["revision"], now, "{still}");
+
+    // New asks the user whether to save the new track: the agent waits
+    // until they've answered.
+    let new = agent.start("run_command", json!({"id": "file.new"}));
+    wait_for(&mut window, "the question", |app| app.pending.is_some());
+    let call = agent.start("wait_for", wait("answered", 30.0));
+    for _ in 0..30 {
+        window.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !call.is_finished(),
+        "the wait is over before the user answered"
+    );
+    window.get_by_label("Cancel").click();
+    let answered = agent.answer(&mut window, call).unwrap();
+    assert_eq!(answered["met"], true, "{answered}");
+    assert_eq!(answered["status"]["question"], Json::Null, "{answered}");
+    assert!(agent.answer(&mut window, new).is_err());
+
+    assert_eq!(
+        agent.call(
+            &mut window,
+            "wait_for",
+            json!({"until": "idle", "since": 2})
+        ),
+        Err("since goes with until changed.".to_owned())
+    );
+}
+
+#[test]
+fn the_command_log_says_what_the_user_and_agents_ran() {
+    let dir = TempDir::new("agents-command-log");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let before = agent.call(&mut window, "get_command_log", json!({}));
+    let before = before.unwrap()["count"].as_u64().unwrap();
+
+    // The user adds a track, and the agent names it, then copies with
+    // nothing selected.
+    (window.state_mut().session)
+        .run(&musicable_commands::track::NEW_MIDI_TRACK)
+        .unwrap();
+    window.run();
+    let project = agent.call(&mut window, "get_project", json!({})).unwrap();
+    let track = project["tracks"][0]["id"].clone();
+    let rename = json!({"id": "track.rename", "args": {"track": track, "name": "Bass"}});
+    agent.call(&mut window, "run_command", rename).unwrap();
+    let copy = json!({"id": "edit.copy"});
+    let refused = agent.call(&mut window, "run_command", copy).unwrap_err();
+    assert!(refused.contains("doesn't apply now"), "{refused}");
+
+    let log = agent.call(&mut window, "get_command_log", json!({"since": before}));
+    let log = log.unwrap();
+    assert_eq!(log["count"], before + 3, "{log}");
+    let entries = log["entries"].as_array().unwrap();
+    let ran: Vec<(&str, &str)> = (entries.iter())
+        .map(|entry| {
+            (
+                entry["by"].as_str().unwrap(),
+                entry["command"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ran,
+        [
+            ("user", "track.new_midi_track"),
+            ("claude-code", "track.rename"),
+            ("claude-code", "edit.copy"),
+        ]
+    );
+    assert_eq!(entries[1]["args"], json!({"track": track, "name": "Bass"}));
+    let error = entries[2]["error"].as_str().unwrap_or_default();
+    assert!(error.contains("doesn't apply now"), "{log}");
+
+    // The session's file has them too, one a line.
+    let file = log["file"].as_str().expect("the log has a file");
+    let lines: Vec<Json> = (fs::read_to_string(file).unwrap().lines())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len() as u64, before + 3);
+    assert_eq!(lines.last(), entries.last());
+    assert!(Path::new(file).starts_with(dir.0.join("command logs")));
+}
+
+/// Answers the pictures the app asked egui for with a picture of `size`
+/// pixels, of one colour, as a frame drawn by the graphics card would,
+/// until `call` has its answer, which it gives back whole.
+fn take_pictures(
+    agent: &Agent,
+    window: &mut Window,
+    call: JoinHandle<Result<CallToolResult, ServiceError>>,
+    size: [usize; 2],
+) -> CallToolResult {
+    let started = Instant::now();
+    while !call.is_finished() {
+        assert!(started.elapsed() < Duration::from_secs(30), "no picture");
+        window.step();
+        let asked = (window.output().viewport_output.values())
+            .flat_map(|viewport| &viewport.commands)
+            .filter_map(|command| match command {
+                egui::ViewportCommand::Screenshot(callback) => Some(callback.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for callback in asked {
+            let image = egui::ColorImage::filled(size, egui::Color32::from_rgb(10, 20, 30));
+            callback.complete(std::sync::Arc::new(image));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    window.run();
+    agent.runtime.block_on(call).unwrap().unwrap()
+}
+
+#[test]
+fn agents_list_the_windows_and_take_pictures_of_them() {
+    let dir = TempDir::new("agents-pictures");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let windows = agent.call(&mut window, "get_windows", json!({})).unwrap();
+    assert_eq!(windows["windows"][0]["window"], "main", "{windows}");
+    assert_eq!(
+        windows["windows"][0]["title"], "Untitled - Musicable",
+        "{windows}"
+    );
+    assert_eq!(windows["windows"].as_array().unwrap().len(), 1, "{windows}");
+    let in_sight = windows["windows"][0]["panels"].as_array().unwrap().clone();
+    assert!(in_sight.contains(&json!("arrangement")), "{windows}");
+    // Letting agents in left Settings open, a dialog over the main window.
+    assert_eq!(windows["dialogs"], json!(["Settings"]), "{windows}");
+    assert_eq!(windows["plugins"], json!([]), "{windows}");
+
+    // The whole main window, saved to a file too.
+    let file = dir.0.join("main.png");
+    let shot = agent.start("get_screenshot", json!({"file": file}));
+    let result = take_pictures(&agent, &mut window, shot, [64, 48]);
+    let answer: Json = read(result.clone()).unwrap();
+    assert_eq!(
+        answer,
+        json!({"window": "main", "panel": null, "size": [64, 48], "file": file})
+    );
+    let image = result.content[1]
+        .as_image()
+        .expect("the picture is an image");
+    assert_eq!(image.mime_type, "image/png");
+    let png = fs::read(&file).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+
+    // A panel, cut out of its window.
+    let shot = agent.start("get_screenshot", json!({"panel": "arrangement"}));
+    let scale = window.ctx.pixels_per_point();
+    let size = (window.ctx.content_rect().size() * scale).round();
+    let size = [size.x as usize, size.y as usize];
+    let result = take_pictures(&agent, &mut window, shot, size);
+    let answer: Json = read(result).unwrap();
+    assert_eq!(answer["panel"], "arrangement", "{answer}");
+    let [width, height] = [
+        answer["size"][0].as_u64().unwrap(),
+        answer["size"][1].as_u64().unwrap(),
+    ];
+    assert!(width > 100 && width <= size[0] as u64, "{answer}");
+    assert!(height > 50 && height < size[1] as u64, "{answer}");
+
+    // What can't be taken.
+    let layout = agent.call(&mut window, "get_layout", json!({})).unwrap();
+    let panels = layout["panels"].as_array().unwrap();
+    let hidden = panels
+        .iter()
+        .find(|panel| panel["in_sight"] == false)
+        .unwrap();
+    let hidden = hidden["id"].as_str().unwrap();
+    let shot = agent.call(&mut window, "get_screenshot", json!({"panel": hidden}));
+    let why = shot.unwrap_err();
+    assert!(
+        why.starts_with(&format!("The panel {hidden} isn't in sight")),
+        "{why}"
+    );
+    let none = agent.call(&mut window, "get_screenshot", json!({"panel": "jukebox"}));
+    assert_eq!(
+        none,
+        Err("There's no panel jukebox: get_layout gives their ids.".to_owned())
+    );
+    let none = agent.call(&mut window, "get_screenshot", json!({"window": 2}));
+    assert_eq!(
+        none,
+        Err(
+            "There's no window 2: there are 0 windows of their own besides the main one."
+                .to_owned()
+        )
+    );
+    let both = agent.call(
+        &mut window,
+        "get_screenshot",
+        json!({"window": 1, "panel": "mixer"}),
+    );
+    assert!(
+        both.unwrap_err()
+            .starts_with("Give the window or the panel")
+    );
+    let closed = agent.call(&mut window, "get_screenshot", json!({"device": 99}));
+    assert_eq!(
+        closed,
+        Err(
+            "Device 99's plugin window isn't open: device.show_window opens it, and get_windows \
+             lists the ones that are."
+                .to_owned()
+        )
+    );
+    // A window of its own is listed. egui takes no pictures of it, nor of
+    // the panels in it: Windows does, of a window it has shown, which a
+    // test's isn't.
+    window
+        .state_mut()
+        .shell
+        .move_to_new_window("mixer")
+        .unwrap();
+    window.run();
+    let windows = agent.call(&mut window, "get_windows", json!({})).unwrap();
+    let own = &windows["windows"][1];
+    assert_eq!(own["window"], 1, "{windows}");
+    assert_eq!(own["title"], "Mixer - Untitled - Musicable", "{windows}");
+    assert_eq!(own["panels"], json!(["mixer"]), "{windows}");
+    for shot in [json!({"window": 1}), json!({"panel": "mixer"})] {
+        let refused = agent.call(&mut window, "get_screenshot", shot);
+        let why = refused.unwrap_err();
+        let expected = if cfg!(windows) {
+            "Windows didn't say which window that is"
+        } else {
+            "Musicable takes pictures of the windows panels moved to only on Windows"
+        };
+        assert!(why.starts_with(expected), "{why}");
+    }
 }

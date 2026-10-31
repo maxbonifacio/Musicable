@@ -115,6 +115,9 @@ pub struct Command {
     /// the undo history ([`Registry::run_batch`]): it opens, saves or
     /// replaces the project, or steps through the undo history.
     pub alone: bool,
+    /// Whether it needs at least one of its arguments, though each of them
+    /// is optional: see [`needs_arguments`](Self::needs_arguments).
+    pub some_arguments: bool,
 }
 
 impl Command {
@@ -127,6 +130,7 @@ impl Command {
             when: When::Always,
             agents: true,
             alone: false,
+            some_arguments: false,
         }
     }
 
@@ -152,10 +156,17 @@ impl Command {
         self
     }
 
+    /// Runs it with some of its arguments only: see
+    /// [`some_arguments`](Self::some_arguments).
+    pub fn with_some_arguments(mut self) -> Self {
+        self.some_arguments = true;
+        self
+    }
+
     /// Whether it can only run with arguments: menus, keys and the command
     /// palette, which have none to give, leave it out.
     pub fn needs_arguments(&self) -> bool {
-        self.params.iter().any(|param| !param.optional)
+        self.some_arguments || self.params.iter().any(|param| !param.optional)
     }
 }
 
@@ -331,9 +342,12 @@ pub enum Request {
         track: Option<TrackId>,
         at: Option<Beats>,
     },
-    /// Render the mix to the audio file at this path, as the export window
-    /// last did, or else show the export window.
-    ExportAudio(Option<PathBuf>),
+    /// Render the song to the audio file at `file`, as the export window
+    /// last did but for what `options` say, or else show the export window.
+    ExportAudio {
+        file: Option<PathBuf>,
+        options: ExportOptions,
+    },
     /// Show the command palette.
     CommandPalette,
     /// Show the Settings window, at the page it showed last.
@@ -392,15 +406,76 @@ pub enum Request {
     /// Switch to the workspace in this slot, from 1, the first being
     /// Default.
     SwitchWorkspace(u8),
-    /// Ask for a name, and keep the panels' layout as a new workspace under
-    /// it.
-    SaveWorkspaceAs,
-    /// Ask for a new name for the workspace in use.
-    RenameWorkspace,
+    /// Keep the panels' layout as a new workspace under this name, or ask
+    /// for one.
+    SaveWorkspaceAs(Option<String>),
+    /// Give the workspace in use this name, or ask for one.
+    RenameWorkspace(Option<String>),
     /// Delete the workspace in use, once the user says so.
     DeleteWorkspace,
     /// Lay the panels of the workspace in use out as at first.
     ResetWorkspace,
+    /// Change a setting, as the Settings window does: `key` names it as
+    /// the settings file does, such as `audio.render_ahead`, and `value` is
+    /// what to make it, as text, such as `long`.
+    SetSetting {
+        key: String,
+        value: String,
+    },
+    /// Play through another audio device, or through the same one with other
+    /// settings. What's `None` stays as it is.
+    SetAudioDevice(AudioDevice),
+    /// Count dropouts from zero again.
+    ResetDropouts,
+    /// Clear the highest peak of every channel's meter.
+    ClearPeaks,
+    /// Give `command` these keys, everywhere or in a panel, in place of
+    /// the ones it has. A key another command has in the same place is
+    /// taken from it.
+    SetKeys {
+        command: CommandId,
+        keys: Vec<(Scope, KeyChord)>,
+    },
+    /// Give `command` its default keys again.
+    ResetKeys(CommandId),
+}
+
+/// How [`file::EXPORT_AUDIO`] renders, where it doesn't as the export
+/// window last did: what's `None` is as the window had it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// `song`, `loop` or `selection`. Without it, what the window starts
+    /// out with: the time selection, or else the song.
+    pub range: Option<String>,
+    /// 16, 24, or 32 for floats.
+    pub bits: Option<u8>,
+    pub sample_rate: Option<u32>,
+    pub dither: Option<bool>,
+    pub normalize: Option<bool>,
+    pub tail: Option<bool>,
+    /// Write the mix. Without it, the mix is written.
+    pub mix: Option<bool>,
+    /// Write each of `tracks` on its own too.
+    pub stems: Option<bool>,
+    /// The tracks to write on their own: all of them without it.
+    pub tracks: Option<Vec<TrackId>>,
+}
+
+/// The audio device to play through, and how, as
+/// [`options::SET_AUDIO_DEVICE`] asks for it. What's `None` stays as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioDevice {
+    /// `system` or `asio`.
+    pub driver_type: Option<String>,
+    /// The device's id or name. Without one, a new driver type plays
+    /// through its first device, or the system's default output.
+    pub device: Option<String>,
+    /// Frames per buffer.
+    pub buffer: Option<u32>,
+    pub sample_rate: Option<u32>,
+    /// Whether to take the device for Musicable alone, WASAPI's exclusive
+    /// mode.
+    pub exclusive: Option<bool>,
 }
 
 impl Request {
@@ -421,8 +496,6 @@ impl Request {
                 | Request::Rename(_)
                 | Request::LoadSample(_)
                 | Request::FocusBrowserSearch
-                | Request::SaveWorkspaceAs
-                | Request::RenameWorkspace
                 | Request::DeleteWorkspace
         )
     }

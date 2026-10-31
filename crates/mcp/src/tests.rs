@@ -32,7 +32,8 @@ use crate::local::{LocalTool, LocalTools};
 use crate::pipe::Address;
 use crate::tools::{self, Agents, Link, Tools};
 use crate::{
-    Call, CpuPart, CpuRow, Host, Performance, RenderingAhead, Reply, Run, Window, answer, host,
+    Call, CpuPart, CpuRow, Exporting, Host, Performance, RenderingAhead, Reply, Run, Status,
+    Window, answer, host,
 };
 
 /// A transport that plays along, and does nothing else.
@@ -86,6 +87,10 @@ struct TestWindow {
     agents: Vec<String>,
     /// What the CPU figures say.
     performance: Performance,
+    /// What plays, and what's under way.
+    status: Status,
+    /// The messages the window shows.
+    messages: Vec<String>,
 }
 
 impl TestWindow {
@@ -100,6 +105,8 @@ impl TestWindow {
             requests: Vec::new(),
             agents: Vec::new(),
             performance: Performance::default(),
+            status: Status::default(),
+            messages: Vec::new(),
         }
     }
 }
@@ -135,6 +142,18 @@ impl Window for TestWindow {
 
     fn performance(&self) -> Performance {
         self.performance.clone()
+    }
+
+    fn status(&self) -> Status {
+        self.status.clone()
+    }
+
+    fn messages(&self) -> Vec<String> {
+        self.messages.clone()
+    }
+
+    fn clear_messages(&mut self) {
+        self.messages.clear();
     }
 
     fn run(&mut self, run: Run, reply: Reply) {
@@ -302,6 +321,17 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_editor",
             "get_history",
             "get_performance",
+            "get_status",
+            "wait_for",
+            "get_messages",
+            "get_settings",
+            "get_plugins",
+            "get_layout",
+            "get_windows",
+            "get_screenshot",
+            "get_levels",
+            "get_command_log",
+            "list_audio_devices",
         ]
     );
     let server = rig
@@ -590,6 +620,18 @@ fn reads_give_clips_devices_automation_and_the_editor() {
         assert!(param["name"].as_str().is_some_and(|name| !name.is_empty()));
         assert!(param["value"].is_number() && param["shown"].is_string());
     }
+    // A filter keeps the parameters whose names hold it, in any case.
+    let name = params[0]["name"].as_str().unwrap().to_uppercase();
+    let filtered = rig.call("get_device", json!({"device": 0, "filter": name}));
+    let filtered = filtered.unwrap();
+    let kept = filtered["params"].as_array().unwrap();
+    assert!(!kept.is_empty() && kept.len() <= params.len());
+    assert!(kept.iter().all(|param| {
+        let held = param["name"].as_str().unwrap().to_uppercase();
+        held.contains(&name)
+    }));
+    let none = rig.call("get_device", json!({"device": 0, "filter": "no such knob"}));
+    assert_eq!(none.unwrap()["params"], json!([]));
 
     let lane = rig
         .call("get_automation", json!({"param": "track 0 volume"}))
@@ -613,6 +655,34 @@ fn reads_give_clips_devices_automation_and_the_editor() {
     assert_eq!(editor["selected_track"], json!({"track": 0}));
     assert_eq!(editor["focus"], "arrangement");
     assert_eq!(editor["piano_roll"]["clip"], 0);
+    assert_eq!(editor["take_lanes"], json!([]));
+    assert_eq!(
+        editor["clipboards"],
+        json!({"clips": null, "notes": null, "devices": null})
+    );
+    assert!(
+        editor["piano_roll"]["in_sight"]["end"].is_number(),
+        "{editor}"
+    );
+
+    // What's copied, and the lanes shown.
+    rig.call(
+        "run_commands",
+        json!({"name": "Look", "commands": [
+            {"id": "edit.copy"},
+            {"id": "automation.show_lane", "args": {"param": "track 0 volume"}},
+        ]}),
+    )
+    .unwrap();
+    let editor = rig.call("get_editor", json!({})).unwrap();
+    assert_eq!(
+        editor["clipboards"]["clips"],
+        json!({"clips": 1, "length": 4})
+    );
+    assert_eq!(
+        editor["automation_lanes"],
+        json!([{"chain": {"track": 0}, "params": ["track 0 volume"]}])
+    );
 }
 
 #[test]
@@ -1014,6 +1084,8 @@ fn an_audio_clip_gives_its_warp_with_each_mode_s_settings() {
         json!({"high_quality": false, "formants": 100.0, "envelope": 128.0})
     );
     assert_eq!(warp["slice"]["preserve"], "transients");
+    // None until analysis finds them.
+    assert_eq!(warp["transients"], Json::Null);
 }
 
 #[test]
@@ -1117,6 +1189,254 @@ fn the_performance_says_what_each_device_costs_the_cpu() {
     assert_eq!(
         rig.call("get_performance", json!({"track": 1})),
         Err("get_performance takes no argument called track.".into())
+    );
+}
+
+#[test]
+fn the_status_says_what_plays_and_whats_under_way() {
+    let mut project = Project::new();
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let mut rig = Rig::new(project);
+    // A window with nothing under way is idle.
+    let status = rig.call("get_status", json!({})).unwrap();
+    assert_eq!(
+        status,
+        json!({
+            "playing": false,
+            "recording": false,
+            "playhead": 0,
+            "playhead_seconds": 0.0,
+            "takes": [],
+            "question": null,
+            "idle": true,
+            "analysing": [],
+            "rendering_segments": 0,
+            "compiling": false,
+            "export": null,
+            "scanning_plugins": false,
+            "library": {"scanning": [], "reading": [], "finding_presets": false},
+            "revision": 0,
+        })
+    );
+    rig.window.status = Status {
+        playing: true,
+        recording: true,
+        playhead: Beats::from_ratio(19, 2),
+        seconds: 4.750_02,
+        takes: vec![(
+            vocal,
+            BeatRange::new(Beats::new(8), Beats::from_ratio(19, 2)),
+        )],
+        question: Some("Save the changes to Song before quitting?".into()),
+        analysing: vec!["Samples/kick.wav".into()],
+        rendering: 3,
+        compiling: true,
+        export: Some(Exporting {
+            stage: "rendering",
+            pass: 1,
+            passes: 2,
+            done: 0.237_6,
+            speed: Some(12.345),
+        }),
+        scanning_plugins: true,
+        scanning_folders: vec![("/Samples".into(), 120)],
+        reading_folders: vec![("/Loops".into(), 7)],
+        finding_presets: true,
+        revision: 12,
+    };
+    let status = rig.call("get_status", json!({})).unwrap();
+    assert_eq!(
+        status,
+        json!({
+            "playing": true,
+            "recording": true,
+            "playhead": 9.5,
+            "playhead_seconds": 4.75,
+            "takes": [{"track": vocal.0, "start": 8, "end": 9.5}],
+            "question": "Save the changes to Song before quitting?",
+            "idle": false,
+            "analysing": ["Samples/kick.wav"],
+            "rendering_segments": 3,
+            "compiling": true,
+            "export": {"stage": "rendering", "pass": 1, "passes": 2, "done": 0.238, "speed": 12.3},
+            "scanning_plugins": true,
+            "library": {
+                "scanning": [{"folder": "/Samples", "found": 120}],
+                "reading": [{"folder": "/Loops", "left": 7}],
+                "finding_presets": true,
+            },
+            "revision": 12,
+        })
+    );
+    // Each piece of work alone keeps it busy.
+    let busy: [fn(&mut Status); 8] = [
+        |status| status.analysing = vec!["a.wav".into()],
+        |status| status.rendering = 1,
+        |status| status.compiling = true,
+        |status| status.export = Some(Exporting::default()),
+        |status| status.scanning_plugins = true,
+        |status| status.scanning_folders = vec![("/Samples".into(), 0)],
+        |status| status.reading_folders = vec![("/Samples".into(), 1)],
+        |status| status.finding_presets = true,
+    ];
+    for make_busy in busy {
+        rig.window.status = Status::default();
+        make_busy(&mut rig.window.status);
+        let status = rig.call("get_status", json!({})).unwrap();
+        assert_eq!(status["idle"], false, "{status}");
+    }
+    assert_eq!(
+        rig.call("get_status", json!({"track": 1})),
+        Err("get_status takes no argument called track.".into())
+    );
+}
+
+impl Rig {
+    /// Calls `wait_for` with `arguments`, answering the window's calls
+    /// meanwhile, and after `reads` status reads, changing its status with
+    /// `change`, as the work it waits for lands.
+    fn wait(
+        &mut self,
+        arguments: Json,
+        reads: usize,
+        change: impl FnOnce(&mut Status),
+    ) -> Result<Json, String> {
+        let Rig {
+            runtime,
+            client,
+            calls,
+            window,
+        } = self;
+        let mut read = 0;
+        let mut change = Some(change);
+        let result = call(runtime, client, "wait_for", arguments, || {
+            while let Ok(call) = calls.try_recv() {
+                read += 1;
+                if read == reads
+                    && let Some(change) = change.take()
+                {
+                    change(&mut window.status);
+                }
+                answer(call, window);
+            }
+        });
+        crate::tests::read(result)
+    }
+}
+
+#[test]
+fn agents_wait_for_what_lands_later() {
+    let mut rig = Rig::new(Project::new());
+    rig.window.status.analysing = vec!["Samples/kick.wav".into()];
+    let waited = rig
+        .wait(json!({"until": "analysed", "timeout": 5}), 4, |status| {
+            status.analysing.clear();
+        })
+        .unwrap();
+    assert_eq!(waited["met"], true, "{waited}");
+    assert_eq!(waited["status"]["analysing"], json!([]));
+    // It waited for the fourth read, a tenth of a second apart, and one
+    // more to be sure.
+    let seconds = waited["waited_seconds"].as_f64().unwrap();
+    assert!((0.3..2.0).contains(&seconds), "{waited}");
+
+    // The project changing, from the revision it's at, or one given.
+    rig.window.status.revision = 4;
+    let waited = rig
+        .wait(json!({"until": "changed", "timeout": 5}), 3, |status| {
+            status.revision = 5;
+        })
+        .unwrap();
+    assert_eq!(waited["met"], true, "{waited}");
+    assert_eq!(waited["status"]["revision"], 5);
+    let waited = (rig.wait(json!({"until": "changed", "since": 4}), 1, |_| {})).unwrap();
+    assert_eq!(waited["met"], true, "{waited}");
+
+    // Out of time, it says so, with the status.
+    rig.window.status.compiling = true;
+    let waited = (rig.wait(json!({"until": "rendered", "timeout": 0.3}), 1, |_| {})).unwrap();
+    assert_eq!(waited["met"], false, "{waited}");
+    assert_eq!(waited["status"]["compiling"], true);
+    assert!(
+        waited["waited_seconds"].as_f64().unwrap() >= 0.3,
+        "{waited}"
+    );
+    // With no time, it reads once.
+    let waited = (rig.wait(json!({"until": "stopped", "timeout": 0}), 1, |_| {})).unwrap();
+    assert_eq!(waited["met"], true, "{waited}");
+    assert_eq!(waited["waited_seconds"], 0.0);
+
+    assert_eq!(
+        rig.wait(json!({"until": "done"}), 1, |_| {}),
+        Err(
+            "until is one of idle, stopped, recorded, analysed, scanned, rendered, changed, \
+             answered, not done."
+                .into()
+        )
+    );
+}
+
+#[test]
+fn a_cancelled_wait_stops_reading() {
+    let mut rig = Rig::new(Project::new());
+    rig.window.status.compiling = true;
+    let Json::Object(arguments) = json!({"until": "rendered", "timeout": 30}) else {
+        unreachable!();
+    };
+    let request = CallToolRequestParams::new("wait_for").with_arguments(arguments);
+    let peer = rig.client.peer().clone();
+    let call = rig
+        .runtime
+        .spawn(async move { peer.call_tool(request).await });
+    // Answers the window's reads for `for_ms`, and says how many there were.
+    let pump = |rig: &mut Rig, for_ms: u64| {
+        let mut reads = 0;
+        let until = std::time::Instant::now() + Duration::from_millis(for_ms);
+        while std::time::Instant::now() < until {
+            while let Ok(call) = rig.calls.try_recv() {
+                reads += 1;
+                answer(call, &mut rig.window);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        reads
+    };
+    let reads = pump(&mut rig, 500);
+    assert!(reads >= 3, "the wait read the status {reads} times");
+    // Dropping the call cancels it, as an agent's client does.
+    call.abort();
+    pump(&mut rig, 300);
+    let after = pump(&mut rig, 500);
+    assert_eq!(after, 0, "the wait went on reading after it was cancelled");
+}
+
+#[test]
+fn agents_read_the_messages_and_clear_them() {
+    let mut rig = Rig::new(Project::new());
+    assert_eq!(
+        rig.call("get_messages", json!({})).unwrap(),
+        json!({"messages": []})
+    );
+    rig.window.messages = vec![
+        "Couldn't find the audio file kick.wav.".into(),
+        "The plugin Surge XT is missing.".into(),
+    ];
+    let messages = json!({"messages": [
+        "Couldn't find the audio file kick.wav.",
+        "The plugin Surge XT is missing.",
+    ]});
+    // Reading leaves them, until clear says to clear them.
+    assert_eq!(rig.call("get_messages", json!({})).unwrap(), messages);
+    let cleared = rig.call("get_messages", json!({"clear": true}));
+    assert_eq!(cleared.unwrap(), messages);
+    assert!(rig.window.messages.is_empty());
+    assert_eq!(
+        rig.call("get_messages", json!({"clear": false})).unwrap(),
+        json!({"messages": []})
+    );
+    assert_eq!(
+        rig.call("get_messages", json!({"clear": "yes"})),
+        Err("clear must be true or false.".into())
     );
 }
 
@@ -1312,11 +1632,15 @@ fn the_bridge_runs_its_own_tools_with_musicable_closed() {
     // They come after the app's tools, as read-only as they are.
     let listed = runtime.block_on(client.list_all_tools()).unwrap();
     let names: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
-    assert_eq!(names.len(), 14, "{names:?}");
-    assert_eq!(names[12..], ["audio_echo", "audio_wait"]);
+    let app = tools::list().len();
+    assert_eq!(names.len(), app + 2, "{names:?}");
+    assert_eq!(names[app..], ["audio_echo", "audio_wait"]);
     let read_only = |i: usize| (listed[i].annotations.as_ref()).and_then(|a| a.read_only_hint);
-    assert_eq!((read_only(12), read_only(13)), (Some(true), Some(false)));
-    assert!(listed[12].output_schema.is_some());
+    assert_eq!(
+        (read_only(app), read_only(app + 1)),
+        (Some(true), Some(false))
+    );
+    assert!(listed[app].output_schema.is_some());
     let server = client.peer_info().expect("the server introduced itself");
     let instructions = server.instructions.as_deref().unwrap_or_default();
     assert!(instructions.contains("undo"), "{instructions}");

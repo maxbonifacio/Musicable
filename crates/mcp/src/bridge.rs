@@ -5,8 +5,8 @@
 //! doesn't let agents in, the tools say so, and the bridge tries again at
 //! the next call, so the agent needn't start over once the user lets it in.
 //!
-//! Its [local tools](LocalTools), the audio commands, it runs itself, on
-//! threads of its own, whether Musicable is running or not. They tell the
+//! Its [local tools](LocalTools), such as the audio commands, it runs
+//! itself, on threads of its own, whether Musicable is running or not. They tell the
 //! agent how far they've got, if it asks, and stop when it cancels them.
 
 use std::cell::Cell;
@@ -232,7 +232,13 @@ impl ServerHandler for Bridge {
             Ok(app) => app,
             Err(why) => return Ok(failed(why).into()),
         };
-        match app.call_tool_once(request).await {
+        // Dropping the call when the agent cancels it cancels it in
+        // Musicable too, as a wait_for needs.
+        let answered = tokio::select! {
+            answered = app.call_tool_once(request) => answered,
+            () = context.ct.cancelled() => return Ok(failed("The call was cancelled.").into()),
+        };
+        match answered {
             Ok(response) => Ok(response),
             Err(ServiceError::McpError(error)) => Err(error),
             // The connection closed: Musicable closed, or stopped letting

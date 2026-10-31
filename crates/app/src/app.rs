@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use musicable_audio::InputKind;
-use musicable_commands::{Args, CommandError, Focus, Keymap, Request, arrange, browser, device};
+use musicable_commands::{
+    Args, CommandError, ExportOptions, Focus, Keymap, Request, arrange, browser, device,
+};
 use musicable_engine::{EngineHandle, Lead, Meter, Meters};
 use musicable_io::project::{self, EXTENSION};
 use musicable_library::Queue;
@@ -28,7 +30,7 @@ use self::agents::Agents;
 use crate::analyses::Analyses;
 use crate::appearance_page::Asked as AppearanceAsked;
 use crate::audio_files::{AudioFiles, clip_path};
-use crate::export::{self, Export, ExportSettings, FileFormat, Job, Report, Span};
+use crate::export::{self, Bits, Export, ExportSettings, FileFormat, Job, Report, Span};
 use crate::export_window::{Asked, ExportWindow};
 use crate::frame_times::FrameTimes;
 use crate::keymap_file::UserKeymap;
@@ -63,6 +65,8 @@ const MONITORS_EVERY: Duration = Duration::from_secs(1);
 /// The audio files the Import Audio and Load Sample dialogs show. The app
 /// reads a file by what's in it, whatever it's called.
 const AUDIO_EXTENSIONS: &[&str] = &["wav", "wave", "aif", "aiff", "aifc", "flac"];
+/// Why Default can't be renamed.
+const KEEPS_ITS_NAME: &str = "Default keeps its name: Save Workspace As makes a copy to name.";
 
 /// The app's window, and everything it drives.
 pub struct App {
@@ -250,6 +254,9 @@ impl App {
         ));
         session.set_preview_gain(settings.browser.preview_gain());
         session.set_lead(settings.audio.render_ahead.lead());
+        if let Some(dir) = &config_dir {
+            session.command_log_mut().write_to(dir);
+        }
         let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
         let theme_file = UserTheme::new(
             config_dir.as_ref().map(|dir| dir.join(THEMES_FOLDER)),
@@ -424,24 +431,31 @@ impl App {
     /// Keeps the panels' layout and the views' parts as a new workspace
     /// called `name`, which is in use from then on, and the one in use
     /// before keeps what it has.
-    fn save_workspace_as(&mut self, name: &str) {
+    fn save_workspace_as(&mut self, name: &str) -> Result<(), String> {
         self.save_workspace(true);
         let workspace = self.shell.workspace();
         match self.workspaces.add(name, &workspace) {
-            Ok(slot) => self.set_current_workspace(slot),
-            Err(error) => self
-                .messages
-                .push(format!("Couldn't save the workspace {name}: {error}.")),
+            Ok(slot) => {
+                self.set_current_workspace(slot);
+                Ok(())
+            }
+            Err(error) => Err(format!("Couldn't save the workspace {name}: {error}.")),
         }
     }
 
     /// Calls the workspace in use `name`.
-    fn rename_workspace(&mut self, name: &str) {
+    fn rename_workspace(&mut self, name: &str) -> Result<(), String> {
         let slot = self.workspaces.current();
+        if slot == 0 {
+            return Err(KEEPS_ITS_NAME.to_owned());
+        }
         let old = self.workspaces.current_name().to_owned();
         match self.workspaces.rename(slot, name) {
-            Ok(()) => self.set_current_workspace(slot),
-            Err(error) => self.messages.push(format!(
+            Ok(()) => {
+                self.set_current_workspace(slot);
+                Ok(())
+            }
+            Err(error) => Err(format!(
                 "Couldn't rename the workspace {old} to {name}: {error}."
             )),
         }
@@ -767,8 +781,16 @@ impl App {
                 self.save_settings();
             }
             Action::DismissMessages => self.messages.clear(),
-            Action::SaveWorkspaceAs(name) => self.save_workspace_as(&name),
-            Action::RenameWorkspace(name) => self.rename_workspace(&name),
+            Action::SaveWorkspaceAs(name) => {
+                if let Err(error) = self.save_workspace_as(&name) {
+                    self.messages.push(error);
+                }
+            }
+            Action::RenameWorkspace(name) => {
+                if let Err(error) = self.rename_workspace(&name) {
+                    self.messages.push(error);
+                }
+            }
             Action::DeleteWorkspace => self.delete_workspace(),
         }
         self.handle_requests(ctx, frame);
@@ -832,14 +854,17 @@ impl App {
                     self.insert_audio(files, track, at);
                 }
             }
-            Request::ExportAudio(None) => self.export_window.open(
+            Request::ExportAudio { file: None, .. } => self.export_window.open(
                 &self.settings.export,
                 self.session.project(),
                 self.session.editor(),
                 self.export.is_some(),
             ),
-            Request::ExportAudio(Some(file)) => {
-                if let Err(message) = self.export_mix_to(&file, ctx) {
+            Request::ExportAudio {
+                file: Some(file),
+                options,
+            } => {
+                if let Err(message) = self.export_audio_to(&file, &options, ctx) {
                     self.messages.push(message);
                 }
             }
@@ -893,13 +918,21 @@ impl App {
                     self.switch_workspace(slot);
                 }
             }
-            Request::SaveWorkspaceAs => self.shell.save_workspace_as(),
-            Request::RenameWorkspace if self.workspaces.current() == 0 => {
-                self.messages.push(format!(
-                    "{DEFAULT_WORKSPACE} keeps its name: Save Workspace As makes a copy to name."
-                ))
+            Request::SaveWorkspaceAs(None) => self.shell.save_workspace_as(),
+            Request::SaveWorkspaceAs(Some(name)) => {
+                if let Err(error) = self.save_workspace_as(&name) {
+                    self.messages.push(error);
+                }
             }
-            Request::RenameWorkspace => self.shell.rename_workspace(),
+            Request::RenameWorkspace(_) if self.workspaces.current() == 0 => {
+                self.messages.push(KEEPS_ITS_NAME.to_owned())
+            }
+            Request::RenameWorkspace(None) => self.shell.rename_workspace(),
+            Request::RenameWorkspace(Some(name)) => {
+                if let Err(error) = self.rename_workspace(&name) {
+                    self.messages.push(error);
+                }
+            }
             Request::DeleteWorkspace if self.workspaces.current() == 0 => {
                 self.messages.push(format!(
                     "{DEFAULT_WORKSPACE} can't be deleted: Reset Workspace lays it out as at first."
@@ -909,6 +942,28 @@ impl App {
             Request::ResetWorkspace => {
                 self.shell.reset_workspace();
                 self.focus_in_sight();
+            }
+            Request::SetSetting { key, value } => {
+                if let Err(error) = self.set_setting(&key, &value, ctx, frame) {
+                    self.messages.push(error);
+                }
+            }
+            Request::SetAudioDevice(device) => {
+                if let Err(error) = self.set_audio_device(device) {
+                    self.messages.push(error);
+                }
+            }
+            Request::ResetDropouts => self.output.reset_dropouts(),
+            Request::ClearPeaks => self.session.meters().clear_highest(),
+            Request::SetKeys { command, keys } => {
+                if let Err(error) = self.set_keys(&command, keys) {
+                    self.messages.push(error);
+                }
+            }
+            Request::ResetKeys(command) => {
+                if let Err(error) = self.reset_keys(&command) {
+                    self.messages.push(error);
+                }
             }
         }
     }
@@ -1210,11 +1265,17 @@ impl App {
         }
     }
 
-    /// Renders the mix to `file`, as a script or an agent asks: with the
-    /// export window's last settings, and the format `file`'s extension
-    /// says, from what the window starts out with, the time selection or
-    /// else the song. Says why it can't start, if it can't.
-    fn export_mix_to(&mut self, file: &Path, ctx: &egui::Context) -> Result<(), String> {
+    /// Renders the song to `file`, as a script or an agent asks: with the
+    /// export window's last settings but for what `options` say, and the
+    /// format `file`'s extension says, over what `options` say or else what
+    /// the window starts out with, the time selection or else the song.
+    /// Says why it can't start, if it can't.
+    fn export_audio_to(
+        &mut self,
+        file: &Path,
+        options: &ExportOptions,
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
         if self.export.is_some() {
             return Err("An export is under way already: try again once it's finished.".into());
         }
@@ -1228,15 +1289,48 @@ impl App {
                 format!("Musicable exports WAV, AIFF and FLAC files, not .{extension} files.")
             })?;
         }
-        settings.mixdown = true;
-        settings.stems = false;
+        if let Some(bits) = options.bits {
+            settings.bits = Bits::try_from(bits)?;
+        }
+        if options.sample_rate.is_some() {
+            settings.sample_rate = options.sample_rate;
+        }
+        settings.dither = options.dither.unwrap_or(settings.dither);
+        settings.normalize = options.normalize.unwrap_or(settings.normalize);
+        settings.tail = options.tail.unwrap_or(settings.tail);
+        settings.mixdown = options.mix.unwrap_or(true);
+        settings.stems = options.stems.unwrap_or(false);
         let (project, editor) = (self.session.project(), self.session.editor());
-        let Some(range) = Span::default_for(project, editor).range(project, editor) else {
-            return Err(
-                "There's nothing to export: the song has no clips, and nothing is selected.".into(),
-            );
+        let tracks: BTreeSet<TrackId> = match &options.tracks {
+            Some(tracks) => {
+                if let Some(missing) = tracks.iter().find(|&&id| project.track(id).is_none()) {
+                    return Err(format!("There's no track {}.", missing.0));
+                }
+                tracks.iter().copied().collect()
+            }
+            None => project.tracks.iter().map(|track| track.id).collect(),
         };
-        (self.start_job(file, range, settings, &BTreeSet::new(), ctx))
+        if settings.stems && tracks.is_empty() && !settings.mixdown {
+            return Err("There's nothing to export: no mix, and no tracks.".into());
+        }
+        let span = match options.range.as_deref() {
+            Some(name) => (Span::ALL.into_iter())
+                .find(|span| span.name().eq_ignore_ascii_case(name))
+                .ok_or_else(|| format!("There's no range called {name}."))?,
+            None => Span::default_for(project, editor),
+        };
+        let Some(range) = span.range(project, editor) else {
+            return Err(match (options.range.as_ref(), span) {
+                (None, _) => {
+                    "There's nothing to export: the song has no clips, and nothing is selected."
+                }
+                (_, Span::Song) => "There's nothing to export: the song has no clips.",
+                (_, Span::Loop) => "There's nothing to export: the loop region is empty.",
+                (_, Span::Selection) => "There's nothing to export: nothing is selected.",
+            }
+            .into());
+        };
+        (self.start_job(file, range, settings, &tracks, ctx))
             .map_err(|error| format!("The export couldn't start: {error}."))
     }
 
@@ -1324,23 +1418,6 @@ impl App {
         }
     }
 
-    /// Plays through the stream `request` asks for, and keeps the settings
-    /// if it opens.
-    fn apply_audio(&mut self, request: musicable_audio::StreamRequest) {
-        let wanted = self.session.wanted_inputs();
-        let outcome = match self.output.apply(request, &wanted, &mut self.session) {
-            Ok(()) => {
-                self.settings.audio.set_request(self.output.request());
-                self.save_settings();
-                Ok(format!("Playing through {}.", self.output.device_name()))
-            }
-            Err(error) => Err(format!(
-                "The device didn't open with these settings: {error}. The ones before are back."
-            )),
-        };
-        self.settings_window.applied(outcome);
-    }
-
     /// Carries out what the user changed or asked for in the Settings
     /// window, and keeps the settings.
     fn settings_asked(
@@ -1351,7 +1428,10 @@ impl App {
     ) {
         use settings_window::Asked;
         match asked {
-            Asked::Stream(request) => self.apply_audio(request),
+            Asked::Stream(request) => {
+                // The Audio page says how it went.
+                let _ = self.apply_audio(request);
+            }
             Asked::RenderAhead(ahead) => {
                 self.settings.audio.render_ahead = ahead;
                 self.session.set_lead(ahead.lead());
@@ -2177,6 +2257,8 @@ mod arranging;
 mod browsing;
 #[cfg(test)]
 mod built_in_devices;
+mod changing_keys;
+mod changing_settings;
 #[cfg(test)]
 mod configuring;
 #[cfg(test)]
@@ -2189,8 +2271,10 @@ mod focusing;
 mod laying_out;
 #[cfg(test)]
 mod plugins_on_tracks;
+mod reading_for_agents;
 #[cfg(test)]
 mod remapping;
+mod seeing_for_agents;
 #[cfg(test)]
 mod switching_profiles;
 #[cfg(test)]
