@@ -19,11 +19,14 @@ impl App {
     /// with where each is, and the dialogs open over the main window.
     pub(super) fn windows_for_agent(&self, ctx: &egui::Context) -> Json {
         let name = self.name();
+        let zoom = ctx.zoom_factor();
         let window = |window: Option<usize>, title: String| {
             let viewport = self.shell.window_viewport(window)?;
             let (place, minimized, focused) = ctx.input_for(viewport, |input| {
                 let info = input.viewport();
-                let scale = info.native_pixels_per_point.unwrap_or(1.0);
+                // Points are pixels at the monitor's scaling times egui's
+                // zoom.
+                let scale = info.native_pixels_per_point.unwrap_or(1.0) * zoom;
                 let place = info.outer_rect.map(|rect| {
                     let at = rect.min * scale;
                     let size = rect.size() * scale;
