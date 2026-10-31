@@ -910,6 +910,17 @@ impl App {
                 self.shell.reset_workspace();
                 self.focus_in_sight();
             }
+            Request::SetSetting { key, value } => {
+                if let Err(error) = self.set_setting(&key, &value, ctx, frame) {
+                    self.messages.push(error);
+                }
+            }
+            Request::SetAudioDevice(device) => {
+                if let Err(error) = self.set_audio_device(device) {
+                    self.messages.push(error);
+                }
+            }
+            Request::ResetDropouts => self.output.reset_dropouts(),
         }
     }
 
@@ -1324,23 +1335,6 @@ impl App {
         }
     }
 
-    /// Plays through the stream `request` asks for, and keeps the settings
-    /// if it opens.
-    fn apply_audio(&mut self, request: musicable_audio::StreamRequest) {
-        let wanted = self.session.wanted_inputs();
-        let outcome = match self.output.apply(request, &wanted, &mut self.session) {
-            Ok(()) => {
-                self.settings.audio.set_request(self.output.request());
-                self.save_settings();
-                Ok(format!("Playing through {}.", self.output.device_name()))
-            }
-            Err(error) => Err(format!(
-                "The device didn't open with these settings: {error}. The ones before are back."
-            )),
-        };
-        self.settings_window.applied(outcome);
-    }
-
     /// Carries out what the user changed or asked for in the Settings
     /// window, and keeps the settings.
     fn settings_asked(
@@ -1351,7 +1345,10 @@ impl App {
     ) {
         use settings_window::Asked;
         match asked {
-            Asked::Stream(request) => self.apply_audio(request),
+            Asked::Stream(request) => {
+                // The Audio page says how it went.
+                let _ = self.apply_audio(request);
+            }
             Asked::RenderAhead(ahead) => {
                 self.settings.audio.render_ahead = ahead;
                 self.session.set_lead(ahead.lead());
@@ -2177,6 +2174,7 @@ mod arranging;
 mod browsing;
 #[cfg(test)]
 mod built_in_devices;
+mod changing_settings;
 #[cfg(test)]
 mod configuring;
 #[cfg(test)]

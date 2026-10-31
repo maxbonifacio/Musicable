@@ -41,6 +41,8 @@ pub const GET_HISTORY: &str = "get_history";
 pub const GET_PERFORMANCE: &str = "get_performance";
 pub const GET_STATUS: &str = "get_status";
 pub const GET_MESSAGES: &str = "get_messages";
+pub const GET_SETTINGS: &str = "get_settings";
+pub const LIST_AUDIO_DEVICES: &str = "list_audio_devices";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -298,6 +300,28 @@ pub fn list() -> Vec<Tool> {
                 .idempotent(false)
                 .open_world(false),
         ),
+        read(
+            GET_SETTINGS,
+            "Get Settings",
+            "Reads the settings, as the settings file has them, by section: audio, behaviour \
+             (the profile in use's), export, browser, recording, analysis, render_cache and \
+             the rest; which of them options.set can change, by key, such as \
+             audio.render_ahead; the profile in use; the settings file; what plays, its device \
+             and driver type, sample rate, buffer, latency and inputs, or null when nothing \
+             does; and the recording offset of the device playing, in frames. Settings aren't \
+             steps in the undo history: an agent that changes one puts it back when it's done.",
+            object(json!({}), &[]),
+        ),
+        read(
+            LIST_AUDIO_DEVICES,
+            "List Audio Devices",
+            "Lists the audio devices again, as the Audio settings and the mixer's input menus \
+             do: the driver types this build plays through; the outputs, each with its id, \
+             name, driver type, whether it's the system's default and whether it plays, for \
+             options.set_audio_device; the audio inputs, each with its id, name and channels, \
+             and the MIDI inputs, with their ids, for mixer.set_input.",
+            object(json!({}), &[]),
+        ),
     ]
 }
 
@@ -366,7 +390,8 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_MODULATOR => &["modulator"],
         GET_AUTOMATION => &["param"],
         GET_MESSAGES => &["clear"],
-        GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS => &[],
+        GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
+        | LIST_AUDIO_DEVICES => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
     };
     if let Some(unknown) = arguments
@@ -430,6 +455,8 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_HISTORY => Asked::History,
         GET_PERFORMANCE => Asked::Performance,
         GET_STATUS => Asked::Status,
+        GET_SETTINGS => Asked::Settings,
+        LIST_AUDIO_DEVICES => Asked::AudioDevices,
         GET_MESSAGES => Asked::Messages {
             clear: flag(arguments, "clear")?,
         },
@@ -722,6 +749,8 @@ mod tests {
         assert_eq!(call(GET_HISTORY, json!({})), Ok(Asked::History));
         assert_eq!(call(GET_PERFORMANCE, json!({})), Ok(Asked::Performance));
         assert_eq!(call(GET_STATUS, json!({})), Ok(Asked::Status));
+        assert_eq!(call(GET_SETTINGS, json!({})), Ok(Asked::Settings));
+        assert_eq!(call(LIST_AUDIO_DEVICES, json!({})), Ok(Asked::AudioDevices));
         assert_eq!(
             call(GET_MESSAGES, json!({})),
             Ok(Asked::Messages { clear: false })
@@ -739,7 +768,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 16);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

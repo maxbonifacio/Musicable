@@ -143,6 +143,14 @@
 | Set Velocity | `notes.set_velocity` |
 | Trim Notes | `notes.trim` |
 
+### Options
+
+| Command | Id |
+|---|---|
+| Change Setting | `options.set` |
+| Set Audio Device | `options.set_audio_device` |
+| Set Render Ahead | `options.set_render_ahead` |
+
 ### Take
 
 | Command | Id |

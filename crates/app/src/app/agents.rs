@@ -193,9 +193,9 @@ impl App {
                 let ran = result.is_ok();
                 let mut reply = Some(reply);
                 for request in self.session.take_requests() {
-                    if is_file(&request) {
+                    if answers(&request) {
                         if let Some(reply) = reply.take() {
-                            self.file_for_agent(request, reply, ctx);
+                            self.answer_request(request, reply, ctx, frame);
                         }
                     } else if request.for_agents() {
                         self.carry_out(request, ctx, frame);
@@ -211,10 +211,10 @@ impl App {
             Run::Batch(name, commands) => {
                 let result = self.session.run_batch(&name, &commands);
                 let ran = result.is_ok();
-                // Commands that run alone, as those that ask for files do,
-                // can't be part of a batch.
+                // Commands that run alone, as those that ask for files or
+                // change settings do, can't be part of a batch.
                 for request in self.session.take_requests() {
-                    if request.for_agents() && !is_file(&request) {
+                    if request.for_agents() && !answers(&request) {
                         self.carry_out(request, ctx, frame);
                     }
                 }
@@ -240,6 +240,26 @@ impl App {
     fn note_change(&mut self, revision: u64, stepping: bool, done: Option<String>) {
         if let Some(change) = self.step_since(revision, stepping).or(done) {
             self.agents.change = Some(change);
+        }
+    }
+
+    /// Carries out a request an agent's command made that answers it: for
+    /// a file, or to change a setting.
+    fn answer_request(
+        &mut self,
+        request: Request,
+        reply: Reply,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        let answer = match request {
+            Request::SetSetting { key, value } => self.set_setting(&key, &value, ctx, frame),
+            Request::SetAudioDevice(device) => self.set_audio_device(device),
+            request => return self.file_for_agent(request, reply, ctx),
+        };
+        match answer {
+            Ok(answer) => reply.done(json!({ "result": answer })),
+            Err(why) => reply.failed(full_stop(why)),
         }
     }
 
@@ -541,6 +561,14 @@ impl musicable_mcp::Window for Agent<'_> {
         }
     }
 
+    fn settings(&self) -> serde_json::Value {
+        self.app.settings_for_agent()
+    }
+
+    fn audio_devices(&mut self) -> serde_json::Value {
+        self.app.audio_devices_for_agent()
+    }
+
     fn messages(&self) -> Vec<String> {
         self.app.messages.clone()
     }
@@ -554,9 +582,11 @@ impl musicable_mcp::Window for Agent<'_> {
     }
 }
 
-/// Whether `request` is for a file: one an agent's command gives, where
-/// the user's would ask for one.
-fn is_file(request: &Request) -> bool {
+/// Whether the app answers the agent whose command made `request`, rather
+/// than the command: it's for a file, one an agent's command gives, where
+/// the user's would ask for one, or it changes a setting, which says what
+/// it was.
+fn answers(request: &Request) -> bool {
     matches!(
         request,
         Request::New
@@ -566,6 +596,8 @@ fn is_file(request: &Request) -> bool {
             | Request::SaveAs(_)
             | Request::ImportAudio { .. }
             | Request::ExportAudio(_)
+            | Request::SetSetting { .. }
+            | Request::SetAudioDevice(_)
     )
 }
 

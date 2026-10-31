@@ -55,6 +55,9 @@ pub const SET_START_MARKER: CommandId = CommandId::new("transport.set_start_mark
 pub const SET_LOOP: CommandId = CommandId::new("transport.set_loop");
 /// Sets the tempo at a position, moving every other tempo by as much.
 pub const SET_TEMPO: CommandId = CommandId::new("transport.set_tempo");
+/// Counts the audio device's dropouts from zero again, as clicking the
+/// transport bar's Dropouts does.
+pub const RESET_DROPOUTS: CommandId = CommandId::new("transport.reset_dropouts");
 
 type Handler = fn(&mut Context<'_>);
 
@@ -79,8 +82,9 @@ const COMMANDS: [(CommandId, &str, Handler); 10] = [
     }),
 ];
 
-/// The transport bar's punch buttons, which have no keys by default.
-const PUNCH: [(CommandId, &str, Handler); 2] = [
+/// The transport bar's buttons with no keys by default: punch in and out,
+/// and the Dropouts count, which a click counts from zero again.
+const BUTTONS: [(CommandId, &str, Handler); 3] = [
     (TOGGLE_PUNCH_IN, "Toggle Punch In", |ctx| {
         ctx.document.transact("Toggle Punch In", |tx| {
             tx.set_punch_in(!tx.project().punch_in);
@@ -91,11 +95,14 @@ const PUNCH: [(CommandId, &str, Handler); 2] = [
             tx.set_punch_out(!tx.project().punch_out);
         });
     }),
+    (RESET_DROPOUTS, "Reset Dropouts", |ctx| {
+        ctx.requests.push(Request::ResetDropouts)
+    }),
 ];
 
 /// Registers the transport commands.
 pub fn register(registry: &mut Registry) {
-    for (id, title, run) in COMMANDS.into_iter().chain(PUNCH) {
+    for (id, title, run) in COMMANDS.into_iter().chain(BUTTONS) {
         registry.register(id, title, run);
     }
     const AT: Param = Param::required("at", Type::Beats, "The position.");
@@ -277,9 +284,9 @@ mod tests {
             assert_eq!(registry.get(&id).unwrap().title, title);
             assert!(keymap.chords_for(&id).next().is_some(), "{id} has no chord");
         }
-        // The punch buttons are for the mouse, and the rest for the mouse,
+        // The buttons are for the mouse, and the rest for the mouse,
         // the tempo field and scripts.
-        for (id, title, _) in PUNCH {
+        for (id, title, _) in BUTTONS {
             assert_eq!(registry.get(&id).unwrap().title, title);
             assert_eq!(keymap.chords_for(&id).next(), None, "{id}");
         }

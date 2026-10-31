@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use musicable_commands::editor::PlayFrom;
 use musicable_commands::options;
 use musicable_io::audio::Decoder;
 use musicable_io::project;
@@ -334,4 +335,133 @@ fn agents_read_what_plays_and_what_the_window_says() {
     assert_eq!(cleared.unwrap(), read);
     assert!(window.state().messages.is_empty());
     assert!(window.query_by_label(&missing).is_none());
+}
+
+#[test]
+fn agents_change_settings_and_hear_what_they_were() {
+    let dir = TempDir::new("agents-settings");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let read = agent.call(&mut window, "get_settings", json!({})).unwrap();
+    assert_eq!(
+        read["settings"]["audio"]["render_ahead"], "normal",
+        "{read}"
+    );
+    assert_eq!(read["profile"], "Default", "{read}");
+    assert_eq!(read["playing"], Json::Null, "{read}");
+    let changeable = read["changeable"].as_array().unwrap();
+    assert!(changeable.contains(&json!("audio.render_ahead")), "{read}");
+    assert!(!changeable.contains(&json!("agents.enabled")), "{read}");
+
+    // Render Ahead, as its own command, and the status bar says so.
+    let long = json!({"id": "options.set_render_ahead", "args": {"render_ahead": "long"}});
+    let changed = agent.call(&mut window, "run_command", long).unwrap();
+    assert_eq!(
+        changed,
+        json!({"result": {"key": "audio.render_ahead", "was": "normal", "now": "long"}})
+    );
+    window.get_by_label("Agent: Set Render Ahead");
+    let kept = Settings::read(&dir.0.join(SETTINGS_FILE)).unwrap();
+    assert_eq!(kept.audio.render_ahead, crate::settings::RenderAhead::Long);
+
+    // Any setting agents may change, by its name in the file.
+    let set =
+        |key: &str, value: &str| json!({"id": "options.set", "args": {"key": key, "value": value}});
+    let capture = agent.call(
+        &mut window,
+        "run_command",
+        set("recording.capture_minutes", "10"),
+    );
+    assert_eq!(
+        capture.unwrap()["result"],
+        json!({"key": "recording.capture_minutes", "was": 5, "now": 10})
+    );
+    let play_from = set("behaviour.play_from", "playhead");
+    let play_from = agent.call(&mut window, "run_command", play_from).unwrap();
+    assert_eq!(play_from["result"]["was"], "start_marker");
+    assert_eq!(
+        window.state().session.editor().behaviour.play_from,
+        PlayFrom::Playhead
+    );
+    let rate = agent.call(
+        &mut window,
+        "run_command",
+        set("export.sample_rate", "44100"),
+    );
+    assert_eq!(rate.unwrap()["result"]["was"], Json::Null);
+    assert_eq!(window.state().settings.export.sample_rate, Some(44_100));
+    let rate = agent.call(
+        &mut window,
+        "run_command",
+        set("export.sample_rate", "none"),
+    );
+    assert_eq!(rate.unwrap()["result"]["now"], Json::Null);
+
+    // What isn't a setting, isn't theirs to change, or can't be so, fails
+    // and changes nothing.
+    for (key, value, starts) in [
+        (
+            "audio.colour",
+            "red",
+            "There's no setting called audio.colour",
+        ),
+        (
+            "agents.enabled",
+            "false",
+            "There's no setting called agents.enabled",
+        ),
+        (
+            "render_ahead",
+            "long",
+            "There's no setting called render_ahead",
+        ),
+        (
+            "analysis.fast",
+            "maybe",
+            "analysis.fast can't be maybe. It's true or false.",
+        ),
+        (
+            "audio.render_ahead",
+            "huge",
+            "audio.render_ahead can't be huge.",
+        ),
+        (
+            "browser.preview_volume",
+            "40",
+            "browser.preview_volume must be from",
+        ),
+    ] {
+        let why = agent.call(&mut window, "run_command", set(key, value));
+        let why = why.unwrap_err();
+        assert!(why.starts_with(starts), "{key}: {why}");
+    }
+    assert!(window.state().settings.agents.enabled);
+    assert_eq!(
+        window.state().settings.audio.render_ahead,
+        crate::settings::RenderAhead::Long
+    );
+
+    // A device that isn't there leaves the one playing.
+    let device = json!({"id": "options.set_audio_device", "args": {"device": "No Such Card"}});
+    let why = agent.call(&mut window, "run_command", device).unwrap_err();
+    assert!(
+        why.contains("No Such Card") || why.contains("couldn't be listed"),
+        "{why}"
+    );
+    let nothing = json!({"id": "options.set_audio_device", "args": {}});
+    let why = agent.call(&mut window, "run_command", nothing).unwrap_err();
+    assert!(why.starts_with("Say what to change"), "{why}");
+
+    // The devices there are, whatever this computer has.
+    let devices = agent.call(&mut window, "list_audio_devices", json!({}));
+    let devices = devices.unwrap();
+    assert!(devices["outputs"].is_array(), "{devices}");
+    assert!(devices["inputs"].is_array(), "{devices}");
+    assert_eq!(devices["driver_types"][0], "system", "{devices}");
+    let reset = json!({"id": "transport.reset_dropouts"});
+    assert_eq!(
+        agent.call(&mut window, "run_command", reset),
+        Ok(json!({"result": null}))
+    );
 }
