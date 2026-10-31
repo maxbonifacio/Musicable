@@ -68,6 +68,108 @@ pub(crate) fn watch_graphics(render_state: &RenderState) {
     });
 }
 
+/// How bad a line of the log file is, as it says it: `ERROR`, `WARN`,
+/// `INFO`, `DEBUG` or `TRACE`.
+fn level(word: &str) -> Option<Level> {
+    word.parse().ok()
+}
+
+/// What [`read`] gives back of the log file.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Wanted<'a> {
+    /// At most how many entries, the latest.
+    pub most: usize,
+    /// Only those this bad, or worse.
+    pub at_least: Level,
+    /// Only those logged at this time or after, in UTC as the file has it,
+    /// such as `2026-10-25T00:50:21.123Z`.
+    pub since: Option<&'a str>,
+}
+
+/// An entry of the log file: what was logged at a time, which can run to
+/// several lines, as a panic's calls do.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    /// In UTC, such as `2026-10-25T00:50:21.123Z`.
+    pub time: String,
+    pub level: Level,
+    /// Who logged it, such as the module it came from.
+    pub target: String,
+    pub message: String,
+}
+
+/// The latest entries of the log file in the config folder `dir`, and of
+/// the old one before it, as `wanted` says, oldest first, and whether
+/// earlier ones that it would take were left out.
+pub fn read(dir: &Path, wanted: &Wanted) -> (Vec<Entry>, bool) {
+    let text = [OLD_LOG_FILE, LOG_FILE]
+        .map(|name| fs::read_to_string(dir.join(name)).unwrap_or_default())
+        .concat();
+    let mut entries: Vec<Entry> = entries(&text)
+        .filter(|entry| entry.level <= wanted.at_least)
+        .filter(|entry| {
+            wanted
+                .since
+                .is_none_or(|since| entry.time.as_str() >= since)
+        })
+        .collect();
+    let earlier = entries.len() > wanted.most;
+    entries.drain(..entries.len().saturating_sub(wanted.most));
+    (entries, earlier)
+}
+
+/// The entries in the log file's `text`, oldest first. A line that doesn't
+/// start with a time carries on the entry before it.
+fn entries(text: &str) -> impl Iterator<Item = Entry> {
+    let mut entries: Vec<Entry> = Vec::new();
+    for line in text.lines() {
+        match entry(line) {
+            Some(entry) => entries.push(entry),
+            None => {
+                if let Some(last) = entries.last_mut() {
+                    last.message.push('\n');
+                    last.message.push_str(line);
+                }
+            }
+        }
+    }
+    entries.into_iter()
+}
+
+/// The entry that the log file's `line` starts, if it starts one:
+/// `2026-10-25T00:50:21.123Z WARN  wgpu_hal: Lost`.
+fn entry(line: &str) -> Option<Entry> {
+    let (time, rest) = line.split_once(' ')?;
+    utc_time(time)?;
+    let rest = rest.trim_start();
+    let (word, rest) = rest.split_once(' ')?;
+    let level = level(word)?;
+    let (target, message) = rest.trim_start().split_once(": ")?;
+    Some(Entry {
+        time: time.to_owned(),
+        level,
+        target: target.to_owned(),
+        message: message.to_owned(),
+    })
+}
+
+/// `text` as a time in UTC as the log file writes it, if it is one, such as
+/// `2026-10-25T00:50:21.123Z`: to the second, as `2026-10-25T00:50:21Z`,
+/// it's taken to the millisecond, `.000`.
+pub fn utc_time(text: &str) -> Option<String> {
+    let text = text.strip_suffix('Z')?;
+    let (seconds, millis) = text.split_once('.').unwrap_or((text, "000"));
+    let digits = |text: &str| text.chars().all(|c| c.is_ascii_digit());
+    let shape = seconds.len() == 19
+        && (seconds.char_indices()).all(|(at, c)| match at {
+            4 | 7 => c == '-',
+            10 => c == 'T',
+            13 | 16 => c == ':',
+            _ => c.is_ascii_digit(),
+        });
+    (shape && millis.len() == 3 && digits(millis)).then(|| format!("{seconds}.{millis}Z"))
+}
+
 /// The logger, which adds to the log file.
 struct LogFile {
     /// The config folder the file is in, if there is one.
@@ -222,6 +324,91 @@ mod tests {
         assert!(takes(Level::Info, "musicable_app::log_file"));
         assert!(takes(Level::Info, "musicable"));
         assert!(!takes(Level::Debug, "musicable_app::app"));
+    }
+
+    #[test]
+    fn reading_gives_the_latest_entries_as_asked() {
+        let dir = std::env::temp_dir().join(format!("musicable-log-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(OLD_LOG_FILE),
+            "2026-10-31T05:00:00.000Z INFO  musicable_app::log_file: Musicable 0.2.0 started\n\
+             2026-10-31T05:00:01.500Z WARN  wgpu_hal: Slow\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(LOG_FILE),
+            "2026-10-31T05:00:02.000Z ERROR panic: thread 'main' panicked at app.rs:1:\n\
+             boom\n\
+             stack backtrace:\n\
+             2026-10-31T05:00:03.250Z INFO  musicable: Drawing with Dx12\n",
+        )
+        .unwrap();
+        let all = Wanted {
+            most: 100,
+            at_least: Level::Trace,
+            since: None,
+        };
+        let (entries, earlier) = read(&dir, &all);
+        assert!(!earlier);
+        let times: Vec<_> = entries.iter().map(|entry| entry.time.as_str()).collect();
+        assert_eq!(
+            times,
+            [
+                "2026-10-31T05:00:00.000Z",
+                "2026-10-31T05:00:01.500Z",
+                "2026-10-31T05:00:02.000Z",
+                "2026-10-31T05:00:03.250Z",
+            ]
+        );
+        // A panic's lines are one entry.
+        assert_eq!(entries[2].level, Level::Error);
+        assert_eq!(entries[2].target, "panic");
+        assert_eq!(
+            entries[2].message,
+            "thread 'main' panicked at app.rs:1:\nboom\nstack backtrace:"
+        );
+        // The latest, the worst and the newest.
+        let (entries, earlier) = read(&dir, &Wanted { most: 1, ..all });
+        assert!(earlier);
+        assert_eq!(entries[0].message, "Drawing with Dx12");
+        let worst = Wanted {
+            at_least: Level::Warn,
+            ..all
+        };
+        let (entries, _) = read(&dir, &worst);
+        let targets: Vec<_> = entries.iter().map(|entry| entry.target.as_str()).collect();
+        assert_eq!(targets, ["wgpu_hal", "panic"]);
+        let since = utc_time("2026-10-31T05:00:02Z").unwrap();
+        let since = Wanted {
+            since: Some(&since),
+            ..all
+        };
+        assert_eq!(read(&dir, &since).0.len(), 2);
+        // With no log file, there's nothing.
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(read(&dir, &all), (Vec::new(), false));
+    }
+
+    #[test]
+    fn times_are_read_as_the_log_file_writes_them() {
+        assert_eq!(
+            utc_time("2026-10-31T05:00:02Z").as_deref(),
+            Some("2026-10-31T05:00:02.000Z")
+        );
+        assert_eq!(
+            utc_time("2026-10-31T05:00:02.250Z").as_deref(),
+            Some("2026-10-31T05:00:02.250Z")
+        );
+        for wrong in [
+            "2026-10-31",
+            "2026-10-31T05:00:02",
+            "2026-10-31 05:00:02Z",
+            "05:00Z",
+        ] {
+            assert_eq!(utc_time(wrong), None, "{wrong}");
+        }
     }
 
     #[test]

@@ -99,6 +99,14 @@ Agents can read what each device costs the CPU too, as the
 to freeze or take out, and how far ahead of the audio device Musicable
 renders ([Render Ahead](../getting-started/audio.md#render-ahead)).
 
+They can read what plays and what's under way: whether the transport plays
+or records, where the playhead is, the takes being recorded, a question the
+window asks you, and work that finishes later, such as analysing audio files
+for warping, rendering, an export or a scan. They can read the messages in
+the status bar, and clear them, as **Dismiss** (×) does. And they can read
+the [log file](troubleshooting.md#the-log-file), which `musicable mcp` reads
+itself, so they can see why Musicable stopped after it has.
+
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,
 so they work while Musicable is closed or doesn't let agents in, and they

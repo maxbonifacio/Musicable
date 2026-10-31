@@ -257,6 +257,12 @@ fn opening_asks_the_user_about_unsaved_changes_first() {
     let call = agent.start("run_command", open.clone());
     wait_for(&mut window, "the question", |app| app.pending.is_some());
     window.get_by_label("Save the changes to Untitled?");
+    // Reads go on, and the status says what the window asks.
+    let status = agent.call(&mut window, "get_status", json!({})).unwrap();
+    assert_eq!(
+        status["question"],
+        "Save the changes to Untitled before opening another project?"
+    );
     let meanwhile = agent.call(
         &mut window,
         "run_command",
@@ -303,4 +309,29 @@ fn opening_asks_the_user_about_unsaved_changes_first() {
         Err("Musicable exports WAV, AIFF and FLAC files, not .mp3 files.".to_owned())
     );
     assert!(fs::metadata(dir.0.join("Mix.mp3")).is_err());
+}
+
+#[test]
+fn agents_read_what_plays_and_what_the_window_says() {
+    let dir = TempDir::new("agents-status");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let status = agent.call(&mut window, "get_status", json!({})).unwrap();
+    assert_eq!(status["playing"], false, "{status}");
+    assert_eq!(status["takes"], json!([]), "{status}");
+    assert_eq!(status["question"], Json::Null, "{status}");
+
+    // The messages the status bar shows, until an agent clears them.
+    window.state_mut().messages.clear();
+    let missing = "Couldn't find the audio file kick.wav.".to_owned();
+    window.state_mut().messages.push(missing.clone());
+    window.run();
+    window.get_by_label(&missing);
+    let read = agent.call(&mut window, "get_messages", json!({})).unwrap();
+    assert_eq!(read, json!({"messages": [missing]}));
+    let cleared = agent.call(&mut window, "get_messages", json!({"clear": true}));
+    assert_eq!(cleared.unwrap(), read);
+    assert!(window.state().messages.is_empty());
+    assert!(window.query_by_label(&missing).is_none());
 }
