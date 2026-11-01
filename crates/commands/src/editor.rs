@@ -15,7 +15,7 @@ use musicable_model::clip::{Clip, ClipContent, ClipId, Controller, Note, NoteId}
 use musicable_model::param::{ClipParam, ParamAddress};
 use musicable_model::routing::Wire;
 use musicable_model::time::{BeatRange, Beats, TempoMap};
-use musicable_model::{Chain, Device, DeviceId, Project, TrackId};
+use musicable_model::{Chain, Device, DeviceId, Project, TrackId, VIEW_SLOTS, ViewPlace};
 use serde::{Deserialize, Serialize};
 
 use crate::auto_warp::Pending;
@@ -47,6 +47,9 @@ pub struct Editor {
     pub lanes: Lanes,
     /// Each timeline panel's history of views, and its Follow state.
     pub navigation: Navigation,
+    /// The arrangement's views kept by Save View 1 to 5, saved with the
+    /// project.
+    pub view_slots: [Option<ViewPlace>; VIEW_SLOTS],
     pub behaviour: Behaviour,
     /// What the app has read about the audio files that clips play, by the
     /// path the clips give.
@@ -94,6 +97,7 @@ impl Default for Editor {
             sized_by_hand: None,
             lanes: Lanes::default(),
             navigation: Navigation::default(),
+            view_slots: Default::default(),
             behaviour: Behaviour::default(),
             files: BTreeMap::new(),
             analyses: BTreeMap::new(),

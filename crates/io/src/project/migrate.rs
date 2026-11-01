@@ -43,6 +43,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     note_wires,
     note_outputs,
     always_live,
+    view,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -476,6 +477,12 @@ fn note_outputs(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     }
     let master = file.get_mut("master").and_then(|m| m.get_mut("devices"));
     no_note_output(master, "master.devices")
+}
+
+/// Version 27 added the arrangement's view the project was saved with.
+/// Version 26 files have none, so they open as a new project does.
+fn view(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "view", Value::Null)
 }
 
 /// Version 26 added Always Live, which has a track render live while the
@@ -1178,6 +1185,19 @@ mod tests {
                 "tracks[0].always_live",
                 "unknown field for the file's version"
             ))
+        );
+    }
+
+    #[test]
+    fn version_26_files_have_no_view() {
+        let mut file = json!({"version": 26, "tracks": []});
+        run(&STEPS[..26], &mut file, 26).unwrap();
+        assert_eq!(file, json!({"version": 27, "tracks": [], "view": null}));
+        let mut file = json!({"version": 26, "view": null});
+        assert_eq!(
+            run(&STEPS[..26], &mut file, 26).unwrap_err().path,
+            "view",
+            "a view in a version 26 file"
         );
     }
 

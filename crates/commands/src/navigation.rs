@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{Chain, Project, TrackId};
+use musicable_model::{Chain, Project, SavedView, TrackId, ViewPlace};
 
 use crate::editor::{Editor, Focus, Viewport};
 
@@ -418,6 +418,60 @@ impl Editor {
         true
     }
 
+    /// The arrangement's place now, as a project file or a view slot keeps
+    /// it: the heights the user gave rows of `project`, without Auto
+    /// Zoom's.
+    pub fn view_place(&self, project: &Project) -> ViewPlace {
+        let viewport = self.viewport;
+        ViewPlace {
+            start: viewport.start,
+            zoom: viewport.zoom,
+            top: viewport.top,
+            heights: kept_heights(project, &self.track_heights),
+        }
+    }
+
+    /// The view to save with `project`: the arrangement's place, each
+    /// panel's Follow switch, and the view slots, with the heights of only
+    /// the tracks it has.
+    pub fn saved_view(&self, project: &Project) -> SavedView {
+        let slots = self.view_slots.clone().map(|slot| {
+            slot.map(|mut place| {
+                place.heights = kept_heights(project, &place.heights);
+                place
+            })
+        });
+        SavedView {
+            place: self.view_place(project),
+            follow: [Panel::Arrangement, Panel::PianoRoll, Panel::SampleEditor]
+                .map(|panel| self.follows(panel)),
+            slots,
+        }
+    }
+
+    /// Shows `view`, saved with the project: its place in the arrangement,
+    /// its Follow switches and its slots.
+    pub fn restore_view(&mut self, view: &SavedView) {
+        self.show_view_place(&view.place);
+        let panels = [Panel::Arrangement, Panel::PianoRoll, Panel::SampleEditor];
+        for (panel, follow) in panels.into_iter().zip(view.follow) {
+            self.navigation.of_mut(panel).follow = follow;
+        }
+        self.view_slots = view.slots.clone();
+    }
+
+    /// Shows `place` in the arrangement, kept to the zooms and heights it
+    /// can have.
+    pub fn show_view_place(&mut self, place: &ViewPlace) {
+        let (min, max) = (crate::view::MIN_TRACK_HEIGHT, crate::view::MAX_TRACK_HEIGHT);
+        self.viewport.start = place.start;
+        self.viewport.zoom = place.zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM);
+        self.viewport.top = place.top.max(0.0);
+        self.track_heights = (place.heights.iter())
+            .map(|(&chain, &height)| (chain, height.clamp(min, max)))
+            .collect();
+    }
+
     /// The height of `chain`'s row in the arrangement.
     pub fn height_of(&self, chain: Chain) -> f32 {
         let height = (self.track_heights.get(&chain).copied()).unwrap_or(self.lanes.track);
@@ -566,6 +620,15 @@ impl Editor {
         };
         fits
     }
+}
+
+/// The heights of `heights` that are the master's or a track `project`
+/// has.
+fn kept_heights(project: &Project, heights: &BTreeMap<Chain, f32>) -> BTreeMap<Chain, f32> {
+    (heights.iter())
+        .filter(|(chain, _)| chain.track().is_none_or(|id| project.track(id).is_some()))
+        .map(|(&chain, &height)| (chain, height))
+        .collect()
 }
 
 /// The range W fits across the arrangement: from the song's start to its

@@ -264,7 +264,7 @@ fn a_project_opens_in_the_workspace_it_was_saved_with() {
     harness.run();
     let saved = fs::read_to_string(&path).unwrap();
     assert!(
-        saved.ends_with("  \"workspace\": \"Mixing\"\n}\n"),
+        saved.contains("\n  \"workspace\": \"Mixing\",\n"),
         "{saved}"
     );
     press(&mut harness, chord("Alt+1"));
@@ -354,5 +354,43 @@ fn workspaces_are_renamed_deleted_and_reset() {
             "Default keeps its name: Save Workspace As makes a copy to name.",
             "Default can't be deleted: Reset Workspace lays it out as at first."
         ]
+    );
+}
+
+#[test]
+fn a_project_opens_where_its_view_was_saved_and_navigating_needs_no_saving() {
+    let config = TempDir::new("laying-out-view");
+    let mut harness = window(&config.0, None);
+    harness.run();
+    let session = &mut harness.state_mut().session;
+    session.run(&view::ZOOM_IN).unwrap();
+    session.run(&view::SAVE_VIEW_2).unwrap();
+    session.run(&view::ZOOM_IN).unwrap();
+    session.run(&view::TOGGLE_FOLLOW).unwrap();
+    harness.run();
+    // Moving around isn't a change to the project.
+    assert!(!harness.state().session.is_modified());
+    let zoom = harness.state().session.editor().viewport.zoom;
+    let path = config.0.join("Song.musicable");
+    harness.state_mut().path = Some(path.clone());
+    harness.state_mut().session.run(&file::SAVE).unwrap();
+    harness.run();
+    drop(harness);
+
+    let mut harness = window(&config.0, Some(path));
+    let editor = harness.state().session.editor();
+    assert_eq!(editor.viewport.zoom, zoom);
+    assert!(!editor.follows(musicable_commands::navigation::Panel::Arrangement));
+    assert!(!harness.state().session.is_modified());
+    harness
+        .state_mut()
+        .session
+        .run(&view::RECALL_VIEW_2)
+        .unwrap();
+    assert_eq!(harness.state().session.editor().viewport.zoom, zoom / 2.0);
+    assert!(
+        harness.state().messages.is_empty(),
+        "{:?}",
+        harness.state().messages
     );
 }

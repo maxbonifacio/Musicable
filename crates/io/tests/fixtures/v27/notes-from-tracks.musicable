@@ -1,0 +1,184 @@
+{
+  "format": "musicable-project",
+  "version": 27,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 3,
+  "next_send_id": 0,
+  "next_device_id": 2,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Keys",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 0,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "plugin": {
+              "format": "clap",
+              "id": "com.example.arp",
+              "name": "Arp",
+              "kind": "midi_effect",
+              "inputs": [],
+              "note_output": false,
+              "state": null,
+              "params": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "plugin": {
+              "format": "clap",
+              "id": "com.example.synth",
+              "name": "Synth",
+              "kind": "instrument",
+              "inputs": [],
+              "note_output": false,
+              "state": null,
+              "params": []
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Arp Double",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "tap": {
+          "device": 0
+        }
+      },
+      "monitor": "in",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "Played",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "tap": {
+          "post_fx": {
+            "track": 0
+          }
+        }
+      },
+      "monitor": "in",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "wires": [],
+  "workspace": null,
+  "view": null
+}

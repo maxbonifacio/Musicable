@@ -188,10 +188,23 @@ give it. Each size and fit is a step that X goes back over. The sizes,
 Fit Selected Tracks and Auto Zoom Tracks are commands, so they can be
 given keys.
 
+Saving the project keeps where the arrangement is with it: the part of
+the song in sight, the zoom, how far down it's scrolled, the heights you
+gave tracks, and each panel's Follow switch. The project opens there
+again. Moving around never makes the project need saving, so a view you
+reach after the last save is gone if you close without saving.
+**Views > Save View 1** to **5** keep the arrangement's view in five
+slots, saved with the project, and **Recall View 1** to **5** go back to
+one, as Pro Tools' zoom presets and Logic's Zoom 1 to 3 do. They have no
+keys at first, since Alt and the numbers switch workspaces, but you can
+give them some. **View > Zoom to Locators** shows the stretch between the
+locator at or before the playhead and the next one, from the song's start
+before the first locator, or to its end after the last.
+
 Each view keeps its own history of where it's been, up to 32 steps back. A
 gesture is one step: a burst of the wheel, a drag of the ruler or the
-overview, a click on the overview, or a command such as W or Zoom to
-Selection. Pressing W twice, or H twice,
+overview, a click on the overview, or a command such as W, Zoom to
+Selection or Recall View. Pressing W twice, or H twice,
 does nothing the second time, and X after W goes back to where you were.
 Scroll to Playhead and Reset Track Height are in the View and Track menus,
 and in the command palette.

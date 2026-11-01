@@ -7,8 +7,8 @@
 //! in the [`Editor`](crate::Editor). Zooming acts on the view with the focus:
 //! the arrangement, the piano roll or the Sample Editor.
 
-use musicable_model::time::Beats;
-use musicable_model::{Chain, TrackId};
+use musicable_model::time::{BeatRange, Beats};
+use musicable_model::{Chain, TrackId, VIEW_SLOTS};
 
 use crate::editor::{Editor, Focus, FollowMode, PianoRoll, Step, Viewport};
 use crate::navigation::{Panel, Record, song_range};
@@ -101,6 +101,38 @@ pub const HUGE_TRACKS: CommandId = CommandId::new("view.huge_tracks");
 pub const FIT_SELECTED_TRACKS: CommandId = CommandId::new("view.fit_selected_tracks");
 /// Turns on or off making the selected track Large while it's selected.
 pub const TOGGLE_AUTO_ZOOM: CommandId = CommandId::new("view.toggle_auto_zoom");
+/// Keeps the arrangement's view in the first view slot, saved with the
+/// project, for Recall View 1: Pro Tools' Zoom Presets, Logic's Zoom 1 to 3.
+pub const SAVE_VIEW_1: CommandId = CommandId::new("view.save_view_1");
+pub const SAVE_VIEW_2: CommandId = CommandId::new("view.save_view_2");
+pub const SAVE_VIEW_3: CommandId = CommandId::new("view.save_view_3");
+pub const SAVE_VIEW_4: CommandId = CommandId::new("view.save_view_4");
+pub const SAVE_VIEW_5: CommandId = CommandId::new("view.save_view_5");
+/// Shows the view kept in the first view slot in the arrangement.
+pub const RECALL_VIEW_1: CommandId = CommandId::new("view.recall_view_1");
+pub const RECALL_VIEW_2: CommandId = CommandId::new("view.recall_view_2");
+pub const RECALL_VIEW_3: CommandId = CommandId::new("view.recall_view_3");
+pub const RECALL_VIEW_4: CommandId = CommandId::new("view.recall_view_4");
+pub const RECALL_VIEW_5: CommandId = CommandId::new("view.recall_view_5");
+/// The Save View commands, by slot.
+pub const SAVE_VIEW: [CommandId; VIEW_SLOTS] = [
+    SAVE_VIEW_1,
+    SAVE_VIEW_2,
+    SAVE_VIEW_3,
+    SAVE_VIEW_4,
+    SAVE_VIEW_5,
+];
+/// The Recall View commands, by slot.
+pub const RECALL_VIEW: [CommandId; VIEW_SLOTS] = [
+    RECALL_VIEW_1,
+    RECALL_VIEW_2,
+    RECALL_VIEW_3,
+    RECALL_VIEW_4,
+    RECALL_VIEW_5,
+];
+/// Shows the stretch of the song between the locators either side of the
+/// playhead across the arrangement, as Cubase's Zoom to Locators does.
+pub const ZOOM_TO_LOCATORS: CommandId = CommandId::new("view.zoom_to_locators");
 /// Scrolls the view with the focus to the playhead, and lets Follow follow
 /// it again.
 pub const SCROLL_TO_PLAYHEAD: CommandId = CommandId::new("view.scroll_to_playhead");
@@ -147,7 +179,7 @@ type Handler = fn(&mut Context<'_>);
 
 /// The view commands that take no arguments, with their titles, when they
 /// apply and what they run.
-const COMMANDS: [(CommandId, &str, When, Handler); 20] = [
+const COMMANDS: [(CommandId, &str, When, Handler); 21] = [
     (ZOOM_IN, "Zoom In", When::Always, |ctx| zoom(ctx, ZOOM_STEP)),
     (ZOOM_OUT, "Zoom Out", When::Always, |ctx| {
         zoom(ctx, 1.0 / ZOOM_STEP)
@@ -190,6 +222,12 @@ const COMMANDS: [(CommandId, &str, When, Handler); 20] = [
         // Turned on, it follows the playhead from the next frame.
         history.suspended = false;
     }),
+    (
+        ZOOM_TO_LOCATORS,
+        "Zoom to Locators",
+        When::HasLocators,
+        zoom_to_locators,
+    ),
     (TOGGLE_AUTO_ZOOM, "Auto Zoom Tracks", When::Always, |ctx| {
         let editor = ctx.document.editor_mut();
         editor.behaviour.auto_zoom_tracks = !editor.behaviour.auto_zoom_tracks;
@@ -504,6 +542,24 @@ pub fn register(registry: &mut Registry) {
             Ok(Value::None)
         },
     );
+    for (slot, (save, recall)) in SAVE_VIEW.into_iter().zip(RECALL_VIEW).enumerate() {
+        let number = slot + 1;
+        registry.add(
+            Command::new(save, format!("Save View {number}")),
+            move |ctx, _| {
+                let (project, editor) = ctx.document.parts();
+                editor.view_slots[slot] = Some(editor.view_place(project));
+                Ok(Value::None)
+            },
+        );
+        registry.add(
+            Command::new(recall, format!("Recall View {number}")),
+            move |ctx, _| {
+                recall_view(ctx, slot);
+                Ok(Value::None)
+            },
+        );
+    }
     for (index, (id, title)) in PRESETS.into_iter().enumerate() {
         registry.add(
             Command::new(id, title).with_params(&[
@@ -848,6 +904,46 @@ fn step_heights(ctx: &mut Context<'_>, taller: bool) {
             };
             editor.set_height(chain, Some(next));
         }
+    });
+}
+
+/// Shows the view in slot `slot` in the arrangement, as a step of its
+/// history, or says the slot keeps none.
+fn recall_view(ctx: &mut Context<'_>, slot: usize) {
+    let playing = ctx.transport.is_playing();
+    let (project, editor) = ctx.document.parts();
+    let Some(mut place) = editor.view_slots[slot].clone() else {
+        let number = slot + 1;
+        ctx.requests.push(Request::Notice(format!(
+            "View {number} is empty. Save View {number} keeps the arrangement's view there."
+        )));
+        return;
+    };
+    (place.heights).retain(|chain, _| chain.track().is_none_or(|id| project.track(id).is_some()));
+    editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+        editor.show_view_place(&place);
+    });
+}
+
+/// Shows the stretch between the locator at or before the playhead and the
+/// one after it across the arrangement: from the song's start before the
+/// first, to its end after the last.
+fn zoom_to_locators(ctx: &mut Context<'_>) {
+    let playing = ctx.transport.is_playing();
+    let playhead = ctx.transport.playhead();
+    let (project, editor) = ctx.document.parts();
+    let places = project.locators.iter().map(|locator| locator.at);
+    let start = (places.clone())
+        .filter(|&at| at <= playhead)
+        .max()
+        .unwrap_or(Beats::ZERO);
+    let end = (places.filter(|&at| at > playhead).min())
+        .unwrap_or_else(|| crate::navigation::song_end(project));
+    if end <= start {
+        return;
+    }
+    editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+        editor.viewport.show(BeatRange::new(start, end));
     });
 }
 
@@ -1432,6 +1528,70 @@ mod tests {
         assert_eq!((height(&setup, bass), height(&setup, keys)), (50.0, 60.0));
         let heights = &setup.document.editor().track_heights;
         assert_eq!(heights.len(), 1);
+    }
+
+    #[test]
+    fn view_slots_keep_places_and_recall_them_as_steps() {
+        let (mut setup, bass, _) = two_tracks();
+        let args = Args::new().with("track", bass).with("height", 150.0);
+        setup.run_with(&SET_TRACK_HEIGHT, args).unwrap();
+        setup.run(&ZOOM_IN);
+        setup.run(&SAVE_VIEW_3);
+        let kept = setup.document.editor().place(Panel::Arrangement);
+        setup.run(&RESET_TRACK_HEIGHT);
+        setup.run(&FIT_SONG_WIDTH);
+        setup.run(&RECALL_VIEW_3);
+        assert_eq!(setup.document.editor().place(Panel::Arrangement), kept);
+        // A step back, as any jump is.
+        setup.run(&ZOOM_BACK);
+        assert_ne!(setup.document.editor().place(Panel::Arrangement), kept);
+        // An empty slot says so.
+        setup.run(&RECALL_VIEW_5);
+        assert_eq!(
+            setup.requests.last(),
+            Some(&Request::Notice(
+                "View 5 is empty. Save View 5 keeps the arrangement's view there.".into()
+            ))
+        );
+        // The slots go with the saved view, and come back with it.
+        let saved = setup.document.editor().saved_view(setup.document.project());
+        assert!(saved.slots[2].is_some() && saved.slots[0].is_none());
+        let mut project = setup.document.project().clone();
+        project.view = Some(saved.clone());
+        let opened = crate::Document::new(project);
+        assert_eq!(opened.project().view, None);
+        assert_eq!(opened.editor().saved_view(opened.project()), saved);
+        assert_eq!(setup.document.take_committed(), []);
+    }
+
+    #[test]
+    fn zoom_to_locators_shows_the_stretch_round_the_playhead() {
+        let mut project = Project::new();
+        for (name, at) in [("Verse", 16), ("Chorus", 48)] {
+            let locator = project.new_locator(name, Beats::new(at));
+            project.locators.push(locator);
+        }
+        let mut setup = Setup::new(project);
+        let shown = |setup: &Setup| setup.document.editor().viewport.visible();
+        for (playhead, start, end) in [(20, 16, 48), (4, 0, 16)] {
+            setup.transport.playhead = Beats::new(playhead);
+            setup.run(&ZOOM_TO_LOCATORS);
+            let visible = shown(&setup);
+            let (start, end) = (Beats::new(start), Beats::new(end));
+            assert!(
+                visible.start <= start && start - visible.start < Beats::new(4),
+                "{playhead}: {visible:?}"
+            );
+            assert!(
+                end <= visible.end && visible.end - end < Beats::new(4),
+                "{playhead}: {visible:?}"
+            );
+        }
+        // After the last locator, the song ends there too: nothing to show.
+        let before = setup.document.editor().viewport;
+        setup.transport.playhead = Beats::new(50);
+        setup.run(&ZOOM_TO_LOCATORS);
+        assert_eq!(setup.document.editor().viewport, before);
     }
 
     #[test]

@@ -70,7 +70,9 @@ fn new_chords(count: usize) -> Vec<KeyChord> {
     let functions = ["Ctrl+Alt+Shift", "Ctrl+Shift", "Alt+Shift", "Ctrl+Alt"]
         .into_iter()
         .flat_map(|mods| (1..=24).map(move |n| format!("{mods}+F{n}")));
+    let alt_letters = ('A'..='Z').map(|letter| format!("Alt+Shift+{letter}"));
     let chords: Vec<_> = letters
+        .chain(alt_letters)
         .chain(digits)
         .chain(marks)
         .chain(functions)

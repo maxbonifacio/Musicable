@@ -1338,6 +1338,9 @@ impl App {
     fn save_to(&mut self, path: PathBuf) -> Result<PathBuf, String> {
         let mut project = self.session.saved_project();
         project.workspace = Some(self.workspaces.current_name().to_owned());
+        // Where the arrangement is, written with the project but never a
+        // change to it.
+        project.view = Some(self.session.editor().saved_view(&project));
         match project::save(&path, &project) {
             Ok(()) => {
                 self.session.mark_saved();

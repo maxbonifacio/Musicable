@@ -1685,6 +1685,40 @@ fn examples() -> Vec<Example> {
             Some(Args::new().with("tracks", vec![track]))
         }),
         leaves(view::TOGGLE_AUTO_ZOOM, bare),
+        leaves(view::SAVE_VIEW_1, bare),
+        leaves(view::SAVE_VIEW_2, bare),
+        leaves(view::SAVE_VIEW_3, bare),
+        leaves(view::SAVE_VIEW_4, bare),
+        leaves(view::SAVE_VIEW_5, bare),
+        // A slot kept by Save View, after zooming away from it.
+        leaves(view::RECALL_VIEW_1, |s| {
+            s.run(&view::SAVE_VIEW_1);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::RECALL_VIEW_2, |s| {
+            s.run(&view::SAVE_VIEW_2);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::RECALL_VIEW_3, |s| {
+            s.run(&view::SAVE_VIEW_3);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::RECALL_VIEW_4, |s| {
+            s.run(&view::SAVE_VIEW_4);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::RECALL_VIEW_5, |s| {
+            s.run(&view::SAVE_VIEW_5);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::ZOOM_TO_LOCATORS, |s| {
+            (!project(s).locators.is_empty()).then(Args::new)
+        }),
         // Every track's.
         leaves(view::RESET_TRACK_HEIGHT, |_| {
             Some(Args::new().with("all", true))

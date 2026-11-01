@@ -18,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 26,
+  "version": 27,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -293,7 +293,8 @@ workspace:
     }
   ],
   "wires": [],
-  "workspace": "Mixing"
+  "workspace": "Mixing",
+  "view": null
 }
 ```
 
@@ -339,7 +340,7 @@ in version control shows only what really changed.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | Always `"musicable-project"`. |
-| `version` | whole number | The format version: 21 for this page. |
+| `version` | whole number | The format version: 27 for this page. |
 | `ticks_per_beat` | whole number | Always 322560. It's there so the file explains its own positions. |
 | `tempo` | tempo map | Tempo and time signature over the song. |
 | `loop_region` | range | The region playback loops over. It's kept while looping is off. |
@@ -362,6 +363,48 @@ in version control shows only what really changed.
 | `automation` | array of lanes | The automated parameters, a lane for each, in any order. |
 | `wires` | array of wires | The wires that take signal from one point in the mix into a device, such as a compressor's sidechain, in the order they were made. |
 | `workspace` | string or null | The name of the workspace the project was saved with, which lays Musicable's panels out. Musicable switches to it as it opens the project, if the user has a workspace by that name. |
+| `view` | view or null | Where the arrangement was when the project was saved, and the views kept in its slots. Musicable shows it as it opens the project; null opens it as a new project. |
+
+### View
+
+Musicable writes the view whenever the project is saved, and only then:
+moving around the arrangement doesn't make the project need saving.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `place` | place | Where the arrangement was. |
+| `follow` | object | Whether Follow was on in each panel: `arrangement`, `piano_roll` and `sample_editor`, each a boolean. |
+| `slots` | array of places or nulls | Five: the views Save View 1 to 5 kept, or null for a slot that keeps none. |
+
+A place is where the arrangement is:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `start` | position | The song position at the left edge. |
+| `zoom` | number | How many points a beat takes. It's above 0. |
+| `top` | number | How far down the tracks are scrolled, in points. It's 0 or more. |
+| `track_heights` | array of `[id, height]` pairs | The heights the user gave tracks, each a track's id and its height in points, from 24 to 800. A track is named once at most; tracks it doesn't name have the usual height. |
+| `master_height` | number or null | The height the user gave the master's row, from 24 to 800, or null for the usual height. |
+
+```json
+{
+  "place": {
+    "start": 10321920,
+    "zoom": 24.5,
+    "top": 60.0,
+    "track_heights": [
+      [1, 120.0]
+    ],
+    "master_height": 90.0
+  },
+  "follow": {
+    "arrangement": true,
+    "piano_roll": false,
+    "sample_editor": true
+  },
+  "slots": [null, null, null, null, null]
+}
+```
 
 ### Tempo map
 
@@ -1202,6 +1245,7 @@ A **port** is an object with one field:
 | 24 | 2026-10-30 | Note wires, which play a MIDI track's notes on another's instrument or MIDI effect, through its `{"notes": id}` port, and every wire's `channel`, a note wire's MIDI channel. Version 23 wires are audio wires, so their channel is `null`. |
 | 25 | 2026-10-30 | Plugins' `note_output`, so the point after a plugin carries the notes it plays out as it renders, for a note wire or a MIDI track's input. Version 24 plugins have none until they next load. |
 | 26 | 2026-10-30 | Tracks' `always_live`, which has a track render live while the rest of the project renders ahead. Version 25 tracks aren't. |
+| 27 | 2026-11-01 | The arrangement's `view` as the project was saved, with its five view slots. Version 26 files have none, so they open as a new project does. |
 
 ## Changing the format
 
