@@ -124,6 +124,9 @@ pub struct App {
     /// The tracks that render live while the rest of the project renders
     /// ahead, for their headers' Live marks.
     live: LiveMarks,
+    /// Whether a modulator moved in the readings taken for an agent, for
+    /// the frame's own to count.
+    modulated: bool,
     /// Where the settings, the user's keymap, mouse map, themes, workspaces
     /// and profiles live.
     config_dir: Option<PathBuf>,
@@ -360,6 +363,7 @@ impl App {
             levels: Levels::default(),
             performance: Figures::default(),
             live: LiveMarks::default(),
+            modulated: false,
             config_dir,
             settings,
             profiles,
@@ -1921,6 +1925,50 @@ impl App {
     }
 }
 
+impl App {
+    /// Reads the meters, the CPU figures and the Live marks from the engine
+    /// as they are now. Agents' reads are answered with them, so they're
+    /// read again before an agent's call too, which can come after a long
+    /// wait while the window is behind others. Returns whether a modulator
+    /// moved since the last reading, here or for an agent.
+    fn take_readings(&mut self) -> bool {
+        self.output.read_meters(&self.session);
+        let playing = self.output.info().is_some();
+        // As of the frame the device plays, while the engine renders ahead.
+        let played = self.session.stats().time;
+        let mut levels = levels(self.session.meters(), self.session.project(), played);
+        // Without a stream, nothing moves the modulators, and their
+        // readings are only where they stopped.
+        if !playing {
+            levels.outputs.clear();
+            levels.moved.clear();
+        }
+        // An LFO runs on whether the song plays or not, and a modulated
+        // control's dot with it.
+        let modulating = levels.outputs != self.levels.outputs || levels.moved != self.levels.moved;
+        let modulating = std::mem::take(&mut self.modulated) || modulating;
+        self.levels = levels;
+        let stats = self.session.stats();
+        let config = self.session.engine_config();
+        let (loads, project) = (self.session.loads(), self.session.project());
+        let period = self.output.info().map(|info| info.period);
+        let figured = loads.map(Arc::as_ref);
+        (self.performance).update(Instant::now(), figured, period, &stats, config, project);
+        // Only some of the project renders live while the rest renders ahead.
+        let ahead = playing && self.session.lead() != Lead::Off;
+        let session = &self.session;
+        let asks = |device| session.plugin_must_render_live(device);
+        self.live.update(loads.filter(|_| ahead), project, asks);
+        modulating
+    }
+
+    /// Takes the readings for an agent's call, keeping whether a modulator
+    /// moved for the frame's own reading.
+    pub(super) fn take_readings_for_agents(&mut self) {
+        self.modulated = self.take_readings();
+    }
+}
+
 impl eframe::App for App {
     /// Key presses go to the keymap before egui sees them, so a bound key
     /// runs its command wherever the focus is, unless a text field has it.
@@ -1994,31 +2042,9 @@ impl eframe::App for App {
             self.pending.get_or_insert(Request::Quit);
         }
         self.read_audio_files(ctx);
+        let modulating = self.take_readings();
         let playing = self.output.info().is_some();
-        // As of the frame the device plays, while the engine renders ahead.
-        let played = self.session.stats().time;
-        let mut levels = levels(self.session.meters(), self.session.project(), played);
-        // Without a stream, nothing moves the modulators, and their
-        // readings are only where they stopped.
-        if !playing {
-            levels.outputs.clear();
-            levels.moved.clear();
-        }
-        // An LFO runs on whether the song plays or not, and a modulated
-        // control's dot with it.
-        let modulating = levels.outputs != self.levels.outputs || levels.moved != self.levels.moved;
-        self.levels = levels;
         let stats = self.session.stats();
-        let config = self.session.engine_config();
-        let (loads, project) = (self.session.loads(), self.session.project());
-        let period = self.output.info().map(|info| info.period);
-        let figured = loads.map(Arc::as_ref);
-        (self.performance).update(Instant::now(), figured, period, &stats, config, project);
-        // Only some of the project renders live while the rest renders ahead.
-        let ahead = playing && self.session.lead() != Lead::Off;
-        let session = &self.session;
-        let asks = |device| session.plugin_must_render_live(device);
-        self.live.update(loads.filter(|_| ahead), project, asks);
         // The meters fall back for a few seconds after the music stops. They
         // only move while a device plays.
         let metering = playing && (self.levels.moving() || modulating);

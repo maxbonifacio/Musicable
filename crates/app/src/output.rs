@@ -182,9 +182,10 @@ impl Output {
         played
     }
 
-    /// Call once per frame. Notices a stream that ended by itself, tries the
-    /// device again when it's time, and updates the CPU meter and the lead
-    /// gauge. `notices` says what happened.
+    /// Call once per frame. Notices a stream that ended by itself, and tries
+    /// the device again when it's time. `notices` says what happened.
+    /// [`read_meters`](Self::read_meters) updates the CPU meter and the lead
+    /// gauge.
     pub fn tick(&mut self, session: &mut Session, notices: &mut Vec<String>) {
         if self.stream.as_ref().is_some_and(Stream::has_ended) {
             let error = self.stop();
@@ -223,6 +224,11 @@ impl Output {
                 }
             }
         }
+    }
+
+    /// Updates the CPU meter and the lead gauge from the stream and the
+    /// engine as they are now: once a frame, and before an agent's read.
+    pub fn read_meters(&mut self, session: &Session) {
         if let Some(stream) = &self.stream {
             let (now, busy) = (Instant::now(), stream.stats().busy);
             self.meter.update(now, busy, self.monitor.stats());

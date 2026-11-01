@@ -2085,3 +2085,65 @@ fn rendering_ahead_on_workers_plays_what_rendering_live_plays() {
         panic!("{error}");
     }
 }
+
+#[test]
+fn the_position_moves_on_with_every_frame_played_through_random_changes() {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    for round in 0..40 {
+        let lead = [Lead::Short, Lead::Normal, Lead::Long][round % 3];
+        let threads = round % 2 == 1;
+        let (mut engine, mut handle) = match threads {
+            false => with_lead(lead),
+            true => parallel(lead),
+        };
+        handle.swap_graph(track()).unwrap();
+        render(&mut engine, 2048, 441);
+        handle.send(play()).unwrap();
+        render(&mut engine, 441 * 3, 441);
+        let mut last = handle.stats();
+        // Until when a locate sent may still apply: it applies at the
+        // furthest frame rendered as the ahead side takes it in.
+        let mut jumped: Option<u64> = None;
+        for step in 0..300 {
+            match next(20) {
+                0 => handle.send(armed(true)).unwrap(),
+                1 => handle.send(armed(false)).unwrap(),
+                2 => {
+                    let _ = handle.swap_graph(track());
+                }
+                3 => {
+                    engine.process(&mut AudioMut::from_planar(&mut [], 1));
+                }
+                4 => {
+                    let at = Beats::new(next(16) as i64);
+                    handle
+                        .send(Event::Transport(TransportCommand::Locate(at)))
+                        .unwrap();
+                    jumped = Some(handle.stats().rendered + 9600 + 4096);
+                }
+                _ => {}
+            }
+            let size = [64, 128, 256, 441, 512, 1024][next(6) as usize];
+            render(&mut engine, size, size);
+            let stats = handle.stats();
+            assert!(stats.playing, "round {round}, step {step}: {stats:?}");
+            if jumped.is_some_and(|until| last.time > until) {
+                jumped = None;
+            }
+            if jumped.is_none() {
+                assert_eq!(
+                    stats.position as i64 - last.position as i64,
+                    stats.time as i64 - last.time as i64,
+                    "round {round} ({lead:?}, threads {threads}), step {step}: {last:?} then {stats:?}"
+                );
+            }
+            last = stats;
+        }
+    }
+}
