@@ -367,6 +367,9 @@ pub enum Request {
     CommandPalette,
     /// Tell the user this, in the status bar.
     Notice(String),
+    /// Keep the editor's behaviour, which a command changed, in the
+    /// profile's settings.
+    SaveBehaviour,
     /// Show the Settings window, at the page it showed last.
     Settings,
     /// Show the Settings window's Audio page.
@@ -385,6 +388,8 @@ pub enum Request {
     NextProfile,
     /// Show or hide the panel with this id, such as the mixer.
     TogglePanel(&'static str),
+    /// Show or hide the overview over the arrangement.
+    ToggleOverview,
     /// Show the panel with this id, such as the piano roll, if it's hidden.
     ShowPanel(&'static str),
     /// Bring the panel with this id, the piano roll or the Sample Editor,
@@ -682,7 +687,9 @@ impl Registry {
         if args.is_empty() && !command.when.applies(document.project(), document.editor()) {
             return Err(CommandError::NotNow(id.clone()));
         }
-        run(context, args)
+        let result = run(context, args);
+        context.document.editor_mut().settle_auto_zoom();
+        result
     }
 
     /// Runs `commands` in order, each with its arguments, as one step in

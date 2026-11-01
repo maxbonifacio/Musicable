@@ -74,6 +74,9 @@ pub struct Workspace {
     pub views: Views,
     /// The main window's first.
     pub windows: Vec<WindowLayout>,
+    /// Whether the arrangement hides its overview of the whole song.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hide_overview: bool,
 }
 
 /// Where a window is, and how its panels are laid out.

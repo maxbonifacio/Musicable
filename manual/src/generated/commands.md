@@ -41,9 +41,15 @@
 | Delete Tracks |  | `track.delete` |
 | Always Live |  | `track.toggle_always_live` |
 | Fit Track Heights | H | `view.fit_track_heights` |
+| Fit Selected Tracks |  | `view.fit_selected_tracks` |
 | Make Tracks Taller | Alt+Equals | `view.tracks_taller` |
 | Make Tracks Shorter | Alt+Minus | `view.tracks_shorter` |
 | Reset Track Height |  | `view.reset_track_height` |
+| Small Tracks |  | `view.small_tracks` |
+| Medium Tracks |  | `view.medium_tracks` |
+| Large Tracks |  | `view.large_tracks` |
+| Huge Tracks |  | `view.huge_tracks` |
+| Auto Zoom Tracks |  | `view.toggle_auto_zoom` |
 
 ### Clip
 
@@ -146,15 +152,18 @@
 | Switch Devices and Clip Editor | F12 | `view.switch_devices_piano_roll` |
 | Browser | Ctrl+Alt+B | `view.toggle_browser` |
 | History | Ctrl+Alt+H | `view.toggle_history` |
+| Overview | Ctrl+Alt+O | `view.toggle_overview` |
 | Move Panel to New Window |  | `view.move_to_new_window` |
 | Move Panel to Main Window |  | `view.move_to_main_window` |
 | Zoom In | Equals, NumpadAdd | `view.zoom_in` |
 | Zoom Out | Minus, NumpadSubtract | `view.zoom_out` |
 | Zoom to Selection | Z | `view.zoom_to_selection` |
+| Zoom to Locators |  | `view.zoom_to_locators` |
 | Fit Song Width | W | `view.fit_song_width` |
 | Zoom Back | X | `view.zoom_back` |
 | Zoom Forward | Shift+X | `view.zoom_forward` |
 | Follow | Ctrl+Shift+F | `view.toggle_follow` |
+| Switch Follow Mode |  | `view.switch_follow_mode` |
 | Scroll to Playhead |  | `view.scroll_to_playhead` |
 | Show/Hide Take Lanes | Ctrl+Alt+U | `view.toggle_take_lanes` |
 | Narrow Grid | Ctrl+1 | `view.narrow_grid` |
@@ -163,6 +172,21 @@
 | Fixed Grid | Ctrl+5 | `view.fixed_grid` |
 | Snap to Grid | Ctrl+4 | `view.toggle_snap` |
 | Command Palette... | Ctrl+Shift+P | `view.command_palette` |
+
+### Views
+
+| Command | Keys | Id |
+|---|---|---|
+| Recall View 1 |  | `view.recall_view_1` |
+| Recall View 2 |  | `view.recall_view_2` |
+| Recall View 3 |  | `view.recall_view_3` |
+| Recall View 4 |  | `view.recall_view_4` |
+| Recall View 5 |  | `view.recall_view_5` |
+| Save View 1 |  | `view.save_view_1` |
+| Save View 2 |  | `view.save_view_2` |
+| Save View 3 |  | `view.save_view_3` |
+| Save View 4 |  | `view.save_view_4` |
+| Save View 5 |  | `view.save_view_5` |
 
 ### Workspaces
 

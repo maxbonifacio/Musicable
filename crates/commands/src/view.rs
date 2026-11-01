@@ -7,10 +7,10 @@
 //! in the [`Editor`](crate::Editor). Zooming acts on the view with the focus:
 //! the arrangement, the piano roll or the Sample Editor.
 
-use musicable_model::time::Beats;
-use musicable_model::{Chain, TrackId};
+use musicable_model::time::{BeatRange, Beats};
+use musicable_model::{Chain, TrackId, VIEW_SLOTS};
 
-use crate::editor::{Editor, Focus, PianoRoll, Step, Viewport};
+use crate::editor::{Editor, Focus, FollowMode, PianoRoll, Step, Viewport};
 use crate::navigation::{Panel, Record, song_range};
 use crate::panel;
 use crate::{
@@ -38,6 +38,8 @@ pub const TOGGLE_CLIP_EDITOR: CommandId = CommandId::new("view.toggle_clip_edito
 /// Shows or hides the History panel, which lists the steps of the undo
 /// history, in a tab beside the browser.
 pub const TOGGLE_HISTORY: CommandId = CommandId::new("view.toggle_history");
+/// Shows or hides the overview of the whole song over the arrangement.
+pub const TOGGLE_OVERVIEW: CommandId = CommandId::new("view.toggle_overview");
 /// Shows or hides the Routing panel, which lists every connection in the
 /// project, in a tab beside the mixer: Live's In/Out section, for the whole
 /// project.
@@ -85,14 +87,64 @@ pub const TRACKS_SHORTER: CommandId = CommandId::new("view.tracks_shorter");
 /// Gives tracks their default height back: the selected tracks, or the
 /// track the panels show.
 pub const RESET_TRACK_HEIGHT: CommandId = CommandId::new("view.reset_track_height");
+/// Makes the selected tracks, or every track with none selected, the
+/// Small size.
+pub const SMALL_TRACKS: CommandId = CommandId::new("view.small_tracks");
+/// Makes the selected tracks, or every track, the Medium size.
+pub const MEDIUM_TRACKS: CommandId = CommandId::new("view.medium_tracks");
+/// Makes the selected tracks, or every track, the Large size.
+pub const LARGE_TRACKS: CommandId = CommandId::new("view.large_tracks");
+/// Makes the selected tracks, or every track, the Huge size.
+pub const HUGE_TRACKS: CommandId = CommandId::new("view.huge_tracks");
+/// Makes the selected tracks fill the arrangement's height together, and
+/// every other track as short as tracks go.
+pub const FIT_SELECTED_TRACKS: CommandId = CommandId::new("view.fit_selected_tracks");
+/// Turns on or off making the selected track Large while it's selected.
+pub const TOGGLE_AUTO_ZOOM: CommandId = CommandId::new("view.toggle_auto_zoom");
+/// Keeps the arrangement's view in the first view slot, saved with the
+/// project, for Recall View 1: Pro Tools' Zoom Presets, Logic's Zoom 1 to 3.
+pub const SAVE_VIEW_1: CommandId = CommandId::new("view.save_view_1");
+pub const SAVE_VIEW_2: CommandId = CommandId::new("view.save_view_2");
+pub const SAVE_VIEW_3: CommandId = CommandId::new("view.save_view_3");
+pub const SAVE_VIEW_4: CommandId = CommandId::new("view.save_view_4");
+pub const SAVE_VIEW_5: CommandId = CommandId::new("view.save_view_5");
+/// Shows the view kept in the first view slot in the arrangement.
+pub const RECALL_VIEW_1: CommandId = CommandId::new("view.recall_view_1");
+pub const RECALL_VIEW_2: CommandId = CommandId::new("view.recall_view_2");
+pub const RECALL_VIEW_3: CommandId = CommandId::new("view.recall_view_3");
+pub const RECALL_VIEW_4: CommandId = CommandId::new("view.recall_view_4");
+pub const RECALL_VIEW_5: CommandId = CommandId::new("view.recall_view_5");
+/// The Save View commands, by slot.
+pub const SAVE_VIEW: [CommandId; VIEW_SLOTS] = [
+    SAVE_VIEW_1,
+    SAVE_VIEW_2,
+    SAVE_VIEW_3,
+    SAVE_VIEW_4,
+    SAVE_VIEW_5,
+];
+/// The Recall View commands, by slot.
+pub const RECALL_VIEW: [CommandId; VIEW_SLOTS] = [
+    RECALL_VIEW_1,
+    RECALL_VIEW_2,
+    RECALL_VIEW_3,
+    RECALL_VIEW_4,
+    RECALL_VIEW_5,
+];
+/// Shows the stretch of the song between the locators either side of the
+/// playhead across the arrangement, as Cubase's Zoom to Locators does.
+pub const ZOOM_TO_LOCATORS: CommandId = CommandId::new("view.zoom_to_locators");
 /// Scrolls the view with the focus to the playhead, and lets Follow follow
 /// it again.
 pub const SCROLL_TO_PLAYHEAD: CommandId = CommandId::new("view.scroll_to_playhead");
 /// Tells the commands the sizes the arrangement draws its lanes at, for
 /// fitting tracks to its height.
 pub const SET_LANE_SIZES: CommandId = CommandId::new("view.set_lane_sizes");
-/// Turns on or off scrolling the arrangement to keep the playhead in sight.
+/// Turns on or off scrolling the panel with the focus to keep the playhead
+/// in sight: the arrangement, the piano roll or the Sample Editor.
 pub const TOGGLE_FOLLOW: CommandId = CommandId::new("view.toggle_follow");
+/// Switches Follow between turning pages and scrolling continuously, in
+/// every panel.
+pub const SWITCH_FOLLOW_MODE: CommandId = CommandId::new("view.switch_follow_mode");
 /// Shows the selected tracks' takes in lanes under them, or hides them.
 pub const TOGGLE_TAKE_LANES: CommandId = CommandId::new("view.toggle_take_lanes");
 /// Brings the grid's lines closer together.
@@ -127,7 +179,7 @@ type Handler = fn(&mut Context<'_>);
 
 /// The view commands that take no arguments, with their titles, when they
 /// apply and what they run.
-const COMMANDS: [(CommandId, &str, When, Handler); 18] = [
+const COMMANDS: [(CommandId, &str, When, Handler); 21] = [
     (ZOOM_IN, "Zoom In", When::Always, |ctx| zoom(ctx, ZOOM_STEP)),
     (ZOOM_OUT, "Zoom Out", When::Always, |ctx| {
         zoom(ctx, 1.0 / ZOOM_STEP)
@@ -165,12 +217,36 @@ const COMMANDS: [(CommandId, &str, When, Handler); 18] = [
     ),
     (TOGGLE_FOLLOW, "Follow", When::Always, |ctx| {
         let editor = ctx.document.editor_mut();
-        editor.follow = !editor.follow;
+        let history = editor.navigation.of_mut(Panel::of(editor.focus));
+        history.follow = !history.follow;
         // Turned on, it follows the playhead from the next frame.
-        if editor.follow {
-            editor.navigation.resume_all();
-        }
+        history.suspended = false;
     }),
+    (
+        ZOOM_TO_LOCATORS,
+        "Zoom to Locators",
+        When::HasLocators,
+        zoom_to_locators,
+    ),
+    (TOGGLE_AUTO_ZOOM, "Auto Zoom Tracks", When::Always, |ctx| {
+        let editor = ctx.document.editor_mut();
+        editor.behaviour.auto_zoom_tracks = !editor.behaviour.auto_zoom_tracks;
+        editor.sized_by_hand = None;
+        ctx.requests.push(Request::SaveBehaviour);
+    }),
+    (
+        SWITCH_FOLLOW_MODE,
+        "Switch Follow Mode",
+        When::Always,
+        |ctx| {
+            let behaviour = &mut ctx.document.editor_mut().behaviour;
+            behaviour.follow_mode = match behaviour.follow_mode {
+                FollowMode::Page => FollowMode::Continuous,
+                FollowMode::Continuous => FollowMode::Page,
+            };
+            ctx.requests.push(Request::SaveBehaviour);
+        },
+    ),
     (NARROW_GRID, "Narrow Grid", When::Always, |ctx| {
         widen_grid(ctx.document.editor_mut(), -1)
     }),
@@ -202,7 +278,7 @@ const COMMANDS: [(CommandId, &str, When, Handler); 18] = [
 ];
 
 /// The view commands that ask the app for something.
-const REQUESTS: [(CommandId, &str, Request); 11] = [
+const REQUESTS: [(CommandId, &str, Request); 12] = [
     (
         COMMAND_PALETTE,
         "Command Palette...",
@@ -222,6 +298,7 @@ const REQUESTS: [(CommandId, &str, Request); 11] = [
         Request::TogglePanel(panel::SAMPLE_EDITOR),
     ),
     (TOGGLE_HISTORY, "History", Request::TogglePanel("history")),
+    (TOGGLE_OVERVIEW, "Overview", Request::ToggleOverview),
     (
         TOGGLE_ROUTING,
         "Routing",
@@ -243,6 +320,37 @@ const REQUESTS: [(CommandId, &str, Request); 11] = [
         Request::MoveToMainWindow,
     ),
 ];
+
+/// The height presets' commands, Small to Huge, in the order of
+/// [`Behaviour::presets`](crate::editor::Behaviour::presets).
+pub const PRESETS: [(CommandId, &str); 4] = [
+    (SMALL_TRACKS, "Small Tracks"),
+    (MEDIUM_TRACKS, "Medium Tracks"),
+    (LARGE_TRACKS, "Large Tracks"),
+    (HUGE_TRACKS, "Huge Tracks"),
+];
+
+/// The tracks a height preset run with `args` sizes: those it names, or
+/// every track with `all`, or else the selected tracks, or every track if
+/// none is selected.
+fn preset_tracks(ctx: &Context<'_>, args: &Args) -> Result<Vec<TrackId>, CommandError> {
+    let project = ctx.document.project();
+    let every = || project.tracks.iter().map(|t| t.id).collect();
+    if args.opt("all")? == Some(true) {
+        return Ok(every());
+    }
+    if let Some(tracks) = args.opt::<Vec<TrackId>>("tracks")? {
+        if let Some(id) = tracks.iter().find(|&&id| project.track(id).is_none()) {
+            return Err(CommandError::invalid(format!("there's no track {}", id.0)));
+        }
+        return Ok(tracks);
+    }
+    let selected = &ctx.document.editor().selection.tracks;
+    Ok(match selected.is_empty() {
+        true => every(),
+        false => selected.iter().copied().collect(),
+    })
+}
 
 /// The `history` argument the view-setting commands take: how the change
 /// counts in the view's history and for Follow.
@@ -428,9 +536,93 @@ pub fn register(registry: &mut Registry) {
             let editor = ctx.document.editor_mut();
             editor.navigate(Panel::Arrangement, record, playing, |editor| {
                 for chain in chains {
-                    editor.track_heights.insert(chain, height);
+                    editor.set_height(chain, Some(height));
                 }
             });
+            Ok(Value::None)
+        },
+    );
+    for (slot, (save, recall)) in SAVE_VIEW.into_iter().zip(RECALL_VIEW).enumerate() {
+        let number = slot + 1;
+        registry.add(
+            Command::new(save, format!("Save View {number}")),
+            move |ctx, _| {
+                let (project, editor) = ctx.document.parts();
+                editor.view_slots[slot] = Some(editor.view_place(project));
+                Ok(Value::None)
+            },
+        );
+        registry.add(
+            Command::new(recall, format!("Recall View {number}")),
+            move |ctx, _| {
+                recall_view(ctx, slot);
+                Ok(Value::None)
+            },
+        );
+    }
+    for (index, (id, title)) in PRESETS.into_iter().enumerate() {
+        registry.add(
+            Command::new(id, title).with_params(&[
+                Param::optional(
+                    "tracks",
+                    Type::TRACKS,
+                    "The tracks: the selected tracks without it, or every track if none is.",
+                ),
+                Param::optional("all", Type::Bool, "Every track, as with Alt held."),
+            ]),
+            move |ctx, args| {
+                let tracks = preset_tracks(ctx, args)?;
+                let playing = ctx.transport.is_playing();
+                let editor = ctx.document.editor_mut();
+                let height = editor.behaviour.presets()[index];
+                editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+                    for id in tracks {
+                        editor.set_height(Chain::Track(id), Some(height));
+                    }
+                });
+                Ok(Value::None)
+            },
+        );
+    }
+    registry.add(
+        Command::new(FIT_SELECTED_TRACKS, "Fit Selected Tracks")
+            .when(When::TracksSelected)
+            .with_params(&[Param::optional(
+                "tracks",
+                Type::TRACKS,
+                "The tracks to fit: the selected tracks without it.",
+            )]),
+        |ctx, args| {
+            let tracks: Vec<TrackId> = match args.opt("tracks")? {
+                Some(tracks) => tracks,
+                None => ctx
+                    .document
+                    .editor()
+                    .selection
+                    .tracks
+                    .iter()
+                    .copied()
+                    .collect(),
+            };
+            let project = ctx.document.project();
+            if let Some(id) = tracks.iter().find(|&&id| project.track(id).is_none()) {
+                return Err(CommandError::invalid(format!("there's no track {}", id.0)));
+            }
+            if tracks.is_empty() {
+                return Err(CommandError::invalid("no track is selected"));
+            }
+            let playing = ctx.transport.is_playing();
+            let (project, editor) = ctx.document.parts();
+            let mut fits = true;
+            editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+                fits = editor.fit_selected_tracks(project, &tracks);
+            });
+            if !fits {
+                ctx.requests.push(Request::Notice(
+                    "The selected tracks don't fit at the smallest height. Scroll for the rest."
+                        .into(),
+                ));
+            }
             Ok(Value::None)
         },
     );
@@ -450,7 +642,7 @@ pub fn register(registry: &mut Registry) {
             let editor = ctx.document.editor_mut();
             editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
                 for chain in chains {
-                    editor.track_heights.remove(&chain);
+                    editor.set_height(chain, None);
                 }
             });
             Ok(Value::None)
@@ -710,21 +902,65 @@ fn step_heights(ctx: &mut Context<'_>, taller: bool) {
                     .find(|&size| size < height - 0.5)
                     .unwrap_or(MIN_TRACK_HEIGHT),
             };
-            editor.track_heights.insert(chain, next);
+            editor.set_height(chain, Some(next));
         }
     });
 }
 
+/// Shows the view in slot `slot` in the arrangement, as a step of its
+/// history, or says the slot keeps none.
+fn recall_view(ctx: &mut Context<'_>, slot: usize) {
+    let playing = ctx.transport.is_playing();
+    let (project, editor) = ctx.document.parts();
+    let Some(mut place) = editor.view_slots[slot].clone() else {
+        let number = slot + 1;
+        ctx.requests.push(Request::Notice(format!(
+            "View {number} is empty. Save View {number} keeps the arrangement's view there."
+        )));
+        return;
+    };
+    (place.heights).retain(|chain, _| chain.track().is_none_or(|id| project.track(id).is_some()));
+    editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+        editor.show_view_place(&place);
+    });
+}
+
+/// Shows the stretch between the locator at or before the playhead and the
+/// one after it across the arrangement: from the song's start before the
+/// first, to its end after the last.
+fn zoom_to_locators(ctx: &mut Context<'_>) {
+    let playing = ctx.transport.is_playing();
+    let playhead = ctx.transport.playhead();
+    let (project, editor) = ctx.document.parts();
+    let places = project.locators.iter().map(|locator| locator.at);
+    let start = (places.clone())
+        .filter(|&at| at <= playhead)
+        .max()
+        .unwrap_or(Beats::ZERO);
+    let end = (places.filter(|&at| at > playhead).min())
+        .unwrap_or_else(|| crate::navigation::song_end(project));
+    if end <= start {
+        return;
+    }
+    editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+        editor.viewport.show(BeatRange::new(start, end));
+    });
+}
+
 /// Scrolls the view with the focus so the playhead is a little way in from
-/// its left edge, and lets Follow follow again there.
+/// its left edge, or at Continuous Follow's place, and lets Follow follow
+/// again there.
 fn scroll_to_playhead(ctx: &mut Context<'_>) {
     let playing = ctx.transport.is_playing();
     let playhead = ctx.transport.playhead();
     let editor = ctx.document.editor_mut();
     let panel = Panel::of(editor.focus);
+    let fraction = match editor.behaviour.follow_mode {
+        FollowMode::Page => 1.0 / 20.0,
+        FollowMode::Continuous => editor.behaviour.follow_place.fraction(),
+    };
     editor.navigate(panel, Record::Step, playing, |editor| {
-        let viewport = editor.viewport_mut(panel);
-        viewport.start = (playhead - viewport.beats_in(viewport.width / 20.0)).max(Beats::ZERO);
+        editor.viewport_mut(panel).place(playhead, fraction);
     });
     editor.navigation.of_mut(panel).suspended = false;
 }
@@ -903,7 +1139,7 @@ mod tests {
         setup.run_with(&SET_TRACK_HEIGHT, selected).unwrap();
         assert_eq!(setup.document.editor().track_heights[&track], 70.0);
         setup.run(&TOGGLE_FOLLOW);
-        assert!(!setup.document.editor().follow);
+        assert!(!setup.document.editor().follows(Panel::Arrangement));
         setup.run(&TOGGLE_MIXER);
         setup.run(&TOGGLE_DEVICES);
         setup.run(&TOGGLE_BROWSER);
@@ -1189,5 +1425,214 @@ mod tests {
                 "20 of 30 tracks are in sight at the smallest height. Scroll for the rest.".into()
             )]
         );
+    }
+
+    #[test]
+    fn presets_size_the_selected_tracks_or_every_track() {
+        let (mut setup, bass, keys) = two_tracks();
+        let height = |setup: &Setup, track| setup.document.editor().height_of(Chain::Track(track));
+        // With none selected, every track.
+        setup.run(&SMALL_TRACKS);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (24.0, 24.0));
+        setup.select_tracks(&[keys]);
+        setup.run(&LARGE_TRACKS);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (24.0, 120.0));
+        // Alt in a menu gives every track the size.
+        let all = Args::new().with("all", true);
+        setup.run_with(&HUGE_TRACKS, all).unwrap();
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (200.0, 200.0));
+        // The sizes are the behaviour's.
+        setup.document.editor_mut().behaviour.medium_tracks = 80;
+        let tracks = Args::new().with("tracks", vec![bass]);
+        setup.run_with(&MEDIUM_TRACKS, tracks).unwrap();
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (80.0, 200.0));
+        // Each is a step back.
+        setup.run(&ZOOM_BACK);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (200.0, 200.0));
+        setup.run(&ZOOM_BACK);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (24.0, 120.0));
+        assert_eq!(setup.document.take_committed(), []);
+    }
+
+    #[test]
+    fn fit_selected_gives_the_selected_tracks_the_room() {
+        let mut project = Project::new();
+        let tracks: Vec<TrackId> = (0..30)
+            .map(|n| project.add_track(format!("T{n}"), TrackKind::Audio))
+            .collect();
+        let mut setup = Setup::new(project);
+        let height = |setup: &Setup, track| setup.document.editor().height_of(Chain::Track(track));
+        assert!(!setup.applies(&FIT_SELECTED_TRACKS));
+        // The other 28 take 672 points at the smallest, more than the
+        // 480 there are: the two are the smallest too, and the first of
+        // them comes to the top.
+        setup.select_tracks(&[tracks[27], tracks[29]]);
+        // Selecting them scrolled down to them.
+        let top = setup.document.editor().viewport.top;
+        setup.run(&FIT_SELECTED_TRACKS);
+        assert_eq!(height(&setup, tracks[27]), MIN_TRACK_HEIGHT);
+        assert_eq!(
+            setup.document.editor().viewport.top,
+            27.0 * MIN_TRACK_HEIGHT
+        );
+        assert_eq!(
+            setup.requests,
+            [Request::Notice(
+                "The selected tracks don't fit at the smallest height. Scroll for the rest.".into()
+            )]
+        );
+        setup.run(&ZOOM_BACK);
+        assert_eq!(height(&setup, tracks[27]), 60.0);
+        assert_eq!(setup.document.editor().viewport.top, top);
+
+        // With four tracks, the other two take 48 points and the selected
+        // ones share the rest.
+        let mut project = Project::new();
+        let tracks: Vec<TrackId> = (0..4)
+            .map(|n| project.add_track(format!("T{n}"), TrackKind::Audio))
+            .collect();
+        let mut setup = Setup::new(project);
+        let args = Args::new().with("tracks", vec![tracks[1], tracks[2]]);
+        setup.run_with(&FIT_SELECTED_TRACKS, args).unwrap();
+        assert_eq!(height(&setup, tracks[1]), (480.0 - 48.0) / 2.0);
+        assert_eq!(height(&setup, tracks[3]), MIN_TRACK_HEIGHT);
+        assert!(setup.requests.is_empty());
+    }
+
+    #[test]
+    fn auto_zoom_makes_the_selected_track_large_and_saves_none_of_it() {
+        let (mut setup, bass, keys) = two_tracks();
+        let height = |setup: &Setup, track| setup.document.editor().height_of(Chain::Track(track));
+        let show = |setup: &mut Setup, track| {
+            setup.document.editor_mut().selected_track = Some(Chain::Track(track));
+            // Any command lets Auto Zoom see the track selected.
+            setup.run(&SCROLL_TO_PLAYHEAD);
+        };
+        setup.run(&TOGGLE_AUTO_ZOOM);
+        assert!(setup.document.editor().behaviour.auto_zoom_tracks);
+        assert_eq!(setup.requests, [Request::SaveBehaviour]);
+        show(&mut setup, bass);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (120.0, 60.0));
+        assert!(setup.document.editor().track_heights.is_empty());
+        // Sizing the zoomed track by hand keeps the size given.
+        let args = Args::new().with("track", bass).with("height", 50.0);
+        setup.run_with(&SET_TRACK_HEIGHT, args).unwrap();
+        assert_eq!(height(&setup, bass), 50.0);
+        show(&mut setup, keys);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (50.0, 120.0));
+        // Selected again, it's zoomed again.
+        show(&mut setup, bass);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (120.0, 60.0));
+        // Off, the heights are the user's.
+        setup.run(&TOGGLE_AUTO_ZOOM);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (50.0, 60.0));
+        let heights = &setup.document.editor().track_heights;
+        assert_eq!(heights.len(), 1);
+    }
+
+    #[test]
+    fn view_slots_keep_places_and_recall_them_as_steps() {
+        let (mut setup, bass, _) = two_tracks();
+        let args = Args::new().with("track", bass).with("height", 150.0);
+        setup.run_with(&SET_TRACK_HEIGHT, args).unwrap();
+        setup.run(&ZOOM_IN);
+        setup.run(&SAVE_VIEW_3);
+        let kept = setup.document.editor().place(Panel::Arrangement);
+        setup.run(&RESET_TRACK_HEIGHT);
+        setup.run(&FIT_SONG_WIDTH);
+        setup.run(&RECALL_VIEW_3);
+        assert_eq!(setup.document.editor().place(Panel::Arrangement), kept);
+        // A step back, as any jump is.
+        setup.run(&ZOOM_BACK);
+        assert_ne!(setup.document.editor().place(Panel::Arrangement), kept);
+        // An empty slot says so.
+        setup.run(&RECALL_VIEW_5);
+        assert_eq!(
+            setup.requests.last(),
+            Some(&Request::Notice(
+                "View 5 is empty. Save View 5 keeps the arrangement's view there.".into()
+            ))
+        );
+        // The slots go with the saved view, and come back with it.
+        let saved = setup.document.editor().saved_view(setup.document.project());
+        assert!(saved.slots[2].is_some() && saved.slots[0].is_none());
+        let mut project = setup.document.project().clone();
+        project.view = Some(saved.clone());
+        let opened = crate::Document::new(project);
+        assert_eq!(opened.project().view, None);
+        assert_eq!(opened.editor().saved_view(opened.project()), saved);
+        assert_eq!(setup.document.take_committed(), []);
+    }
+
+    #[test]
+    fn zoom_to_locators_shows_the_stretch_round_the_playhead() {
+        let mut project = Project::new();
+        for (name, at) in [("Verse", 16), ("Chorus", 48)] {
+            let locator = project.new_locator(name, Beats::new(at));
+            project.locators.push(locator);
+        }
+        let mut setup = Setup::new(project);
+        let shown = |setup: &Setup| setup.document.editor().viewport.visible();
+        for (playhead, start, end) in [(20, 16, 48), (4, 0, 16)] {
+            setup.transport.playhead = Beats::new(playhead);
+            setup.run(&ZOOM_TO_LOCATORS);
+            let visible = shown(&setup);
+            let (start, end) = (Beats::new(start), Beats::new(end));
+            assert!(
+                visible.start <= start && start - visible.start < Beats::new(4),
+                "{playhead}: {visible:?}"
+            );
+            assert!(
+                end <= visible.end && visible.end - end < Beats::new(4),
+                "{playhead}: {visible:?}"
+            );
+        }
+        // After the last locator, the song ends there too: nothing to show.
+        let before = setup.document.editor().viewport;
+        setup.transport.playhead = Beats::new(50);
+        setup.run(&ZOOM_TO_LOCATORS);
+        assert_eq!(setup.document.editor().viewport, before);
+    }
+
+    #[test]
+    fn each_panel_has_its_own_follow_and_they_share_the_mode() {
+        let (mut setup, clip) = with_notes();
+        let args = Args::new()
+            .with("notes", vec![musicable_model::clip::NoteId(1)])
+            .with("clip", clip);
+        setup.run_with(&crate::notes::SELECT, args).unwrap();
+        let focus = |panel: &str| Args::new().with("panel", panel);
+        setup.run_with(&SET_FOCUS, focus("piano_roll")).unwrap();
+        setup.run(&TOGGLE_FOLLOW);
+        let editor = setup.document.editor();
+        assert!(!editor.follows(Panel::PianoRoll));
+        assert!(editor.follows(Panel::Arrangement) && editor.follows(Panel::SampleEditor));
+        setup.run(&SWITCH_FOLLOW_MODE);
+        let behaviour = setup.document.editor().behaviour;
+        assert_eq!(behaviour.follow_mode, FollowMode::Continuous);
+        assert_eq!(setup.requests, [Request::SaveBehaviour]);
+        // Scroll to Playhead puts it at Continuous Follow's place, a third
+        // of the way in, and follows again.
+        setup.run_with(&SET_FOCUS, focus("arrangement")).unwrap();
+        setup.transport.playing = true;
+        setup.transport.playhead = Beats::new(100);
+        setup.document.editor_mut().navigation.arrangement.suspended = true;
+        setup.run(&SCROLL_TO_PLAYHEAD);
+        let editor = setup.document.editor();
+        let viewport = editor.viewport;
+        let x = viewport.x_of(Beats::new(100));
+        assert!((x - viewport.width / 3.0).abs() < 0.5, "{x}");
+        assert!(!editor.navigation.arrangement.suspended);
+        // A drag let go of in Continuous mode leaves Follow waiting.
+        let args = Args::new()
+            .with("start", viewport.start)
+            .with("zoom", viewport.zoom)
+            .with("top", 0.0)
+            .with("width", viewport.width)
+            .with("history", "suspend");
+        setup.run_with(&SET_VIEWPORT, args).unwrap();
+        let editor = setup.document.editor();
+        assert!(editor.navigation.arrangement.suspended);
+        assert_eq!(editor.navigation.arrangement.len(), 1);
     }
 }

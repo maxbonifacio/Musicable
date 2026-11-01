@@ -84,6 +84,11 @@ pub enum Target {
     /// The arrangement's tracks and ruler, and the piano roll's notes and
     /// ruler, for the wheel.
     Timeline,
+    /// The overview of the whole song, over the arrangement's ruler, away
+    /// from the edges of the box that shows what's in sight.
+    Overview,
+    /// Near the start or the end of the overview's box.
+    OverviewEdge,
     /// A note in the piano roll.
     Note,
     /// Near a note's start or end.
@@ -121,6 +126,11 @@ pub enum Gesture {
     DoubleClick,
     Drag,
     Wheel,
+    /// A drag with the middle button, the wheel pressed.
+    MiddleDrag,
+    /// A drag with the right button. A right click without a drag still
+    /// opens the context menu.
+    RightDrag,
 }
 
 /// What a gesture does.
@@ -268,12 +278,27 @@ pub enum MouseAction {
     /// Zooms to the selection, or with nothing selected to the whole song,
     /// as Live's double click on its ruler does.
     ZoomToFit,
+    /// Shows the part of the song clicked in the overview, in the middle
+    /// of the arrangement.
+    ShowHere,
+    /// Scrolls the arrangement along with the drag in the overview, and
+    /// zooms in or out as it goes down or up, as Live's overview does.
+    MoveView,
+    /// Moves the start or the end of what's in sight, zooming to fit.
+    ResizeView,
+    /// Zooms to the whole song.
+    FitSong,
+    /// Scrolls the view both ways with the pointer, as a hand would.
+    Pan,
+    /// Zooms to the stretch of time dragged out, and scrolls down to the
+    /// top of it.
+    ZoomToArea,
 }
 
 impl Target {
     /// Every place a gesture starts, in the order the Mouse page and mouse
     /// map files list them.
-    pub const ALL: [Target; 37] = [
+    pub const ALL: [Target; 39] = [
         Target::ClipTitle,
         Target::ClipBody,
         Target::ClipEdge,
@@ -287,6 +312,8 @@ impl Target {
         Target::LoopBrace,
         Target::LoopEdge,
         Target::Locator,
+        Target::Overview,
+        Target::OverviewEdge,
         Target::TakeLane,
         Target::TakeHeader,
         Target::AutomationLane,
@@ -341,6 +368,8 @@ impl Target {
             Target::BypassButton => "bypass_button",
             Target::DeviceTitle => "device_title",
             Target::Timeline => "timeline",
+            Target::Overview => "overview",
+            Target::OverviewEdge => "overview_edge",
             Target::Note => "note",
             Target::NoteEdge => "note_edge",
             Target::NoteGrid => "note_grid",
@@ -384,6 +413,8 @@ impl Target {
             Target::BypassButton => "A device's Bypass button",
             Target::DeviceTitle => "A device's title bar",
             Target::Timeline => "Over the tracks or the notes",
+            Target::Overview => "The overview",
+            Target::OverviewEdge => "The overview box's start or end",
             Target::Note => "A note",
             Target::NoteEdge => "A note's start or end",
             Target::NoteGrid => "The rows, where there's no note",
@@ -414,7 +445,7 @@ impl Target {
     /// A target they share, such as the ruler, has the actions all of them
     /// carry out.
     pub fn actions(self, gesture: Gesture) -> &'static [MouseAction] {
-        use Gesture::{Click, DoubleClick, Drag, Wheel};
+        use Gesture::{Click, DoubleClick, Drag, MiddleDrag, RightDrag, Wheel};
         use MouseAction as A;
         use Target as T;
         match (self, gesture) {
@@ -426,7 +457,32 @@ impl Target {
                 A::Rename,
                 A::Open,
             ],
-            (T::ClipTitle | T::ClipBody, Drag) => &[A::Move, A::Copy, A::MoveFree, A::SelectTime],
+            (T::ClipTitle | T::ClipBody, Drag) => &[
+                A::Move,
+                A::Copy,
+                A::MoveFree,
+                A::SelectTime,
+                A::Pan,
+                A::ZoomToArea,
+            ],
+            // Anywhere along the arrangement's lanes and ruler, the other
+            // buttons get around.
+            (
+                T::ClipTitle
+                | T::ClipBody
+                | T::ClipEdge
+                | T::FadeHandle
+                | T::Lane
+                | T::Empty
+                | T::TrackHeader
+                | T::Ruler
+                | T::Strip
+                | T::TakeLane
+                | T::AutomationLane
+                | T::AutomationLine
+                | T::AutomationPoint,
+                MiddleDrag | RightDrag,
+            ) => &[A::Pan, A::ZoomToArea],
             (T::ClipEdge, Drag) => &[
                 A::Trim,
                 A::TrimFree,
@@ -437,12 +493,12 @@ impl Target {
             ],
             (T::FadeHandle, Drag) => &[A::Fade, A::Move, A::Copy, A::MoveFree],
             (T::Lane | T::Empty, Click | DoubleClick) => &[A::PlaceMarker, A::Locate],
-            (T::Lane | T::Empty, Drag) => &[A::SelectTime],
+            (T::Lane | T::Empty, Drag) => &[A::SelectTime, A::Pan, A::ZoomToArea],
             (T::TrackHeader, Click | DoubleClick) => &[A::Select, A::ToggleSelect, A::Rename],
             (T::TrackEdge, Drag) => &[A::ResizeTrack, A::ResizeAllTracks],
             (T::TrackEdge, Click | DoubleClick) => &[A::ResetHeight],
             (T::Ruler, Click | DoubleClick) => &[A::Locate, A::ZoomToFit],
-            (T::Ruler, Drag) => &[A::ScrubZoom],
+            (T::Ruler, Drag) => &[A::ScrubZoom, A::Pan, A::ZoomToArea],
             (T::Strip, Click | DoubleClick) => &[A::Locate, A::ToggleLoop],
             (T::Strip, Drag) => &[A::DrawLoop, A::ScrubZoom],
             (T::LoopBrace | T::LoopEdge, Click | DoubleClick) => &[A::ToggleLoop, A::Locate],
@@ -454,7 +510,7 @@ impl Target {
             (T::TakeLane, Drag) => &[A::Comp, A::CompFree],
             (T::TakeHeader, Click | DoubleClick) => &[A::Rename],
             (T::AutomationLane, Click | DoubleClick) => &[A::PlaceMarker, A::AddPoint, A::Locate],
-            (T::AutomationLane, Drag) => &[A::Draw, A::DrawFree, A::SelectTime],
+            (T::AutomationLane, Drag) => &[A::Draw, A::DrawFree, A::SelectTime, A::Pan],
             (T::AutomationLine, Click | DoubleClick) => &[A::AddPoint, A::PlaceMarker],
             (T::AutomationLine, Drag) => &[A::MoveSegment, A::Draw, A::DrawFree],
             (T::AutomationPoint, Click | DoubleClick) => &[A::DeletePoint, A::PlaceMarker],
@@ -501,6 +557,12 @@ impl Target {
             (T::DeviceTitle, Click) => &[A::Select, A::ToggleSelect],
             (T::DeviceTitle, Drag) => &[A::Move, A::Copy],
             (T::Timeline, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom, A::TrackHeight],
+            // The overview's.
+            (T::Overview | T::OverviewEdge, Click | DoubleClick) => {
+                &[A::ShowHere, A::FitSong, A::Locate]
+            }
+            (T::Overview, Drag) => &[A::MoveView],
+            (T::OverviewEdge, Drag) => &[A::ResizeView, A::MoveView],
             _ => &[],
         }
     }
@@ -516,11 +578,13 @@ impl Target {
 impl Gesture {
     /// Every gesture, in the order the Mouse page and mouse map files list
     /// them.
-    pub const ALL: [Gesture; 4] = [
+    pub const ALL: [Gesture; 6] = [
         Gesture::Click,
         Gesture::DoubleClick,
         Gesture::Drag,
         Gesture::Wheel,
+        Gesture::MiddleDrag,
+        Gesture::RightDrag,
     ];
 
     /// Its name in mouse map files and on the Mouse page.
@@ -530,6 +594,8 @@ impl Gesture {
             Gesture::DoubleClick => "Double-click",
             Gesture::Drag => "Drag",
             Gesture::Wheel => "Wheel",
+            Gesture::MiddleDrag => "Middle-drag",
+            Gesture::RightDrag => "Right-drag",
         }
     }
 
@@ -565,8 +631,8 @@ impl Gesture {
         let gesture = Self::from_name(name).ok_or_else(|| match name {
             "" => "there's no gesture after the modifiers".to_owned(),
             name => format!(
-                "there's no gesture called \"{name}\" (they are Click, Double-click, Drag and \
-                 Wheel)"
+                "there's no gesture called \"{name}\" (they are Click, Double-click, Drag, \
+                 Wheel, Middle-drag and Right-drag)"
             ),
         })?;
         Ok((gesture, mods))
@@ -575,7 +641,7 @@ impl Gesture {
 
 impl MouseAction {
     /// Every action, which mouse map files name.
-    pub const ALL: [MouseAction; 60] = [
+    pub const ALL: [MouseAction; 66] = [
         MouseAction::Select,
         MouseAction::ToggleSelect,
         MouseAction::SelectAndMark,
@@ -636,6 +702,12 @@ impl MouseAction {
         MouseAction::ResizeAllTracks,
         MouseAction::ResetHeight,
         MouseAction::ZoomToFit,
+        MouseAction::ShowHere,
+        MouseAction::MoveView,
+        MouseAction::ResizeView,
+        MouseAction::FitSong,
+        MouseAction::Pan,
+        MouseAction::ZoomToArea,
     ];
 
     /// Its name in mouse map files.
@@ -701,6 +773,12 @@ impl MouseAction {
             MouseAction::ResizeAllTracks => "resize_all_tracks",
             MouseAction::ResetHeight => "reset_height",
             MouseAction::ZoomToFit => "zoom_to_fit",
+            MouseAction::ShowHere => "show_here",
+            MouseAction::MoveView => "move_view",
+            MouseAction::ResizeView => "resize_view",
+            MouseAction::FitSong => "fit_song",
+            MouseAction::Pan => "pan",
+            MouseAction::ZoomToArea => "zoom_to_area",
         }
     }
 
@@ -767,6 +845,12 @@ impl MouseAction {
             MouseAction::ResizeAllTracks => "Make every track taller or shorter",
             MouseAction::ResetHeight => "Give the track its default height",
             MouseAction::ZoomToFit => "Zoom to the selection, or to the whole song",
+            MouseAction::ShowHere => "Show that part of the song",
+            MouseAction::MoveView => "Scroll along, and zoom going up and down",
+            MouseAction::ResizeView => "Move that edge of the view, zooming to fit",
+            MouseAction::FitSong => "Zoom to the whole song",
+            MouseAction::Pan => "Scroll both ways, as a hand would",
+            MouseAction::ZoomToArea => "Zoom to the time dragged across",
         }
     }
 
@@ -995,7 +1079,7 @@ impl MouseMap {
 
     /// Ableton Live's mouse.
     pub fn live() -> Self {
-        use Gesture::{Click, DoubleClick, Drag, Wheel};
+        use Gesture::{Click, DoubleClick, Drag, MiddleDrag, Wheel};
         use MouseAction as A;
         use Target as T;
         let none = Modifiers::NONE;
@@ -1026,10 +1110,34 @@ impl MouseMap {
         bind(T::FadeHandle, Drag, &[none], A::Fade);
         bind(T::Lane, Click, &[none], A::PlaceMarker);
         bind(T::Lane, Drag, &[none], A::SelectTime);
+        // Ctrl+Alt-dragging pans, as in Live, and so does dragging with
+        // the middle button, as in Bitwig, FL Studio and REAPER.
+        let ctrl_alt = [
+            Modifiers::CTRL | Modifiers::ALT,
+            Modifiers::CMD | Modifiers::ALT,
+        ];
+        for target in [
+            T::Lane,
+            T::Empty,
+            T::ClipTitle,
+            T::ClipBody,
+            T::AutomationLane,
+        ] {
+            bind(target, Drag, &ctrl_alt, A::Pan);
+        }
+        for target in PANNED {
+            bind(target, MiddleDrag, &[none], A::Pan);
+        }
         bind(T::Empty, Click, &[none], A::PlaceMarker);
         bind(T::Ruler, Click, &[none], A::Locate);
         bind(T::Ruler, DoubleClick, &[none], A::ZoomToFit);
         bind(T::Ruler, Drag, &[none], A::ScrubZoom);
+        bind(T::Overview, Click, &[none], A::ShowHere);
+        bind(T::Overview, DoubleClick, &[none], A::FitSong);
+        bind(T::Overview, Drag, &[none], A::MoveView);
+        bind(T::OverviewEdge, Click, &[none], A::ShowHere);
+        bind(T::OverviewEdge, DoubleClick, &[none], A::FitSong);
+        bind(T::OverviewEdge, Drag, &[none], A::ResizeView);
         bind(T::Strip, Click, &[none], A::Locate);
         bind(T::Strip, Drag, &[none], A::DrawLoop);
         bind(T::LoopBrace, Click, &[none], A::ToggleLoop);
@@ -1130,7 +1238,45 @@ impl MouseMap {
         bind(T::WaveformTop, DoubleClick, &[none], A::AddMarker);
         map
     }
+
+    /// Live's mouse with REAPER's way of getting around the arrangement: the
+    /// wheel zooms, Ctrl and the wheel scroll up and down, Shift and the
+    /// wheel scroll along, and a drag with the middle button pans.
+    pub fn reaper_navigation() -> Self {
+        use MouseAction as A;
+        let mut map = Self::live();
+        let ctrl = [Modifiers::CTRL, Modifiers::CMD];
+        map.bind(Target::Timeline, Gesture::Wheel, Modifiers::NONE, A::Zoom);
+        for mods in ctrl {
+            map.bind(Target::Timeline, Gesture::Wheel, mods, A::Scroll);
+        }
+        map.bind(
+            Target::Timeline,
+            Gesture::Wheel,
+            Modifiers::SHIFT,
+            A::ScrollSideways,
+        );
+        map
+    }
 }
+
+/// Where a drag with the middle button pans the arrangement in Live's
+/// mouse: along its lanes, its headers and its ruler.
+const PANNED: [Target; 13] = [
+    Target::ClipTitle,
+    Target::ClipBody,
+    Target::ClipEdge,
+    Target::FadeHandle,
+    Target::Lane,
+    Target::Empty,
+    Target::TrackHeader,
+    Target::Ruler,
+    Target::Strip,
+    Target::TakeLane,
+    Target::AutomationLane,
+    Target::AutomationLine,
+    Target::AutomationPoint,
+];
 
 /// The modifiers egui reports, as keymaps and mouse maps name them. egui's
 /// "command" without Cmd is Ctrl, as it is off a Mac.
@@ -1150,6 +1296,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reaper_navigation_zooms_with_the_wheel_and_pans_with_the_middle_button() {
+        let live = MouseMap::live();
+        let reaper = MouseMap::reaper_navigation();
+        let wheel = |map: &MouseMap, mods| map.action(Target::Timeline, Gesture::Wheel, mods);
+        assert_eq!(wheel(&live, Modifiers::NONE), Some(MouseAction::Scroll));
+        assert_eq!(wheel(&reaper, Modifiers::NONE), Some(MouseAction::Zoom));
+        assert_eq!(wheel(&reaper, Modifiers::CTRL), Some(MouseAction::Scroll));
+        for map in [&live, &reaper] {
+            let middle = map.action(Target::Lane, Gesture::MiddleDrag, Modifiers::NONE);
+            assert_eq!(middle, Some(MouseAction::Pan));
+            let right = map.action(Target::Lane, Gesture::RightDrag, Modifiers::NONE);
+            assert_eq!(right, None);
+        }
+        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+        let pan = live.action(Target::ClipBody, Gesture::Drag, ctrl_alt);
+        assert_eq!(pan, Some(MouseAction::Pan));
+        assert_eq!(Gesture::from_name("middle drag"), Some(Gesture::MiddleDrag));
+    }
+
+    #[test]
     fn modifiers_that_mean_nothing_there_are_ignored() {
         let map = MouseMap::live();
         let drag = |mods| map.action(Target::ClipTitle, Gesture::Drag, mods);
@@ -1157,10 +1323,15 @@ mod tests {
         assert_eq!(drag(Modifiers::CTRL), Some(MouseAction::Copy));
         assert_eq!(drag(Modifiers::CMD), Some(MouseAction::Copy));
         assert_eq!(drag(Modifiers::ALT), Some(MouseAction::MoveFree));
-        // Nothing's bound to Ctrl+Alt, so it drags as nothing held does.
+        // Nothing's bound to Ctrl+Shift, so it drags as nothing held does.
+        // Ctrl+Alt pans, as in Live.
+        assert_eq!(
+            drag(Modifiers::CTRL | Modifiers::SHIFT),
+            Some(MouseAction::Move)
+        );
         assert_eq!(
             drag(Modifiers::CTRL | Modifiers::ALT),
-            Some(MouseAction::Move)
+            Some(MouseAction::Pan)
         );
         assert_eq!(
             map.action(Target::Lane, Gesture::Wheel, Modifiers::NONE),
@@ -1239,7 +1410,10 @@ mod tests {
                 "Ctrl+Drag",
                 "Alt+Drag",
                 "Shift+Drag",
-                "Cmd+Drag"
+                "Cmd+Drag",
+                "Ctrl+Alt+Drag",
+                "Alt+Cmd+Drag",
+                "Middle-drag"
             ]
         );
         let sets: Vec<String> = (modifier_sets().into_iter().take(6))

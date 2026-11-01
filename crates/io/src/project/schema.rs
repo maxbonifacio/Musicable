@@ -58,6 +58,165 @@ pub(super) struct File {
     /// The workspace the project was saved with.
     #[serde(deserialize_with = "Option::deserialize")]
     workspace: Option<String>,
+    /// Where the arrangement was when the project was saved.
+    #[serde(deserialize_with = "Option::deserialize")]
+    view: Option<View>,
+}
+
+/// The arrangement's view as the project was saved with it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct View {
+    place: ViewPlace,
+    follow: ViewFollow,
+    /// Five, each a place or null.
+    slots: Vec<Option<ViewPlace>>,
+}
+
+/// Whether Follow was on in each panel.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewFollow {
+    arrangement: bool,
+    piano_roll: bool,
+    sample_editor: bool,
+}
+
+/// A place in the arrangement.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ViewPlace {
+    /// In ticks.
+    start: i64,
+    zoom: f64,
+    top: f32,
+    /// Track ids and heights, in the order of the ids.
+    track_heights: Vec<(u32, f32)>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    master_height: Option<f32>,
+}
+
+/// The lowest and highest a row's height can be in a file, in points.
+const ROW_HEIGHTS: std::ops::RangeInclusive<f32> = 24.0..=800.0;
+
+impl From<&model::ViewPlace> for ViewPlace {
+    fn from(place: &model::ViewPlace) -> Self {
+        let model::ViewPlace {
+            start,
+            zoom,
+            top,
+            heights,
+        } = place;
+        Self {
+            start: start.ticks(),
+            zoom: *zoom,
+            top: *top,
+            track_heights: (heights.iter())
+                .filter_map(|(chain, &height)| Some((chain.track()?.0, height)))
+                .collect(),
+            master_height: heights.get(&Chain::Master).copied(),
+        }
+    }
+}
+
+impl ViewPlace {
+    fn to_model(
+        &self,
+        path: &str,
+        tracks: &HashMap<u32, TrackKind>,
+    ) -> Result<model::ViewPlace, Invalid> {
+        let Self {
+            start,
+            zoom,
+            top,
+            track_heights,
+            master_height,
+        } = self;
+        let start = position(*start, || format!("{path}.start"))?;
+        if !(zoom.is_finite() && *zoom > 0.0) {
+            return Err(Invalid::new(format!("{path}.zoom"), "must be above 0"));
+        }
+        if !(top.is_finite() && *top >= 0.0) {
+            return Err(Invalid::new(format!("{path}.top"), "can't be below 0"));
+        }
+        let height = |height: f32, path: String| match ROW_HEIGHTS.contains(&height) {
+            true => Ok(height),
+            false => Err(Invalid::new(path, "must be from 24 to 800")),
+        };
+        let mut heights = BTreeMap::new();
+        for (i, &(id, row)) in track_heights.iter().enumerate() {
+            let at = format!("{path}.track_heights[{i}]");
+            if !tracks.contains_key(&id) {
+                return Err(Invalid::new(at, format!("there's no track {id}")));
+            }
+            let row = height(row, at.clone())?;
+            if heights.insert(Chain::Track(TrackId(id)), row).is_some() {
+                return Err(Invalid::new(at, format!("track {id} is given twice")));
+            }
+        }
+        if let Some(row) = master_height {
+            let row = height(*row, format!("{path}.master_height"))?;
+            heights.insert(Chain::Master, row);
+        }
+        Ok(model::ViewPlace {
+            start,
+            zoom: *zoom,
+            top: *top,
+            heights,
+        })
+    }
+}
+
+impl From<&model::SavedView> for View {
+    fn from(view: &model::SavedView) -> Self {
+        let model::SavedView {
+            place,
+            follow,
+            slots,
+        } = view;
+        let [arrangement, piano_roll, sample_editor] = *follow;
+        Self {
+            place: ViewPlace::from(place),
+            follow: ViewFollow {
+                arrangement,
+                piano_roll,
+                sample_editor,
+            },
+            slots: (slots.iter())
+                .map(|slot| slot.as_ref().map(ViewPlace::from))
+                .collect(),
+        }
+    }
+}
+
+impl View {
+    fn to_model(&self, tracks: &HashMap<u32, TrackKind>) -> Result<model::SavedView, Invalid> {
+        let Self {
+            place,
+            follow,
+            slots,
+        } = self;
+        if slots.len() != model::VIEW_SLOTS {
+            let message = format!("must have {} slots", model::VIEW_SLOTS);
+            return Err(Invalid::new("view.slots", message));
+        }
+        let mut model_slots: [Option<model::ViewPlace>; model::VIEW_SLOTS] = Default::default();
+        for (i, slot) in slots.iter().enumerate() {
+            if let Some(slot) = slot {
+                model_slots[i] = Some(slot.to_model(&format!("view.slots[{i}]"), tracks)?);
+            }
+        }
+        let ViewFollow {
+            arrangement,
+            piano_roll,
+            sample_editor,
+        } = follow;
+        Ok(model::SavedView {
+            place: place.to_model("view.place", tracks)?,
+            follow: [*arrangement, *piano_roll, *sample_editor],
+            slots: model_slots,
+        })
+    }
 }
 
 /// A named place in the song.
@@ -806,6 +965,7 @@ impl From<&model::Project> for File {
             next_routing_id,
             next_wire_id,
             workspace,
+            view,
         } = project;
         Self {
             format: FORMAT.to_owned(),
@@ -836,6 +996,7 @@ impl From<&model::Project> for File {
                 .collect(),
             wires: wires.iter().map(Wire::from).collect(),
             workspace: workspace.clone(),
+            view: view.as_ref().map(View::from),
         }
     }
 }
@@ -869,6 +1030,7 @@ impl File {
             automation,
             wires,
             workspace,
+            view,
         } = self;
         if *ticks_per_beat != Beats::TICKS_PER_BEAT {
             let message = format!("must be {}", Beats::TICKS_PER_BEAT);
@@ -989,6 +1151,10 @@ impl File {
             next_routing_id: *next_routing_id,
             next_wire_id: *next_wire_id,
             workspace: workspace.clone(),
+            view: view
+                .as_ref()
+                .map(|view| view.to_model(&kinds))
+                .transpose()?,
         };
         check_loops(&project)?;
         check_routings(&project)?;

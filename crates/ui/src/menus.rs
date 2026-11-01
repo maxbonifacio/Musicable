@@ -72,9 +72,16 @@ const MENUS: [MenuSpec; 8] = [
             Some(track::TOGGLE_ALWAYS_LIVE),
             None,
             Some(view::FIT_TRACK_HEIGHTS),
+            Some(view::FIT_SELECTED_TRACKS),
             Some(view::TRACKS_TALLER),
             Some(view::TRACKS_SHORTER),
             Some(view::RESET_TRACK_HEIGHT),
+            None,
+            Some(view::SMALL_TRACKS),
+            Some(view::MEDIUM_TRACKS),
+            Some(view::LARGE_TRACKS),
+            Some(view::HUGE_TRACKS),
+            Some(view::TOGGLE_AUTO_ZOOM),
         ],
     ),
     (
@@ -163,7 +170,7 @@ const MENUS: [MenuSpec; 8] = [
 ];
 
 /// The menus that come last, after those for other areas.
-const LAST_MENUS: [MenuSpec; 5] = [
+const LAST_MENUS: [MenuSpec; 6] = [
     (
         "Browser",
         "browser",
@@ -190,6 +197,7 @@ const LAST_MENUS: [MenuSpec; 5] = [
             Some(view::SWITCH_DEVICES_PIANO_ROLL),
             Some(view::TOGGLE_BROWSER),
             Some(view::TOGGLE_HISTORY),
+            Some(view::TOGGLE_OVERVIEW),
             None,
             Some(view::MOVE_TO_NEW_WINDOW),
             Some(view::MOVE_TO_MAIN_WINDOW),
@@ -197,10 +205,12 @@ const LAST_MENUS: [MenuSpec; 5] = [
             Some(view::ZOOM_IN),
             Some(view::ZOOM_OUT),
             Some(view::ZOOM_TO_SELECTION),
+            Some(view::ZOOM_TO_LOCATORS),
             Some(view::FIT_SONG_WIDTH),
             Some(view::ZOOM_BACK),
             Some(view::ZOOM_FORWARD),
             Some(view::TOGGLE_FOLLOW),
+            Some(view::SWITCH_FOLLOW_MODE),
             Some(view::SCROLL_TO_PLAYHEAD),
             Some(view::TOGGLE_TAKE_LANES),
             None,
@@ -211,6 +221,25 @@ const LAST_MENUS: [MenuSpec; 5] = [
             Some(view::TOGGLE_SNAP),
             None,
             Some(view::COMMAND_PALETTE),
+        ],
+    ),
+    // The view slots, which are view commands, in a menu of their own so
+    // the View menu stays short enough for a small screen.
+    (
+        "Views",
+        "views",
+        &[
+            Some(view::RECALL_VIEW_1),
+            Some(view::RECALL_VIEW_2),
+            Some(view::RECALL_VIEW_3),
+            Some(view::RECALL_VIEW_4),
+            Some(view::RECALL_VIEW_5),
+            None,
+            Some(view::SAVE_VIEW_1),
+            Some(view::SAVE_VIEW_2),
+            Some(view::SAVE_VIEW_3),
+            Some(view::SAVE_VIEW_4),
+            Some(view::SAVE_VIEW_5),
         ],
     ),
     (
@@ -429,6 +458,7 @@ mod tests {
                 "Macro",
                 "Browser",
                 "View",
+                "Views",
                 "Workspaces",
                 "Options",
                 "Debug"
@@ -445,6 +475,10 @@ mod tests {
             assert!(listed.contains(&command.id), "{}", command.id);
         }
         assert!(!listed.contains(&arrange::MOVE));
+        // The View menu ends with the command palette: every view command
+        // has its place.
+        let view = &menus.iter().find(|m| m.title == "View").unwrap().items;
+        assert_eq!(view.last().unwrap().unwrap().id, view::COMMAND_PALETTE);
         // A command missing from its menu goes at its end.
         let transport = &menus.iter().find(|m| m.title == "Transport").unwrap().items;
         assert_eq!(transport[transport.len() - 2], None);

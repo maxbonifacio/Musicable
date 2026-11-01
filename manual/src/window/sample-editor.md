@@ -107,8 +107,8 @@ the grid off it while it's held, from whenever it's pressed: moving
 markers, selecting time, and the lane's points and drawing. Escape cancels
 a drag. A drag along the waveform held at its left or right edge scrolls
 it. W, X and Shift+X fit the clip and step back and forward through the
-Sample Editor's own history of views ([Getting
-around](arrangement.md#getting-around)).
+Sample Editor's own history of views, and Ctrl+Shift+F turns its own
+Follow on or off ([Getting around](arrangement.md#getting-around)).
 
 ## The keys
 

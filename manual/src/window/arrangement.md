@@ -86,6 +86,9 @@ changes it ([The mouse](../customising/mouse.md)):
 | | Double-click | Zooms to the selection, or with nothing selected, to the whole song |
 | | Drag | Zooms up and down, and scrolls sideways |
 | The ruler's strip | Drag | Draws a new loop region, and turns looping on |
+| The overview | Click; double-click | Shows that part of the song; shows the whole song |
+| | Drag | Scrolls along, and zooms in going down and out going up |
+| The overview box's start or end | Drag | Moves that edge of the view, zooming to fit |
 | The loop brace | Click; drag; drag an end | Turns looping on or off; moves the loop; moves its start or end |
 | A locator | Click; drag; double-click | Jumps there; moves it; renames it |
 | A track's header or strip, where the mixer strip has no control | Click; Ctrl- or Shift-click; double-click | Selects the track; adds it or takes it out; renames it. The master's header and strip select the master |
@@ -101,6 +104,8 @@ changes it ([The mouse](../customising/mouse.md)):
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 | | Alt-wheel | Makes the track under the pointer taller or shorter, or the selected tracks, if it's one of them |
+| The lanes, the headers or the ruler | Middle-drag | Pans: scrolls along and up and down with the pointer, as in Bitwig, FL Studio and REAPER |
+| A lane, a clip or an automation lane | Ctrl+Alt-drag | Pans, as in Live |
 
 Modifiers count while a drag goes, not only as it starts. **Alt** keeps
 any drag that snaps to the grid off it while it's held, from whenever it's
@@ -151,22 +156,84 @@ four on the piano roll and the Sample Editor while they have it:
 |---|---|
 | W | Fit Song Width: shows the whole song across, from its start to the end of its last clip, locator, automation point or loop, or 16 bars of an empty song. In the piano roll and the Sample Editor, the whole clip |
 | X, Shift+X | Zoom Back and Zoom Forward: back to the view before the last change of zoom or scrolling, and forward again |
-| Ctrl+Shift+F | Follow, on or off |
+| Ctrl+Shift+F | Follow, on or off, in the panel with the focus |
 | Home, End | Go to Start and Go to End of the song, scrolling there if it's out of sight |
 | H | Fit Track Heights: makes the tracks share the arrangement's height, as far as they can. If they can't all fit at the smallest size, it says how many are in sight |
-| Alt+Equals, Alt+Minus | Make Tracks Taller and Shorter: the selected tracks, or the selected track, a size at a time, through 24, 60, 120 and 200 points |
+| Alt+Equals, Alt+Minus | Make Tracks Taller and Shorter: the selected tracks, or the selected track, a size at a time, through the Small, Medium, Large and Huge sizes |
+| Ctrl+Alt+O | Shows or hides the overview |
+
+The **overview**, a strip over the ruler, shows the whole song: where the
+tracks have clips, each track in a row of its own while there's room,
+the loop, the locators, the playhead, and a box round what's in sight.
+Clicking it shows that part of the song, and dragging scrolls along and
+zooms; it reaches past the song's end while the view or a recording does.
+Ctrl+Alt+O, or Overview in the View menu, shows and hides it, and
+workspaces keep which. It stays out of the way while the arrangement is
+shorter than 300 points, so the tracks keep their room.
+
+The **track heights** menu, the button at the left of the corner over the
+track headers, and **Track Height** in a track header's menu give tracks
+one of four sizes: Small, Medium, Large and Huge, 24, 60, 120 and 200
+points until you change them on the Behaviour page
+([Settings](../customising/settings.md#behaviour)). From the corner they
+size the selected tracks, or every track if none is selected; from a
+header, the track it was opened on, or the selected tracks if it's one of
+them; and with Alt held, every track. **Fit Selected Tracks** makes the
+selected tracks fill the arrangement's height together and every other
+track as short as tracks go; if even that leaves too little room, the
+selected tracks are the smallest too and the first of them scrolls to the
+top. **Auto Zoom Tracks**, in the same menus, makes the selected track
+Large while it's selected and gives it its own height back when another
+is. The heights it gives are never saved, so turning it off leaves the
+heights you set, and sizing the zoomed track yourself keeps the size you
+give it. Each size and fit is a step that X goes back over. The sizes,
+Fit Selected Tracks and Auto Zoom Tracks are commands, so they can be
+given keys.
+
+Saving the project keeps where the arrangement is with it: the part of
+the song in sight, the zoom, how far down it's scrolled, the heights you
+gave tracks, and each panel's Follow switch. The project opens there
+again. Moving around never makes the project need saving, so a view you
+reach after the last save is gone if you close without saving.
+**Views > Save View 1** to **5** keep the arrangement's view in five
+slots, saved with the project, and **Recall View 1** to **5** go back to
+one, as Pro Tools' zoom presets and Logic's Zoom 1 to 3 do. They have no
+keys at first, since Alt and the numbers switch workspaces, but you can
+give them some. **View > Zoom to Locators** shows the stretch between the
+locator at or before the playhead and the next one, from the song's start
+before the first locator, or to its end after the last.
+
+**Zoom to Area**, which nothing does at first, zooms to the time a box
+dragged out spans and scrolls down to its top; give it a gesture on the
+Mouse page ([The mouse](../customising/mouse.md)), such as a right-drag,
+Ctrl and a right-drag as in FL Studio, or Alt+Shift and a drag as in
+Studio Pro. Panning and zooming to a box are each a step that X goes
+back over.
 
 Each view keeps its own history of where it's been, up to 32 steps back. A
-gesture is one step: a burst of the wheel, a drag of the ruler, or a
-command such as W or Zoom to Selection. Pressing W twice, or H twice,
+gesture is one step: a burst of the wheel, a drag of the ruler or the
+overview, a click on the overview, or a command such as W, Zoom to
+Selection or Recall View. Pressing W twice, or H twice,
 does nothing the second time, and X after W goes back to where you were.
 Scroll to Playhead and Reset Track Height are in the View and Track menus,
 and in the command palette.
 
-While the transport plays, **Follow** turns the page when the playhead
-leaves the view. Scrolling, zooming or jumping away while it plays pauses
-it in that view until the playhead plays into sight again, or Play starts
-again; a drag or the wheel holds it while they go on.
+While the transport plays, **Follow** keeps the playhead in sight. It
+turns a page when the playhead leaves the view, or, with Continuous Follow
+on the Behaviour page ([Settings](../customising/settings.md#behaviour)),
+keeps the playhead still a third of the way in, or in the middle, and
+moves the song under it. **Switch Follow Mode**, in the View menu, switches
+between the two. The arrangement, the piano roll and the Sample Editor
+each have their own Follow switch, Ctrl+Shift+F in the one with the
+focus, and share the mode.
+
+Scrolling, zooming or jumping away while the song plays pauses Follow in
+that view: a page at a time, until the playhead plays into sight again;
+continuously, until it plays up to its place from the left of it, so the
+view never jumps. Play from stopped, Scroll to Playhead and turning Follow
+on follow again at once. A drag or the wheel holds the view while they go
+on, and in Continuous mode a drag let go of leaves Follow paused, since
+the playhead moved on meanwhile. Stop never moves the view.
 
 ## Audio files
 

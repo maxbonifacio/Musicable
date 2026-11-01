@@ -3055,3 +3055,59 @@ fn errors_read_well() {
         "{syntax}"
     );
 }
+
+/// Two tracks, with a view that gives the second a height and keeps a slot.
+fn viewed() -> Project {
+    let mut project = sample();
+    let b = project.tracks[1].id;
+    let place = musicable_model::ViewPlace {
+        start: Beats::new(8),
+        zoom: 12.0,
+        top: 30.0,
+        heights: [(Chain::Track(b), 120.0)].into_iter().collect(),
+    };
+    project.view = Some(musicable_model::SavedView {
+        place: place.clone(),
+        follow: [true, true, false],
+        slots: [None, Some(place), None, None, None],
+    });
+    project
+}
+
+#[test]
+fn views_name_the_project_s_tracks_at_heights_rows_can_have() {
+    assert_eq!(load(&edited_from(&viewed(), |_| ())).unwrap(), viewed());
+    let edited = |edit: fn(&mut Value)| edited_from(&viewed(), |f| edit(&mut f["view"]));
+    refused(
+        &edited(|view| view["place"]["track_heights"][0][0] = json!(9)),
+        "view.place.track_heights[0]",
+        "there's no track 9",
+    );
+    refused(
+        &edited(|view| view["slots"][1]["track_heights"][0][1] = json!(1000.0)),
+        "view.slots[1].track_heights[0]",
+        "must be from 24 to 800",
+    );
+    refused(
+        &edited(|view| view["place"]["master_height"] = json!(10.0)),
+        "view.place.master_height",
+        "must be from 24 to 800",
+    );
+    refused(
+        &edited(|view| view["place"]["zoom"] = json!(0.0)),
+        "view.place.zoom",
+        "must be above 0",
+    );
+    refused(
+        &edited(|view| view["place"]["top"] = json!(-1.0)),
+        "view.place.top",
+        "can't be below 0",
+    );
+    refused(
+        &edited(|view| {
+            view["slots"].as_array_mut().unwrap().pop();
+        }),
+        "view.slots",
+        "must have 5 slots",
+    );
+}

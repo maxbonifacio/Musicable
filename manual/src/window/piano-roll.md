@@ -66,8 +66,8 @@ controller fills steps of three points. Escape cancels a drag. A drag held
 at the rows' edge scrolls them, sideways, and up and down for moving,
 selecting and drawing notes, and the notes keep their place under it.
 W, X and Shift+X fit the clip and step back and forward through the
-piano roll's own history of views ([Getting
-around](arrangement.md#getting-around)). The Settings window's Mouse page
+piano roll's own history of views, and Ctrl+Shift+F turns its own Follow
+on or off ([Getting around](arrangement.md#getting-around)). The Settings window's Mouse page
 changes what the gestures do ([The mouse](../customising/mouse.md)).
 
 ## Right-click menus

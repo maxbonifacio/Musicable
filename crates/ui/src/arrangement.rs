@@ -23,6 +23,7 @@
 
 mod header;
 mod menu;
+mod overview;
 mod paint;
 #[cfg(test)]
 mod tests;
@@ -31,11 +32,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use egui::{
-    Color32, CursorIcon, Event, Id, Key, MouseWheelUnit, Popup, Pos2, Rangef, Rect, Response,
-    RichText, Role, ScrollArea, Sense, SetOpenCommand, Ui, WidgetInfo, pos2, vec2,
+    Color32, CursorIcon, Event, Id, Key, MouseWheelUnit, PointerButton, Popup, Pos2, Rangef, Rect,
+    Response, RichText, Role, ScrollArea, Sense, SetOpenCommand, Ui, WidgetInfo, pos2, vec2,
 };
 use musicable_commands::editor::{Grid, Viewport};
-use musicable_commands::navigation::{Lanes, Record};
+use musicable_commands::navigation::{Lanes, Panel, Record};
 use musicable_commands::{
     Args, CommandId, Editor, Modifiers, arrange, automation, edit, locator, notes, param_text,
     take as takes, transport, view as views, warp,
@@ -51,7 +52,7 @@ use crate::browser::{Destination, Dragged};
 use crate::devices::describe;
 use crate::mixer::{decibels, pan_text};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
-use crate::navigate::{self, Wheeling};
+use crate::navigate::{self, Navigating};
 use crate::parts::{Parts, TRACK_HEADER};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
@@ -67,6 +68,9 @@ const ZOOM_SPEED: f32 = 0.005;
 /// more, they scroll on their own.
 const MASTER_SHARE: f32 = 0.5;
 const SCRUB_ZOOM_SPEED: f32 = 0.01;
+/// How wide a box dragged out to zoom to has to be, in points, so a slip
+/// of the mouse doesn't zoom all the way in.
+const ZOOM_AREA_MIN: f32 = 6.0;
 /// How much a point of the wheel makes tracks taller or shorter: their
 /// height changes by `e` to the power of this many points. Finer than the
 /// zoom, as Live's Alt and the wheel is too coarse for some.
@@ -89,8 +93,9 @@ pub(crate) struct Arrangement {
     landed: Option<Plan>,
     /// What the open context menu was opened on.
     menu: Option<Spot>,
-    /// The wheel's gesture, while it lasts.
-    wheeling: Wheeling,
+    /// The wheel's gesture, the last drag and the playhead, for Follow
+    /// and the view's history.
+    navigating: Navigating,
     /// Where what's dragged from the browser or the devices panel came
     /// into the lanes, which it scrolls at the edges it goes towards from
     /// there.
@@ -98,6 +103,10 @@ pub(crate) struct Arrangement {
     /// How far the master's row and lanes are scrolled up, when they don't
     /// all fit.
     master_scroll: f32,
+    /// Whether the overview over the ruler is hidden, as workspaces keep.
+    pub(crate) hide_overview: bool,
+    /// The overview's gesture in progress.
+    overview: overview::Overview,
 }
 
 /// The parts of the arrangement that take the mouse.
@@ -557,7 +566,7 @@ impl Layout {
             };
         let height_of = |chain: Chain| {
             let height = editor.track_heights.get(&chain).copied();
-            height.unwrap_or(theme.track_height)
+            editor.auto_height(chain, height.unwrap_or(theme.track_height))
         };
         for (index, track) in project.tracks.iter().enumerate() {
             let height = height_of(Chain::Track(track.id));
@@ -1491,6 +1500,34 @@ impl Scene<'_> {
                 viewport.start = (anchor - room).max(Beats::ZERO);
                 Some(Plan::Viewport(viewport))
             }
+            (MouseAction::Pan, _) => {
+                let mut viewport = drag.viewport;
+                let moved = drag.to - drag.from;
+                viewport.start = (viewport.start - viewport.beats_in(moved.x)).max(Beats::ZERO);
+                let tracks = layout.tracks_part(layout.lanes.x_range());
+                let lowest = lowest_top(layout.content, self.theme, tracks);
+                viewport.top = (viewport.top - moved.y).clamp(0.0, lowest);
+                Some(Plan::Viewport(viewport))
+            }
+            (MouseAction::ZoomToArea, _) => {
+                let left = layout.lanes.left();
+                let (from, to) = (drag.from.x.min(drag.to.x), drag.from.x.max(drag.to.x));
+                if to - from < ZOOM_AREA_MIN {
+                    return None;
+                }
+                let mut viewport = drag.viewport;
+                let start = viewport.beats_at(from - left).max(Beats::ZERO);
+                let end = viewport.beats_at(to - left);
+                viewport.show(BeatRange::new(start, end));
+                // Down to the top of the box, if it started on the tracks.
+                let tracks = layout.tracks_part(layout.lanes.x_range());
+                let high = drag.from.y.min(drag.to.y);
+                if tracks.y_range().contains(high) {
+                    let lowest = lowest_top(layout.content, self.theme, tracks);
+                    viewport.top = (viewport.top + high - tracks.top()).clamp(0.0, lowest);
+                }
+                Some(Plan::Viewport(viewport))
+            }
             (MouseAction::DrawLoop, _) => {
                 let (start, end) = self.ends(drag);
                 (start != end).then_some(Plan::Loop {
@@ -1934,8 +1971,20 @@ impl Arrangement {
         parts: &Parts,
         actions: &mut Vec<Action>,
     ) {
-        let rect = ui.available_rect_before_wrap();
-        ui.allocate_rect(rect, Sense::hover());
+        let whole = ui.available_rect_before_wrap();
+        ui.allocate_rect(whole, Sense::hover());
+        // The overview along the top, over the lanes, when it's shown and
+        // the arrangement has room for it.
+        let room = whole.height() >= overview::MIN_ARRANGEMENT;
+        let (strip, rect) = match self.hide_overview || !room {
+            true => (None, whole),
+            false => {
+                let bottom = (whole.top() + overview::HEIGHT).min(whole.bottom());
+                let split = (whole.right() - theme.header_width).max(whole.left());
+                let strip = Rect::from_min_max(whole.left_top(), pos2(split, bottom));
+                (Some(strip), whole.with_min_y(bottom))
+            }
+        };
         let editor = view.editor;
         let master_scroll = self.master_scroll;
         let layout = Layout::new(
@@ -1993,14 +2042,22 @@ impl Arrangement {
         }
         let wheeled = self.wheel(ui, &scene, &mut viewport, actions);
         self.edge_scroll(ui, &scene, &mut viewport);
-        let followed = navigate::follow(
+        let overviewed = strip.and_then(|strip| {
+            (self.overview).interact(ui, strip, view, mouse, &mut viewport, actions)
+        });
+        let held = self.drag.is_some() || self.overview.dragging() || overviewed.is_some();
+        let (record, force) = self.navigating.frame(
+            ui,
             &view.playback,
-            editor.follow,
-            editor.navigation.arrangement.suspended,
-            self.drag.is_some() || wheeled,
+            editor,
+            Panel::Arrangement,
             &mut viewport,
+            (wheeled, held),
         );
-        let (record, force) = self.wheeling.record(ui, wheeled, followed);
+        let (record, force) = match overviewed {
+            Some(record) => (record, true),
+            None => (record, force),
+        };
         if viewport != editor.viewport || force {
             set_viewport(actions, &viewport, record);
         }
@@ -2023,6 +2080,13 @@ impl Arrangement {
         });
 
         let painter = ui.painter_at(rect);
+        if let Some(strip) = strip {
+            let viewport = &scene.layout.viewport;
+            let overview = ui.painter_at(strip);
+            (self.overview).paint(ui, &overview, strip, view, theme, viewport);
+            let corner = Rect::from_min_max(strip.right_top(), pos2(whole.right(), strip.bottom()));
+            ui.painter_at(corner).rect_filled(corner, 0.0, theme.ruler);
+        }
         paint::lanes(
             &painter.with_clip_rect(scene.layout.lanes),
             &scene,
@@ -2046,6 +2110,19 @@ impl Arrangement {
             paint_toggle(ui, button.rect, &button.response, face, on, colour, theme);
         }
         paint::corner(&painter.with_clip_rect(scene.layout.corner), &scene);
+        // The box a drag zooms to, as it's dragged out.
+        if let Some(drag) = self
+            .drag
+            .as_ref()
+            .filter(|d| d.action == MouseAction::ZoomToArea)
+        {
+            let area = Rect::from_two_pos(drag.from, drag.to);
+            let lanes = painter.with_clip_rect(scene.layout.lanes.union(scene.layout.ruler));
+            lanes.rect_filled(area, 0.0, theme.time_selection);
+            let stroke = egui::Stroke::new(1.0, theme.ruler_text);
+            lanes.rect_stroke(area, 0.0, stroke, egui::StrokeKind::Inside);
+        }
+        self.heights_button(ui, &scene, id, actions);
         if ui.input(|i| !i.raw.hovered_files.is_empty()) {
             paint::drop_hint(&painter, &scene);
         }
@@ -2123,7 +2200,14 @@ impl Arrangement {
         if response.drag_started()
             && let Some(from) = ui.input(|i| i.pointer.press_origin())
         {
-            self.drag_started(scene, area, from, mods, actions);
+            let gesture = if response.dragged_by(PointerButton::Middle) {
+                Gesture::MiddleDrag
+            } else if response.dragged_by(PointerButton::Secondary) {
+                Gesture::RightDrag
+            } else {
+                Gesture::Drag
+            };
+            self.drag_started(scene, area, from, gesture, mods, actions);
         }
         if let Some(drag) = self.drag.as_mut().filter(|drag| drag.area == area) {
             if let Some(pos) = response.interact_pointer_pos() {
@@ -2139,6 +2223,7 @@ impl Arrangement {
             if matches!(
                 drag.action,
                 MouseAction::SelectTime
+                    | MouseAction::Pan
                     | MouseAction::ScrubZoom
                     | MouseAction::ResizeTrack
                     | MouseAction::ResizeAllTracks
@@ -2390,11 +2475,12 @@ impl Arrangement {
         scene: &Scene<'_>,
         area: Area,
         from: Pos2,
+        gesture: Gesture,
         mods: Modifiers,
         actions: &mut Vec<Action>,
     ) {
         let hit = scene.hit(area, from);
-        let Some(action) = scene.mouse.action(hit.target(), Gesture::Drag, mods) else {
+        let Some(action) = scene.mouse.action(hit.target(), gesture, mods) else {
             self.drag = None;
             return;
         };
@@ -2471,6 +2557,31 @@ impl Arrangement {
             _ => send(actions, &plan),
         }
         Some(plan)
+    }
+
+    /// The button in the corner over the headers that opens the menu of
+    /// track heights.
+    fn heights_button(&self, ui: &mut Ui, scene: &Scene<'_>, id: Id, actions: &mut Vec<Action>) {
+        let theme = scene.theme;
+        let corner = scene.layout.corner;
+        let side = (corner.height() - 4.0).min(theme.ruler_height);
+        if side < 8.0 {
+            return;
+        }
+        let rect = Rect::from_min_size(corner.left_top() + vec2(3.0, 2.0), vec2(side, side));
+        let response = ui.interact(rect, id.with("heights"), Sense::click());
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Track heights"));
+        let response = response.on_hover_text("Track heights");
+        paint_toggle(
+            ui,
+            rect,
+            &response,
+            Face::Menu,
+            false,
+            theme.ruler_text,
+            theme,
+        );
+        Popup::menu(&response).show(|ui| menu::heights(ui, scene, None, actions));
     }
 
     /// The buttons in the header of each automation lane in sight. Returns
@@ -2750,6 +2861,7 @@ impl Arrangement {
             (_, Some(MouseAction::MovePointFree)) => Some(CursorIcon::Grab),
             (_, Some(MouseAction::MoveSegment)) => Some(CursorIcon::ResizeVertical),
             (_, Some(MouseAction::Draw | MouseAction::DrawFree)) => Some(CursorIcon::Crosshair),
+            (_, Some(MouseAction::ZoomToArea)) => Some(CursorIcon::ZoomIn),
             _ => None,
         };
         let shown = match &self.drag {
@@ -2758,7 +2870,8 @@ impl Arrangement {
                     MouseAction::Move
                     | MouseAction::MoveFree
                     | MouseAction::MovePoint
-                    | MouseAction::MovePointFree,
+                    | MouseAction::MovePointFree
+                    | MouseAction::Pan,
                     _,
                 ) => Some(CursorIcon::Grabbing),
                 (MouseAction::Copy, _) => Some(CursorIcon::Copy),

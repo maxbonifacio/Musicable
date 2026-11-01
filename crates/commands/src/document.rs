@@ -50,10 +50,16 @@ struct BatchStart {
 }
 
 impl Document {
-    pub fn new(project: Project) -> Self {
+    /// A document for `project`, showing the view it was saved with, if
+    /// any, which it then leaves out: the editor has it from then on.
+    pub fn new(mut project: Project) -> Self {
+        let mut editor = Editor::default();
+        if let Some(view) = project.view.take() {
+            editor.restore_view(&view);
+        }
         Self {
             project,
-            editor: Editor::default(),
+            editor,
             committed: Vec::new(),
             history: History::default(),
             batch: None,

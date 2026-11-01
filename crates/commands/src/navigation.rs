@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use musicable_model::time::{BeatRange, Beats};
-use musicable_model::{Chain, Project, TrackId};
+use musicable_model::{Chain, Project, SavedView, TrackId, ViewPlace};
 
 use crate::editor::{Editor, Focus, Viewport};
 
@@ -61,11 +61,15 @@ pub enum Record {
     /// reaches the edge, or the view keeping within the song: neither the
     /// history nor Follow takes it as navigating.
     None,
+    /// A drag ended while Continuous Follow held the view still: the
+    /// playhead has moved from its place, so Follow waits rather than jump
+    /// to it, and the history is left alone.
+    Suspend,
 }
 
 impl Record {
     /// Their names, as the view commands' `history` argument takes them.
-    pub const NAMES: &'static [&'static str] = &["step", "gesture", "follow", "none"];
+    pub const NAMES: &'static [&'static str] = &["step", "gesture", "follow", "none", "suspend"];
 
     /// The way of counting `name` names.
     pub fn from_name(name: &str) -> Option<Self> {
@@ -74,6 +78,7 @@ impl Record {
             "gesture" => Record::Gesture,
             "follow" => Record::Follow,
             "none" => Record::None,
+            "suspend" => Record::Suspend,
             _ => return None,
         })
     }
@@ -84,6 +89,7 @@ impl Record {
             Record::Gesture => "gesture",
             Record::Follow => "follow",
             Record::None => "none",
+            Record::Suspend => "suspend",
         }
     }
 }
@@ -105,7 +111,7 @@ pub struct Place {
 }
 
 /// A panel's history of views, and its Follow state.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct History {
     /// The views to go back to, the latest last.
     back: Vec<Place>,
@@ -113,9 +119,24 @@ pub struct History {
     forward: Vec<Place>,
     /// The view from before the gesture going on, if one is.
     pending: Option<Place>,
+    /// Whether Follow is on in the panel: each has its own switch, as in
+    /// Bitwig, and they share the mode.
+    pub follow: bool,
     /// Whether the user navigated away from the playhead while the song
     /// played, so Follow leaves the view alone.
     pub suspended: bool,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            back: Vec::new(),
+            forward: Vec::new(),
+            pending: None,
+            follow: true,
+            suspended: false,
+        }
+    }
 }
 
 impl History {
@@ -270,6 +291,11 @@ pub fn song_end(project: &Project) -> Beats {
 }
 
 impl Editor {
+    /// Whether Follow is on in `panel`.
+    pub fn follows(&self, panel: Panel) -> bool {
+        self.navigation.of(panel).follow
+    }
+
     /// The view of `panel` now.
     pub fn place(&self, panel: Panel) -> Place {
         let (viewport, heights, key_height) = match panel {
@@ -360,6 +386,7 @@ impl Editor {
             }
             Record::Follow => history.suspended = false,
             Record::None => {}
+            Record::Suspend => history.suspended |= playing,
         }
         changed
     }
@@ -391,9 +418,102 @@ impl Editor {
         true
     }
 
+    /// The arrangement's place now, as a project file or a view slot keeps
+    /// it: the heights the user gave rows of `project`, without Auto
+    /// Zoom's.
+    pub fn view_place(&self, project: &Project) -> ViewPlace {
+        let viewport = self.viewport;
+        ViewPlace {
+            start: viewport.start,
+            zoom: viewport.zoom,
+            top: viewport.top,
+            heights: kept_heights(project, &self.track_heights),
+        }
+    }
+
+    /// The view to save with `project`: the arrangement's place, each
+    /// panel's Follow switch, and the view slots, with the heights of only
+    /// the tracks it has.
+    pub fn saved_view(&self, project: &Project) -> SavedView {
+        let slots = self.view_slots.clone().map(|slot| {
+            slot.map(|mut place| {
+                place.heights = kept_heights(project, &place.heights);
+                place
+            })
+        });
+        SavedView {
+            place: self.view_place(project),
+            follow: [Panel::Arrangement, Panel::PianoRoll, Panel::SampleEditor]
+                .map(|panel| self.follows(panel)),
+            slots,
+        }
+    }
+
+    /// Shows `view`, saved with the project: its place in the arrangement,
+    /// its Follow switches and its slots.
+    pub fn restore_view(&mut self, view: &SavedView) {
+        self.show_view_place(&view.place);
+        let panels = [Panel::Arrangement, Panel::PianoRoll, Panel::SampleEditor];
+        for (panel, follow) in panels.into_iter().zip(view.follow) {
+            self.navigation.of_mut(panel).follow = follow;
+        }
+        self.view_slots = view.slots.clone();
+    }
+
+    /// Shows `place` in the arrangement, kept to the zooms and heights it
+    /// can have.
+    pub fn show_view_place(&mut self, place: &ViewPlace) {
+        let (min, max) = (crate::view::MIN_TRACK_HEIGHT, crate::view::MAX_TRACK_HEIGHT);
+        self.viewport.start = place.start;
+        self.viewport.zoom = place.zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM);
+        self.viewport.top = place.top.max(0.0);
+        self.track_heights = (place.heights.iter())
+            .map(|(&chain, &height)| (chain, height.clamp(min, max)))
+            .collect();
+    }
+
     /// The height of `chain`'s row in the arrangement.
     pub fn height_of(&self, chain: Chain) -> f32 {
-        (self.track_heights.get(&chain).copied()).unwrap_or(self.lanes.track)
+        let height = (self.track_heights.get(&chain).copied()).unwrap_or(self.lanes.track);
+        self.auto_height(chain, height)
+    }
+
+    /// The height `chain`'s row is shown at, when the user gave it
+    /// `height`: Large while Auto Zoom zooms it, if that's taller.
+    pub fn auto_height(&self, chain: Chain, height: f32) -> f32 {
+        match self.auto_zoomed() == Some(chain) {
+            true => height.max(self.behaviour.presets()[2]),
+            false => height,
+        }
+    }
+
+    /// The track Auto Zoom makes Large: the selected track, unless the
+    /// user has set its height since it was selected.
+    pub fn auto_zoomed(&self) -> Option<Chain> {
+        let chain = self
+            .selected_track
+            .filter(|chain| chain.track().is_some())?;
+        (self.behaviour.auto_zoom_tracks && self.sized_by_hand != Some(chain)).then_some(chain)
+    }
+
+    /// Sets the user's height of `chain`'s row, or gives it the default
+    /// with `None`. Auto Zoom then leaves the row as the user set it.
+    pub fn set_height(&mut self, chain: Chain, height: Option<f32>) {
+        match height {
+            Some(height) => self.track_heights.insert(chain, height),
+            None => self.track_heights.remove(&chain),
+        };
+        if self.auto_zoomed() == Some(chain) {
+            self.sized_by_hand = Some(chain);
+        }
+    }
+
+    /// Lets Auto Zoom zoom the selected track again once another track is
+    /// selected than the one the user sized.
+    pub fn settle_auto_zoom(&mut self) {
+        if self.sized_by_hand.is_some() && self.sized_by_hand != self.selected_track {
+            self.sized_by_hand = None;
+        }
     }
 
     /// Each track's rows, top to bottom, as the arrangement lays them out
@@ -457,7 +577,7 @@ impl Editor {
         let each = budget / count as f32;
         let height = each.clamp(crate::view::MIN_TRACK_HEIGHT, crate::view::MAX_TRACK_HEIGHT);
         for track in &project.tracks {
-            self.track_heights.insert(Chain::Track(track.id), height);
+            self.set_height(Chain::Track(track.id), Some(height));
         }
         self.viewport.top = 0.0;
         let shown = (self.track_rows(project).iter())
@@ -465,6 +585,50 @@ impl Editor {
             .count();
         (shown, count)
     }
+
+    /// Makes the tracks `selected` fill the tracks' part of the arrangement
+    /// together, and every other track as short as tracks go, with their
+    /// take and automation lanes as tall as they are, as Cubase's Zoom
+    /// Tracks does. When the selected tracks can't fit, they're as short
+    /// as tracks go too, and the first of them scrolls to the top. Returns
+    /// whether they fit.
+    pub fn fit_selected_tracks(&mut self, project: &Project, selected: &[TrackId]) -> bool {
+        let (min, max) = (crate::view::MIN_TRACK_HEIGHT, crate::view::MAX_TRACK_HEIGHT);
+        let count = (project.tracks.iter())
+            .filter(|track| selected.contains(&track.id))
+            .count();
+        if count == 0 {
+            return false;
+        }
+        let rows = self.track_rows(project);
+        let fixed: f32 = rows.iter().map(|rows| rows.lanes).sum();
+        let others = (project.tracks.len() - count) as f32 * min;
+        let each = (self.lanes.height - fixed - others) / count as f32;
+        for track in &project.tracks {
+            let height = match selected.contains(&track.id) {
+                true => each.clamp(min, max),
+                false => min,
+            };
+            self.set_height(Chain::Track(track.id), Some(height));
+        }
+        let fits = each >= min;
+        self.viewport.top = match fits {
+            true => 0.0,
+            false => (self.track_rows(project).iter())
+                .find(|rows| selected.contains(&rows.id))
+                .map_or(0.0, |rows| rows.top),
+        };
+        fits
+    }
+}
+
+/// The heights of `heights` that are the master's or a track `project`
+/// has.
+fn kept_heights(project: &Project, heights: &BTreeMap<Chain, f32>) -> BTreeMap<Chain, f32> {
+    (heights.iter())
+        .filter(|(chain, _)| chain.track().is_none_or(|id| project.track(id).is_some()))
+        .map(|(&chain, &height)| (chain, height))
+        .collect()
 }
 
 /// The range W fits across the arrangement: from the song's start to its

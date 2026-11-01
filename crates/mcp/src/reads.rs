@@ -5,7 +5,8 @@
 //! lengths are numbers of beats, gains are linear, and ids are whole
 //! numbers, as commands take them.
 
-use musicable_commands::editor::{Lane as PianoRollLane, Viewport};
+use musicable_commands::editor::{FollowMode, Lane as PianoRollLane, Viewport};
+use musicable_commands::navigation::Panel;
 use musicable_commands::{
     Command, CommandId, FromValue, Keymap, Param, Registry, Scope, Value, device, json, param_text,
 };
@@ -931,13 +932,18 @@ pub(crate) fn editor(window: &impl Window) -> Json {
             "snap": grid.snap,
         },
         "in_sight": in_sight(viewport),
-        "follow": editor.follow,
+        "follow": editor.follows(Panel::Arrangement),
+        "follow_mode": match editor.behaviour.follow_mode {
+            FollowMode::Page => "page",
+            FollowMode::Continuous => "continuous",
+        },
         "piano_roll": {
             "clip": roll.clip.map(|clip| clip.0),
             "notes": ids(&mut roll.notes.iter().map(|n| n.0)),
             "draw": roll.draw,
             "lane": lane,
             "in_sight": in_sight(&roll.viewport),
+            "follow": editor.follows(Panel::PianoRoll),
         },
         "sample_editor": {
             "clip": sample.clip.map(|clip| clip.0),
@@ -945,6 +951,7 @@ pub(crate) fn editor(window: &impl Window) -> Json {
             "time": sample.time.map(|time| json!({ "start": beats(time.start), "end": beats(time.end) })),
             "lane": sample.lane.key(),
             "in_sight": in_sight(&sample.viewport),
+            "follow": editor.follows(Panel::SampleEditor),
         },
         "clip_editor": editor.clip_editor,
         "devices": {

@@ -1,0 +1,353 @@
+{
+  "format": "musicable-project",
+  "version": 27,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 4,
+  "next_send_id": 0,
+  "next_device_id": 4,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 4,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Kick",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": 3,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Bass",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 0,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "compressor",
+              "sample": null,
+              "params": {
+                "threshold": -18.0,
+                "ratio": 4.0,
+                "attack": 10.0,
+                "release": 100.0,
+                "knee": 6.0,
+                "output": 0.0,
+                "mix": 100.0,
+                "detector": 0.0,
+                "sidechain": 1.0,
+                "key_high_pass": 60.0,
+                "key_low_pass": 4000.0,
+                "listen": 0.0
+              }
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "Pad",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 1,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "synth",
+              "sample": null,
+              "params": {
+                "osc1_wave": 2.0,
+                "osc1_octave": 0.0,
+                "osc1_level": 100.0,
+                "osc2_wave": 2.0,
+                "osc2_pitch": 0.0,
+                "osc2_detune": 0.0,
+                "osc2_level": 0.0,
+                "noise": 0.0,
+                "filter": 1.0,
+                "cutoff": 2000.0,
+                "resonance": 10.0,
+                "filter_env": 24.0,
+                "key_track": 50.0,
+                "filter_attack": 1.0,
+                "filter_decay": 400.0,
+                "filter_sustain": 30.0,
+                "filter_release": 200.0,
+                "amp_attack": 1.0,
+                "amp_decay": 600.0,
+                "amp_sustain": 80.0,
+                "amp_release": 150.0,
+                "volume": -6.0,
+                "velocity": 50.0,
+                "voices": 8.0,
+                "glide": 0.0
+              }
+            }
+          }
+        },
+        {
+          "id": 2,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "gate",
+              "sample": null,
+              "params": {
+                "threshold": -40.0,
+                "return": 3.0,
+                "attack": 0.5,
+                "hold": 10.0,
+                "release": 100.0,
+                "floor": -80.0,
+                "sidechain": 1.0,
+                "key_high_pass": 20.0,
+                "key_low_pass": 20000.0,
+                "listen": 0.0
+              }
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 3,
+      "name": "Drums",
+      "kind": "group",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": null,
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [
+      {
+        "id": 3,
+        "bypassed": false,
+        "active": true,
+        "kind": {
+          "native": {
+            "kind": "compressor",
+            "sample": null,
+            "params": {
+              "threshold": -18.0,
+              "ratio": 4.0,
+              "attack": 10.0,
+              "release": 100.0,
+              "knee": 6.0,
+              "output": 0.0,
+              "mix": 100.0,
+              "detector": 0.0,
+              "sidechain": 0.0,
+              "key_high_pass": 20.0,
+              "key_low_pass": 20000.0,
+              "listen": 0.0
+            }
+          }
+        }
+      }
+    ],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [
+    {
+      "param": {
+        "wire": 0
+      },
+      "points": [
+        [0, 0.25],
+        [2580480, 1.0]
+      ],
+      "overridden": false
+    }
+  ],
+  "wires": [
+    {
+      "id": 0,
+      "from": {
+        "post_fx": {
+          "track": 0
+        }
+      },
+      "to": {
+        "sidechain": 0
+      },
+      "gain": 0.5,
+      "channel": null
+    },
+    {
+      "id": 1,
+      "from": {
+        "pre_fx": 0
+      },
+      "to": {
+        "sidechain": 2
+      },
+      "gain": 1.0,
+      "channel": null
+    },
+    {
+      "id": 2,
+      "from": {
+        "device": 0
+      },
+      "to": {
+        "sidechain": 2
+      },
+      "gain": 2.0,
+      "channel": null
+    },
+    {
+      "id": 3,
+      "from": {
+        "post_fader": {
+          "track": 3
+        }
+      },
+      "to": {
+        "sidechain": 3
+      },
+      "gain": 1.0,
+      "channel": null
+    }
+  ],
+  "workspace": null,
+  "view": null
+}

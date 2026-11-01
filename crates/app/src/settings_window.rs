@@ -13,7 +13,7 @@ use eframe::egui::{
     Slider, Ui, WidgetInfo, vec2,
 };
 use musicable_audio::StreamRequest;
-use musicable_commands::editor::{Behaviour, MiddleC, PlayFrom};
+use musicable_commands::editor::{Behaviour, FollowMode, FollowPlace, MiddleC, PlayFrom};
 use musicable_commands::{options, workspace};
 use musicable_ui::{Action, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME, Shell, View, first_press};
 
@@ -629,6 +629,58 @@ fn behaviour(ui: &mut Ui, cx: &Cx<'_>) -> Option<Asked> {
     for (middle_c, name) in names {
         ui.radio_value(&mut new.middle_c, middle_c, name);
     }
+    ui.add_space(8.0);
+    ui.label(RichText::new("Follow").strong());
+    ui.radio_value(
+        &mut new.follow_mode,
+        FollowMode::Page,
+        "Turns a page as the playhead leaves the view, as in Live",
+    );
+    ui.radio_value(
+        &mut new.follow_mode,
+        FollowMode::Continuous,
+        "Keeps the playhead still, and moves the song under it",
+    )
+    .on_hover_text("As Pro Tools' and Bitwig's continuous scrolling does");
+    ui.add_enabled_ui(new.follow_mode == FollowMode::Continuous, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("The playhead stays");
+            ui.radio_value(
+                &mut new.follow_place,
+                FollowPlace::Third,
+                "a third of the way in",
+            );
+            ui.radio_value(&mut new.follow_place, FollowPlace::Middle, "in the middle");
+        });
+    });
+    ui.add_space(8.0);
+    ui.label(RichText::new("Track heights").strong());
+    ui.horizontal_wrapped(|ui| {
+        let sizes = [
+            (&mut new.small_tracks, "Small"),
+            (&mut new.medium_tracks, "Medium"),
+            (&mut new.large_tracks, "Large"),
+            (&mut new.huge_tracks, "Huge"),
+        ];
+        for (size, name) in sizes {
+            ui.label(name);
+            ui.add(DragValue::new(size).range(24..=400).suffix(" pt"))
+                .on_hover_text(format!("The {name} size, in points"));
+        }
+    });
+    ui.checkbox(
+        &mut new.snap_track_heights,
+        "Dragging a track's edge snaps to these sizes",
+    )
+    .on_hover_text("As Cubase's Snap Track Heights does");
+    ui.checkbox(
+        &mut new.auto_zoom_tracks,
+        "Auto Zoom: the selected track is Large while it's selected",
+    )
+    .on_hover_text(
+        "As in Bitwig, Cubase and Logic. The heights it gives are never saved, and turning it \
+         off leaves the heights you set.",
+    );
     ui.add_space(8.0);
     ui.label(RichText::new("Auto-warp").strong());
     let rules = [

@@ -20,7 +20,8 @@ a panel, so workspaces don't keep it.
 - **Keys**: every command's keys ([Keys](keys.md)).
 - **Mouse**: what each gesture does ([The mouse](mouse.md)).
 - **Behaviour**: where Play/Stop plays from, what the piano roll calls
-  middle C, which of auto-warp's rules are on, whether copies of devices
+  middle C, how Follow follows the playhead, the track heights, which of
+  auto-warp's rules are on, whether copies of devices
   take their automation, and Fast analysis ([below](#behaviour)).
 - **Appearance**: the theme ([Themes](themes.md)).
 - **Workspaces**: your workspaces, with the keys that switch to each, and
@@ -53,6 +54,18 @@ with the [profile](profiles.md) in use.
 - **Middle C, MIDI note 60, is** C3, as in Live, Cubase, Logic and Bitwig;
   C4, as in Reaper and scientific pitch notation; or C5, as in FL Studio.
   The piano roll names its Cs and its notes by it.
+- **Follow** turns a page as the playhead leaves the view, as in Live, or
+  keeps the playhead still and moves the song under it, as Pro Tools' and
+  Bitwig's continuous scrolling does, a third of the way in or in the
+  middle. Every panel that follows the playhead follows it this way, and
+  Switch Follow Mode, in the View menu, switches it
+  ([Getting around](../window/arrangement.md#getting-around)).
+- **Track heights** are the four sizes, Small, Medium, Large and Huge, that
+  the track heights menu gives tracks and Make Tracks Taller and Shorter
+  step through, from 24 to 400 points each. Dragging a track's edge can snap
+  to them, as Cubase's Snap Track Heights does, and **Auto Zoom** makes the
+  selected track Large while it's selected, as Bitwig, Cubase and Logic
+  can. Both are off until you turn them on.
 - **Auto-warp** has a switch for each of its rules, all on until you switch
   them off ([Auto-warp](../using/warping.md#auto-warp)): **Recordings follow
   the tempo**, **Loops warp to their whole bars**, **Files at a steady tempo
@@ -211,6 +224,11 @@ Every setting can be left out:
 | `behaviour.sync_one_shots` | Whether sounds without a pulse play their first hit, or a riser's peak, where they're dropped. | `true` |
 | `behaviour.tempo_from_first_file` | Whether the first file with a pulse dropped into an empty song gives it its tempo and meter. | `true` |
 | `behaviour.copies_take_automation` | Whether copies of devices take their automation, in lanes of their own. | `true` |
+| `behaviour.follow_mode` | How Follow follows the playhead: a page at a time (`page`) or keeping it still (`continuous`). | `page` |
+| `behaviour.follow_place` | Where Continuous Follow keeps the playhead: a third of the way in (`third`) or in the `middle`. | `third` |
+| `behaviour.small_tracks`, `medium_tracks`, `large_tracks`, `huge_tracks` | The sizes the track heights menu gives tracks, which Make Tracks Taller and Make Tracks Shorter step through, in points, from 24 to 400. | 24, 60, 120, 200 |
+| `behaviour.snap_track_heights` | Whether dragging a track's edge snaps its height to those sizes. | `false` |
+| `behaviour.auto_zoom_tracks` | Whether the selected track is made Large while it's selected. | `false` |
 | `analysis.fast` | Whether analysis finds beats with the classic tracker alone, without the network. It's not one of a profile's settings. | `false` |
 | `render_cache.max_size_gb` | The most the render cache holds, in GB of 2^30 bytes, from 1 to 10,000. It's not one of a profile's settings. | 20 |
 | `render_cache.min_free_gb` | How much of its disk the render cache always leaves free, in GB, from 1 to 10,000. It's not one of a profile's settings. | 5 |

@@ -1,0 +1,411 @@
+{
+  "format": "musicable-project",
+  "version": 27,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 1,
+  "next_send_id": 0,
+  "next_device_id": 2,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 4,
+  "next_routing_id": 9,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Lead",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 0,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "synth",
+              "sample": null,
+              "params": {
+                "osc1_wave": 2.0,
+                "osc1_octave": 0.0,
+                "osc1_level": 100.0,
+                "osc2_wave": 2.0,
+                "osc2_pitch": 0.0,
+                "osc2_detune": 0.0,
+                "osc2_level": 0.0,
+                "noise": 0.0,
+                "filter": 1.0,
+                "cutoff": 2000.0,
+                "resonance": 10.0,
+                "filter_env": 24.0,
+                "key_track": 50.0,
+                "filter_attack": 1.0,
+                "filter_decay": 400.0,
+                "filter_sustain": 30.0,
+                "filter_release": 200.0,
+                "amp_attack": 1.0,
+                "amp_decay": 600.0,
+                "amp_sustain": 80.0,
+                "amp_release": 150.0,
+                "volume": -6.0,
+                "velocity": 50.0,
+                "voices": 8.0,
+                "glide": 0.0
+              }
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [
+          {
+            "id": 0,
+            "name": "Wobble",
+            "kind": "lfo",
+            "params": {
+              "shape": 1.0,
+              "skew": 25.0,
+              "sync": 1.0,
+              "rate": 1.0,
+              "note": 5.0,
+              "phase": 90.0,
+              "start": 1.0,
+              "note_trigger": 0.0,
+              "trigger": 0.0,
+              "delay": 0.0,
+              "fade_in": 250.0,
+              "unipolar": 1.0
+            },
+            "controls": [],
+            "next_control": 0
+          },
+          {
+            "id": 2,
+            "name": "Envelope 1",
+            "kind": "envelope",
+            "params": {
+              "delay": 0.0,
+              "attack": 2.5,
+              "hold": 0.0,
+              "decay": 1200.0,
+              "sustain": 0.0,
+              "release": 300.0,
+              "one_shot": 1.0,
+              "attack_curve": 0.0,
+              "decay_curve": 60.0,
+              "release_curve": -40.0,
+              "note_trigger": 2.0,
+              "gate": 0.0,
+              "transport": 0.0
+            },
+            "controls": [],
+            "next_control": 0
+          }
+        ],
+        "routings": [
+          {
+            "id": 0,
+            "from": {
+              "modulator": 0,
+              "output": 0
+            },
+            "to": {
+              "device": {
+                "id": 0,
+                "param": 9
+              }
+            },
+            "amount": 0.25,
+            "curve": "linear",
+            "scale": null,
+            "lag": 0.0,
+            "bypassed": false
+          },
+          {
+            "id": 1,
+            "from": {
+              "modulator": 2,
+              "output": 0
+            },
+            "to": {
+              "volume": {
+                "track": 0
+              }
+            },
+            "amount": -0.5,
+            "curve": "exponential",
+            "scale": null,
+            "lag": 20.0,
+            "bypassed": false
+          },
+          {
+            "id": 2,
+            "from": {
+              "modulator": 2,
+              "output": 0
+            },
+            "to": {
+              "device": {
+                "id": 0,
+                "param": 10
+              }
+            },
+            "amount": 0.4,
+            "curve": "s_curve",
+            "scale": {
+              "modulator": 0,
+              "output": 0
+            },
+            "lag": 0.0,
+            "bypassed": false
+          },
+          {
+            "id": 3,
+            "from": {
+              "modulator": 0,
+              "output": 0
+            },
+            "to": {
+              "modulator": {
+                "id": 2,
+                "param": 1
+              }
+            },
+            "amount": 0.1,
+            "curve": "logarithmic",
+            "scale": null,
+            "lag": 0.0,
+            "bypassed": false
+          },
+          {
+            "id": 4,
+            "from": {
+              "modulator": 0,
+              "output": 0
+            },
+            "to": {
+              "device": {
+                "id": 0,
+                "param": 6
+              }
+            },
+            "amount": -1.0,
+            "curve": "absolute",
+            "scale": null,
+            "lag": 0.0,
+            "bypassed": false
+          },
+          {
+            "id": 5,
+            "from": {
+              "modulator": 2,
+              "output": 0
+            },
+            "to": {
+              "device": {
+                "id": 0,
+                "param": 7
+              }
+            },
+            "amount": 1.0,
+            "curve": "positive",
+            "scale": null,
+            "lag": 0.0,
+            "bypassed": false
+          }
+        ]
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [
+      {
+        "id": 1,
+        "bypassed": false,
+        "active": true,
+        "kind": {
+          "plugin": {
+            "format": "clap",
+            "id": "com.example.filter",
+            "name": "Filter",
+            "kind": "audio_effect",
+            "inputs": [],
+            "note_output": false,
+            "state": null,
+            "params": []
+          }
+        }
+      }
+    ],
+    "modulation": {
+      "modulators": [
+        {
+          "id": 3,
+          "name": "Macro 1",
+          "kind": "macro",
+          "params": {},
+          "controls": [
+            {
+              "id": 0,
+              "name": "Brightness",
+              "kind": "knob",
+              "value": 0.5
+            },
+            {
+              "id": 1,
+              "name": "Button 1",
+              "kind": "toggle",
+              "value": 1.0
+            },
+            {
+              "id": 2,
+              "name": "Button 2",
+              "kind": "momentary",
+              "value": 0.0
+            }
+          ],
+          "next_control": 4
+        }
+      ],
+      "routings": [
+        {
+          "id": 6,
+          "from": {
+            "modulator": 3,
+            "output": 0
+          },
+          "to": {
+            "modulator": {
+              "id": 0,
+              "param": 3
+            }
+          },
+          "amount": 0.5,
+          "curve": {
+            "stepped": 4
+          },
+          "scale": null,
+          "lag": 0.0,
+          "bypassed": false
+        },
+        {
+          "id": 7,
+          "from": {
+            "modulator": 3,
+            "output": 1
+          },
+          "to": {
+            "device": {
+              "id": 1,
+              "param": 7
+            }
+          },
+          "amount": 12.5,
+          "curve": "linear",
+          "scale": null,
+          "lag": 0.0,
+          "bypassed": true
+        },
+        {
+          "id": 8,
+          "from": {
+            "modulator": 3,
+            "output": 2
+          },
+          "to": {
+            "pan": "master"
+          },
+          "amount": 0.75,
+          "curve": "negative",
+          "scale": {
+            "modulator": 3,
+            "output": 0
+          },
+          "lag": 0.0,
+          "bypassed": false
+        }
+      ]
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [
+    {
+      "param": {
+        "modulator": {
+          "id": 3,
+          "param": 0
+        }
+      },
+      "points": [
+        [0, 0.0],
+        [2580480, 1.0]
+      ],
+      "overridden": false
+    },
+    {
+      "param": {
+        "modulator": {
+          "id": 0,
+          "param": 1
+        }
+      },
+      "points": [
+        [0, 50.0],
+        [1290240, 10.0]
+      ],
+      "overridden": false
+    }
+  ],
+  "wires": [],
+  "workspace": null,
+  "view": null
+}

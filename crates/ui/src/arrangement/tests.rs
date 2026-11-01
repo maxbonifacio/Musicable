@@ -21,7 +21,7 @@ use musicable_model::{DeviceKind, LocatorId, PluginFormat, Project, TakeId, Trac
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
-use crate::testing::{Player, drag_pressing};
+use crate::testing::{Player, drag_pressing, drag_with};
 use crate::{Levels, Live, Plugins, Waveforms};
 
 struct State {
@@ -2287,5 +2287,213 @@ fn a_clip_held_at_the_edge_scrolls_the_lanes_and_keeps_its_place() {
     press(&mut harness, to, false, Modifiers::NONE);
     let moved = clip(&harness, ids.kick).1.start;
     assert!(moved > along + Beats::new(4), "{moved:?} {along:?}");
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn continuous_follow_keeps_the_playhead_still_and_waits_after_a_drag() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    let behaviour = &mut harness.state_mut().document.editor_mut().behaviour;
+    behaviour.follow_mode = musicable_commands::editor::FollowMode::Continuous;
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let third = lanes.left() + lanes.width() / 3.0;
+    for at in [80_i32, 81] {
+        harness.state_mut().player.playing = true;
+        harness.state_mut().player.playhead = Beats::new(i64::from(at));
+        harness.run();
+        let x = x_of(&harness, f64::from(at));
+        assert!((x - third).abs() < 0.5, "{x} {third}");
+    }
+    // A drag holds the view, and once it's let go Follow waits rather than
+    // jump to the playhead, which moved on meanwhile.
+    let from = in_lane(&harness, "Keys", 82.0);
+    harness.hover_at(from);
+    harness.run();
+    press(&mut harness, from, true, Modifiers::NONE);
+    harness.hover_at(from + vec2(30.0, 0.0));
+    harness.run();
+    harness.state_mut().player.playhead = Beats::new(84);
+    harness.run();
+    press(&mut harness, from + vec2(30.0, 0.0), false, Modifiers::NONE);
+    let held = harness.state().editor().viewport;
+    harness.state_mut().player.playhead = Beats::new(85);
+    harness.run();
+    let editor = harness.state().editor();
+    assert!(editor.navigation.arrangement.suspended);
+    assert_eq!(editor.viewport, held);
+    // Scroll to Playhead follows again.
+    harness
+        .state_mut()
+        .carry_out(&Action::Run(views::SCROLL_TO_PLAYHEAD));
+    harness.run();
+    assert!(!harness.state().editor().navigation.arrangement.suspended);
+    assert!(harness.state().errors.is_empty());
+}
+
+/// Where song position `at` is across the overview, which shows the song
+/// to its end, the outro's, at beat 1008, or what's in sight past it.
+fn in_overview(harness: &Harness<'_, State>, at: f64) -> Pos2 {
+    let strip = harness.get_by_label("Overview").rect();
+    let visible = harness.state().editor().viewport.visible();
+    let end = visible.end.to_f64().max(1008.0);
+    pos2(
+        strip.left() + (at / end) as f32 * strip.width(),
+        strip.center().y,
+    )
+}
+
+#[test]
+fn the_overview_shows_where_it_s_clicked_and_the_whole_song_double_clicked() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    let at = in_overview(&harness, 500.0);
+    click(&mut harness, at, Modifiers::NONE);
+    let editor = harness.state().editor();
+    let visible = editor.viewport.visible();
+    let middle = (visible.start.to_f64() + visible.end.to_f64()) / 2.0;
+    assert!((middle - 500.0).abs() < 10.0, "{visible:?}");
+    assert_eq!(editor.navigation.arrangement.len(), 1);
+    pause(&mut harness);
+    let at = in_overview(&harness, 100.0);
+    double_click(&mut harness, at);
+    let visible = harness.state().editor().viewport.visible();
+    assert!(
+        visible.start == Beats::ZERO && Beats::new(1008) <= visible.end,
+        "{visible:?}"
+    );
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn dragging_in_the_overview_scrolls_and_its_box_s_edge_zooms() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    let before = harness.state().editor().viewport;
+    // Along scrolls: 100 beats' worth of the strip.
+    let from = in_overview(&harness, 20.0);
+    let to = in_overview(&harness, 120.0);
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let viewport = harness.state().editor().viewport;
+    assert_eq!(viewport.zoom, before.zoom);
+    let moved = (viewport.start - before.start).to_f64();
+    assert!((moved - 100.0).abs() < 2.0, "{moved}");
+    // The drag is one step back.
+    assert_eq!(harness.state().editor().navigation.arrangement.len(), 1);
+    // The box's end, dragged out, zooms out to fit.
+    let visible = viewport.visible();
+    let end = in_overview(&harness, visible.end.to_f64());
+    let to = in_overview(&harness, visible.end.to_f64() + 200.0);
+    drag(&mut harness, end, to, Modifiers::NONE);
+    let after = harness.state().editor().viewport;
+    assert!(after.zoom < viewport.zoom * 0.7, "{after:?}");
+    assert_eq!(after.start, viewport.start);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_heights_menus_size_tracks_fit_the_selected_and_auto_zoom() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let height = |harness: &Harness<'static, State>, id| {
+        harness.state().editor().height_of(Chain::Track(id))
+    };
+    // From the corner, with no track selected, every track.
+    harness.get_by_label("Track heights").click();
+    harness.run();
+    harness.get_by_label("Small Tracks").click();
+    harness.run();
+    for id in [ids.drums, ids.keys, ids.bass] {
+        assert_eq!(height(&harness, id), 24.0);
+    }
+    // From a track's header, the track it was opened on.
+    harness.get_by_label("Track Bass").click_secondary();
+    harness.run();
+    harness.get_by_label("Track Height").click();
+    harness.run();
+    harness.get_by_label("Huge Tracks").click();
+    harness.run();
+    assert_eq!(height(&harness, ids.bass), 200.0);
+    assert_eq!(height(&harness, ids.keys), 24.0);
+    // Auto Zoom makes the selected track Large, and saves none of it.
+    harness.get_by_label("Track heights").click();
+    harness.run();
+    let item = harness.get_by_label("Auto Zoom Tracks");
+    assert_eq!(item.accesskit_node().toggled(), Some(Toggled::False));
+    item.click();
+    harness.run();
+    let at = harness.get_by_label("Track Keys").rect().left_center() + vec2(12.0, 0.0);
+    click(&mut harness, at, Modifiers::NONE);
+    assert_eq!(
+        harness.state().editor().selected_track,
+        Some(Chain::Track(ids.keys))
+    );
+    assert_eq!(height(&harness, ids.keys), 120.0);
+    let editor = harness.state().editor();
+    assert_eq!(
+        editor.track_heights.get(&Chain::Track(ids.keys)),
+        Some(&24.0)
+    );
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_middle_button_and_ctrl_alt_pan_and_a_box_zooms_to_its_time() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    // Scrolled along first, so panning back has room.
+    harness.state_mut().document.editor_mut().viewport.start = Beats::new(32);
+    harness.run();
+    let before = harness.state().editor().viewport;
+    let from = in_lane(&harness, "Keys", 40.0);
+    let to = from + vec2(width(&harness, 8.0), 0.0);
+    drag_with(
+        &mut harness,
+        PointerButton::Middle,
+        from,
+        to,
+        Modifiers::NONE,
+        Modifiers::NONE,
+    );
+    let viewport = harness.state().editor().viewport;
+    let moved = (before.start - viewport.start).to_f64();
+    assert!((moved - 8.0).abs() < 0.1, "{moved}");
+    assert_eq!(viewport.zoom, before.zoom);
+    assert_eq!(harness.state().editor().navigation.arrangement.len(), 1);
+    // Nothing was selected or moved on the way.
+    assert!(harness.state().editor().selection.time.is_none());
+    // Ctrl+Alt-dragging pans too, as in Live.
+    let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+    let from = in_lane(&harness, "Keys", 40.0);
+    let to = from - vec2(width(&harness, 4.0), 0.0);
+    drag_pressing(&mut harness, from, to, ctrl_alt, ctrl_alt);
+    let panned = harness.state().editor().viewport;
+    assert!(((panned.start - viewport.start).to_f64() - 4.0).abs() < 0.1);
+    assert_eq!(harness.state().editor().navigation.arrangement.len(), 2);
+
+    // Zoom to Area is unbound in Live's mouse: bound, a box dragged out
+    // shows its time across.
+    harness.state_mut().mouse.bind(
+        Target::Lane,
+        Gesture::RightDrag,
+        musicable_commands::Modifiers::NONE,
+        MouseAction::ZoomToArea,
+    );
+    let from = in_lane(&harness, "Keys", 40.0);
+    let to = in_lane(&harness, "Keys", 44.0);
+    drag_with(
+        &mut harness,
+        PointerButton::Secondary,
+        from,
+        to,
+        Modifiers::NONE,
+        Modifiers::NONE,
+    );
+    let visible = harness.state().editor().viewport.visible();
+    assert!(
+        visible.start <= Beats::new(40) && Beats::new(44) <= visible.end,
+        "{visible:?}"
+    );
+    assert!(visible.len() < Beats::new(6), "{visible:?}");
     assert!(harness.state().errors.is_empty());
 }

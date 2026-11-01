@@ -6,8 +6,9 @@
 use std::time::Duration;
 
 use egui::{Rect, Ui};
-use musicable_commands::editor::Viewport;
-use musicable_commands::navigation::Record;
+use musicable_commands::Editor;
+use musicable_commands::editor::{FollowMode, FollowPlace, Viewport};
+use musicable_commands::navigation::{Panel, Record};
 use musicable_model::time::Beats;
 
 use crate::shell::Playback;
@@ -23,39 +24,63 @@ const EDGE_SPEED: f32 = 240.0;
 const EDGE_ACCELERATION: f32 = 30.0;
 const EDGE_MAX_SPEED: f32 = 8000.0;
 
-/// The wheel's gesture in a panel, while it lasts: it ends a moment after
-/// the wheel's, or a pinch's, last event.
+/// What a timeline panel keeps from frame to frame for getting around: the
+/// wheel's gesture, which ends a moment after the wheel's, or a pinch's,
+/// last event, whether a drag held the view last frame, and where the
+/// playhead was.
 #[derive(Debug, Default)]
-pub(crate) struct Wheeling {
+pub(crate) struct Navigating {
     /// When the wheel or a pinch last changed the view.
-    last: Option<f64>,
+    wheeled: Option<f64>,
+    dragging: bool,
+    heard: Option<Beats>,
 }
 
-impl Wheeling {
-    /// How this frame's change to the view counts, and whether to send the
-    /// view even if it didn't change, to end the wheel's gesture or to let
-    /// Follow follow again: as part of the wheel's gesture if `wheeled`
-    /// changed it this frame, as its end once the gesture is over, as
-    /// Follow's if `followed`, or else as movement the user didn't make.
-    pub fn record(&mut self, ui: &Ui, wheeled: bool, followed: bool) -> (Record, bool) {
+impl Navigating {
+    /// Has Follow keep the playhead in `viewport`, `panel`'s view in
+    /// `editor`, unless a drag or the wheel holds it, as `dragging` and
+    /// `wheeled`, whether the wheel changed it this frame, say. Returns how
+    /// this frame's change to the view counts, and whether to send the view
+    /// even if it didn't change: as part of the wheel's gesture if the
+    /// wheel changed it, as its end once the gesture is over, as Follow's
+    /// if Follow moved it or follows again, as a drag's end in Continuous
+    /// mode, which leaves Follow waiting, or else as movement the user
+    /// didn't make.
+    pub fn frame(
+        &mut self,
+        ui: &Ui,
+        playback: &Playback,
+        editor: &Editor,
+        panel: Panel,
+        viewport: &mut Viewport,
+        (wheeled, dragging): (bool, bool),
+    ) -> (Record, bool) {
+        let released = std::mem::replace(&mut self.dragging, dragging) && !dragging;
+        let mut following = Following::of(editor, panel, wheeled || dragging);
+        // A drag let go of in Continuous mode leaves the view where it was:
+        // the playhead moved on from its place while the drag held it.
+        let suspend = released && following.continuous(playback);
+        following.held |= suspend;
+        let followed = follow(playback, following, self.heard, viewport);
+        self.heard = Some(playback.playhead);
         let now = ui.input(|i| i.time);
         if wheeled {
-            self.last = Some(now);
+            self.wheeled = Some(now);
         }
-        let ended = !wheeled && self.last.is_some_and(|at| now - at >= WHEEL_GESTURE);
+        let ended = !wheeled && self.wheeled.is_some_and(|at| now - at >= WHEEL_GESTURE);
         if ended {
-            self.last = None;
-        } else if self.last.is_some() {
+            self.wheeled = None;
+        } else if self.wheeled.is_some() {
             ui.ctx()
                 .request_repaint_after(Duration::from_secs_f64(WHEEL_GESTURE));
         }
-        let record = match (wheeled, ended, followed) {
-            (true, ..) => Record::Gesture,
-            (_, true, _) => Record::Step,
-            (.., true) => Record::Follow,
-            _ => Record::None,
-        };
-        (record, ended || followed)
+        match (wheeled, ended, followed) {
+            (true, ..) => (Record::Gesture, false),
+            (_, true, _) => (Record::Step, true),
+            (.., true) => (Record::Follow, true),
+            _ if suspend => (Record::Suspend, true),
+            _ => (Record::None, false),
+        }
     }
 }
 
@@ -124,28 +149,72 @@ pub(crate) fn edge_scroll_down(
     by.is_some()
 }
 
-/// Turns a page of `viewport` when the playhead leaves it while it plays,
-/// if Follow is on in the panel, unless `held`, as while a drag or the
-/// wheel goes on. While the user has navigated away, as `suspended` says,
-/// it waits for the playhead to play into sight. Returns whether Follow
-/// moved the view, or follows again now the playhead is in sight.
+/// How a panel follows the playhead this frame: Follow's switch in it, the
+/// mode and place they share, and the panel's Follow state.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Following {
+    pub on: bool,
+    pub mode: FollowMode,
+    pub place: FollowPlace,
+    /// Whether the user navigated away while it played.
+    pub suspended: bool,
+    /// Whether a drag or the wheel is going on in the panel, which holds
+    /// the view still.
+    pub held: bool,
+}
+
+impl Following {
+    /// How `editor` has `panel` follow, while `held` or not.
+    pub fn of(editor: &Editor, panel: Panel, held: bool) -> Self {
+        Self {
+            on: editor.follows(panel),
+            mode: editor.behaviour.follow_mode,
+            place: editor.behaviour.follow_place,
+            suspended: editor.navigation.of(panel).suspended,
+            held,
+        }
+    }
+
+    /// Whether the view is following the playhead in Continuous mode now,
+    /// which moves it every frame.
+    pub fn continuous(&self, playback: &Playback) -> bool {
+        playback.playing && self.on && self.mode == FollowMode::Continuous && !self.suspended
+    }
+}
+
+/// Keeps the playhead in sight in `viewport` while it plays, if Follow is
+/// on in the panel, unless it's held: a page at a time, or keeping it at
+/// its place as the song moves under it. While the user has navigated
+/// away, it waits: in Page mode for the playhead to play into sight, and in
+/// Continuous mode for it to play up to its place from the left of it,
+/// from `before`, where it was last frame, so the view never jumps. Returns
+/// whether Follow moved the view, or follows again now.
 pub(crate) fn follow(
     playback: &Playback,
-    on: bool,
-    suspended: bool,
-    held: bool,
+    following: Following,
+    before: Option<Beats>,
     viewport: &mut Viewport,
 ) -> bool {
-    if !playback.playing || !on || held {
+    if !playback.playing || !following.on || following.held {
         return false;
     }
-    let in_sight = viewport.visible().contains(playback.playhead);
-    if suspended {
-        return in_sight;
+    let playhead = playback.playhead;
+    match following.mode {
+        FollowMode::Page if following.suspended => viewport.visible().contains(playhead),
+        FollowMode::Continuous if following.suspended => {
+            let place = viewport.beats_at(viewport.width * following.place.fraction());
+            before.is_some_and(|before| before < place && place <= playhead)
+                && viewport.visible().contains(playhead)
+        }
+        mode => {
+            let was = *viewport;
+            match mode {
+                FollowMode::Page => viewport.follow(playhead),
+                FollowMode::Continuous => viewport.place(playhead, following.place.fraction()),
+            }
+            *viewport != was
+        }
     }
-    let before = *viewport;
-    viewport.follow(playback.playhead);
-    *viewport != before
 }
 
 /// Where a drag that started at `from`, when the view was `then`, started

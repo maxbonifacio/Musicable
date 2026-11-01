@@ -43,6 +43,7 @@ use crate::log_file;
 use crate::mouse_file::UserMouse;
 use crate::mouse_page::Asked as MouseAsked;
 use crate::performance::{Figures, LiveMarks};
+use crate::playhead::Playhead;
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_windows::PluginWindows;
 use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
@@ -119,6 +120,8 @@ pub struct App {
     messages: Vec<String>,
     /// The mixer's meters, as last read.
     levels: Levels,
+    /// Where the playhead is drawn between the engine's reports of it.
+    playhead: Playhead,
     /// The CPU figures, as last worked out.
     performance: Figures,
     /// The tracks that render live while the rest of the project renders
@@ -361,6 +364,7 @@ impl App {
             folder,
             messages,
             levels: Levels::default(),
+            playhead: Playhead::default(),
             performance: Figures::default(),
             live: LiveMarks::default(),
             modulated: false,
@@ -924,6 +928,10 @@ impl App {
             }
             Request::CommandPalette => self.shell.open_palette(),
             Request::Notice(notice) => self.messages.push(notice),
+            Request::SaveBehaviour => {
+                self.profile.behaviour = self.session.editor().behaviour;
+                self.save_profile();
+            }
             Request::Settings => self.settings_window.open(None),
             Request::AudioSettings => self.settings_window.open(Some(settings_window::AUDIO)),
             Request::KeyboardShortcuts => self.settings_window.open(Some(settings_window::KEYS)),
@@ -954,6 +962,7 @@ impl App {
                 self.shell.toggle_panel(panel);
                 self.focus_in_sight();
             }
+            Request::ToggleOverview => self.shell.toggle_overview(),
             Request::ShowPanel(panel) => {
                 self.shell.show_panel(panel);
                 self.focus_in_sight();
@@ -1329,6 +1338,9 @@ impl App {
     fn save_to(&mut self, path: PathBuf) -> Result<PathBuf, String> {
         let mut project = self.session.saved_project();
         project.workspace = Some(self.workspaces.current_name().to_owned());
+        // Where the arrangement is, written with the project but never a
+        // change to it.
+        project.view = Some(self.session.editor().saved_view(&project));
         match project::save(&path, &project) {
             Ok(()) => {
                 self.session.mark_saved();
@@ -2056,6 +2068,10 @@ impl eframe::App for App {
         // dropped and a lost device gets tried again.
         let mut frame = if self.session.compiling() {
             COMPILING_FRAME
+        } else if plays && continuous(self.session.editor()) {
+            // The song moves under the playhead every frame the screen
+            // shows.
+            Duration::ZERO
         } else if plays || stats.preview.is_some() || metering {
             PLAYING_FRAME
         } else {
@@ -2092,8 +2108,14 @@ impl eframe::App for App {
         self.list_monitors(frame);
 
         let stats = self.session.stats();
-        let heard = self.session.heard_position(self.output.latency());
+        let reported = self.session.heard_position(self.output.latency());
         let rate = self.session.engine_config().sample_rate;
+        let project = self.session.project();
+        let loop_end = (project.looping)
+            .then(|| project.tempo.frame_at(project.loop_region.end, rate).max(0) as u64);
+        let period = self.output.info().map_or(0, |info| u64::from(info.period));
+        let now = Instant::now();
+        let heard = (self.playhead).at(reported, stats.playing, now, rate, period, loop_end);
         let summary = self.output.summary();
         let details = self.output.details();
         let name = self.name();
@@ -2399,6 +2421,18 @@ fn levels(meters: &Meters, project: &Project, time: u64) -> Levels {
 }
 
 /// What the armed tracks have recorded so far, in the song's beats.
+/// Whether Continuous Follow keeps the playhead still in a panel, moving
+/// its view every frame while the song plays.
+fn continuous(editor: &musicable_commands::Editor) -> bool {
+    use musicable_commands::editor::FollowMode;
+    use musicable_commands::navigation::Panel;
+    let panels = [Panel::Arrangement, Panel::PianoRoll, Panel::SampleEditor];
+    editor.behaviour.follow_mode == FollowMode::Continuous
+        && panels
+            .iter()
+            .any(|&panel| editor.follows(panel) && !editor.navigation.of(panel).suspended)
+}
+
 fn recordings(session: &Session) -> Vec<musicable_ui::Recording> {
     let recordings = session.recordings().into_iter();
     recordings
