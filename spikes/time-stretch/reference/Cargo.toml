@@ -1,0 +1,17 @@
+[package]
+name = "stretch-reference"
+description = "Spike tooling: renders Rubber Band R3 and Signalsmith Stretch through Musicable's bindings, finds onsets, and measures attack timing, for comparing a new stretcher against them."
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Not part of Musicable's workspace: CI never builds the spike.
+[workspace]
+
+[dependencies]
+musicable-stretch = { path = "../../../crates/stretch" }
+musicable-analysis = { path = "../../../crates/analysis" }
+hound = "3.5"
+serde_json = "1"
+realfft = "3"
