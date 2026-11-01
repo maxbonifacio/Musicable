@@ -684,7 +684,54 @@ impl Registry {
         commands: &[(CommandId, Args)],
         context: &mut Context<'_>,
     ) -> Result<Vec<Value>, BatchError> {
-        for (index, (id, _)) in commands.iter().enumerate() {
+        let ids = commands.iter().map(|(id, _)| id);
+        self.batch(name, ids, context, |index, context| {
+            let (id, args) = &commands[index];
+            self.run_with(id, args, context)
+        })
+    }
+
+    /// Runs `commands` as [`run_batch`](Self::run_batch) does, as an agent
+    /// runs them: each command's arguments are JSON, which can use what
+    /// those before it gave back, as [`json::link`] says, and it must be
+    /// one [for agents](Command::agents). A reference that names no result,
+    /// or arguments that don't fit, fail the batch as a failed command
+    /// does.
+    pub fn run_linked(
+        &self,
+        name: &str,
+        commands: &[Linked],
+        context: &mut Context<'_>,
+    ) -> Result<Vec<Value>, BatchError> {
+        let mut results = json::Results::new();
+        let ids = commands.iter().map(|linked| &linked.id);
+        self.batch(name, ids, context, |index, context| {
+            let linked = &commands[index];
+            let command = self
+                .get(&linked.id)
+                .ok_or_else(|| CommandError::Unknown(linked.id.clone()))?;
+            let args = json::link(&linked.args, &results).map_err(CommandError::Invalid)?;
+            let args = json::agent_args(command, &args)?;
+            let value = self.run_with(&linked.id, &args, context)?;
+            if let Some(named) = &linked.named {
+                results.insert(named.clone(), json::to_json(&value));
+            }
+            Ok(value)
+        })
+    }
+
+    /// Runs the commands `ids` as one step in the undo history called
+    /// `name`, each with `step`, given its place among them: see
+    /// [`run_batch`](Self::run_batch).
+    fn batch<'a>(
+        &self,
+        name: &str,
+        ids: impl ExactSizeIterator<Item = &'a CommandId> + Clone,
+        context: &mut Context<'_>,
+        mut step: impl FnMut(usize, &mut Context<'_>) -> Result<Value, CommandError>,
+    ) -> Result<Vec<Value>, BatchError> {
+        let count = ids.len();
+        for (index, id) in ids.enumerate() {
             let failed = |error| BatchError { index, error };
             let command = self
                 .get(id)
@@ -696,9 +743,9 @@ impl Registry {
         }
         let requests = context.requests.len();
         context.document.begin_batch(name);
-        let mut values = Vec::with_capacity(commands.len());
-        for (index, (id, args)) in commands.iter().enumerate() {
-            match self.run_with(id, args, context) {
+        let mut values = Vec::with_capacity(count);
+        for index in 0..count {
+            match step(index, context) {
                 Ok(value) => values.push(value),
                 Err(error) => {
                     context.document.cancel_batch();
@@ -765,6 +812,18 @@ fn register_requests(registry: &mut Registry, commands: &[(CommandId, &str, Requ
             Ok(Value::None)
         });
     }
+}
+
+/// A command to run among others with [`Registry::run_linked`], as an agent
+/// gives it, whose arguments can use what those before it gave back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Linked {
+    pub id: CommandId,
+    /// Its arguments as JSON, references and all: see [`json::link`].
+    pub args: serde_json::Map<String, serde_json::Value>,
+    /// The name its result goes by for the commands after it, if it has
+    /// one.
+    pub named: Option<String>,
 }
 
 /// Why [`Registry::run_batch`] stopped: the command at `index` failed.

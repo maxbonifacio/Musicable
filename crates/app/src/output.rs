@@ -146,9 +146,8 @@ impl Output {
         (output, handle)
     }
 
-    /// An output that never opens a device, for the app's tests: the engine
-    /// waits for one.
-    #[cfg(test)]
+    /// An output that never opens a device, for the app's tests and for
+    /// headless Musicable started without audio: the engine waits for one.
     pub(crate) fn none() -> (Self, EngineHandle) {
         let (engine, handle, monitor) = crate::engine(NO_DEVICE);
         let output = Self {
@@ -161,7 +160,7 @@ impl Output {
             stream: None,
             idle: Some(engine),
             monitor,
-            problem: Some("the tests play through no device".to_owned()),
+            problem: Some("Musicable plays through no audio device".to_owned()),
             retry_at: None,
             reset: false,
             meter: LoadMeter::default(),

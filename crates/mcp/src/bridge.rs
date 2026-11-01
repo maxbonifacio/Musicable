@@ -12,13 +12,14 @@
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::io;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::process::Child;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities, ClientConfig,
-    Implementation, ListToolsResult, PaginatedRequestParams, ProgressNotificationParam,
+    Implementation, JsonObject, ListToolsResult, PaginatedRequestParams, ProgressNotificationParam,
     ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RunningService, ServiceError};
@@ -26,6 +27,10 @@ use rmcp::{ErrorData, Peer, RoleClient, RoleServer, ServerHandler, ServiceExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 
+use serde_json::{Value as Json, json};
+
+use crate::client;
+use crate::lifecycle::{self, Launch};
 use crate::local::{LocalTools, NoLocalTools};
 use crate::pipe::{self, Address};
 use crate::tools::{self, failed};
@@ -54,11 +59,8 @@ pub fn run(config_dir: Option<&Path>, local: Arc<dyn LocalTools>) -> io::Result<
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(serve(
-        Bridge::with_local(address, local),
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-    ))
+    let bridge = Bridge::with_local(address, local).with_config_dir(config_dir);
+    runtime.block_on(serve(bridge, tokio::io::stdin(), tokio::io::stdout()))
 }
 
 /// Serves the bridge to the agent's client at the other ends of `input`
@@ -94,6 +96,10 @@ pub struct Bridge {
     /// The local tools, as `tools/list` gives them, and their names.
     local_tools: Arc<Vec<Tool>>,
     local_names: Arc<BTreeSet<String>>,
+    /// Where Musicable's settings are, for the Musicable it launches.
+    config_dir: Option<PathBuf>,
+    /// The Musicable it launched last, until it's gone.
+    launched: Arc<std::sync::Mutex<Option<Child>>>,
 }
 
 impl Bridge {
@@ -127,7 +133,17 @@ impl Bridge {
             local,
             local_tools: Arc::new(local_tools),
             local_names: Arc::new(local_names),
+            config_dir: None,
+            launched: Arc::default(),
         }
+    }
+
+    /// The bridge, launching Musicable with its settings in `config_dir`,
+    /// as the bridge found them.
+    #[must_use]
+    pub fn with_config_dir(mut self, config_dir: Option<&Path>) -> Self {
+        self.config_dir = config_dir.map(Path::to_owned);
+        self
     }
 
     /// The connection to Musicable, made now as the agent `agent` unless
@@ -204,6 +220,133 @@ impl Bridge {
     }
 }
 
+impl Bridge {
+    /// Launches Musicable, or restarts it, as the lifecycle tool `name`
+    /// says with `arguments`, and answers once it answers agents.
+    async fn launch(
+        &self,
+        name: &str,
+        arguments: &JsonObject,
+        agent: Option<Implementation>,
+    ) -> CallToolResult {
+        let mut launch = match lifecycle::launch(name, arguments) {
+            Ok(launch) => launch,
+            Err(why) => return failed(why),
+        };
+        let address = match &self.address {
+            Ok(address) => address.clone(),
+            Err(why) => return failed(why.clone()),
+        };
+        if name == lifecycle::RESTART_APP {
+            if let Err(why) = self.quit(&mut launch, &address, agent.clone()).await {
+                return failed(why);
+            }
+        } else if client::listening(&address).await {
+            return failed(
+                "Musicable is running already: restart_app replaces it, or quit_app quits it \
+                 first.",
+            );
+        }
+        let program = match launch.build.clone().map_or_else(std::env::current_exe, Ok) {
+            Ok(program) => program,
+            Err(error) => {
+                return failed(format!("The bridge can't find its own program: {error}."));
+            }
+        };
+        let child = match lifecycle::start(&program, &launch, self.config_dir.as_deref()) {
+            Ok(child) => child,
+            Err(error) => {
+                return failed(format!("Couldn't start {}: {error}.", program.display()));
+            }
+        };
+        let process = child.id();
+        *self.launched.lock().unwrap_or_else(PoisonError::into_inner) = Some(child);
+        let started = Instant::now();
+        while !client::listening(&address).await {
+            let stopped = (self.launched.lock().unwrap_or_else(PoisonError::into_inner))
+                .as_mut()
+                .and_then(lifecycle::stopped);
+            if let Some(why) = stopped {
+                return failed(why);
+            }
+            if started.elapsed() >= launch.wait {
+                return failed(format!(
+                    "Musicable started, as process {process}, but didn't answer within {} \
+                     seconds. The app answers only while the user lets agents in, with \
+                     \"Let agents control Musicable\" on the Agents page of its Settings \
+                     window; headless, it always does. get_log says what it's doing.",
+                    launch.wait.as_secs()
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // The app's window can open behind others', as the system keeps
+        // the focus with the app the user last used.
+        if !launch.headless
+            && let Ok(app) = self.connect(agent).await
+        {
+            let _ = call(&app, tools::FOCUS_APP, JsonObject::new()).await;
+        }
+        CallToolResult::structured(json!({
+            "process": process,
+            "build": program,
+            "headless": launch.headless,
+            "project": launch.project,
+            "seconds": (started.elapsed().as_secs_f64() * 10.0).round() / 10.0,
+        }))
+    }
+
+    /// Quits the Musicable running, if one answers, for `restart_app`, and
+    /// waits for it to close. `launch` opens the file it had open, unless
+    /// it names another.
+    async fn quit(
+        &self,
+        launch: &mut Launch,
+        address: &Address,
+        agent: Option<Implementation>,
+    ) -> Result<(), String> {
+        let Ok(app) = self.connect(agent).await else {
+            return Ok(());
+        };
+        if launch.project.is_none() {
+            let project = call(&app, tools::GET_PROJECT, JsonObject::new()).await?;
+            launch.project = project["file"].as_str().map(PathBuf::from);
+        }
+        let mut arguments = JsonObject::new();
+        if let Some(unsaved) = &launch.unsaved {
+            arguments.insert("unsaved".into(), unsaved.as_str().into());
+        }
+        call(&app, tools::QUIT_APP, arguments)
+            .await
+            .map_err(|why| format!("Musicable didn't quit: {why}"))?;
+        self.disconnect().await;
+        let started = Instant::now();
+        while client::listening(address).await {
+            if started.elapsed() >= lifecycle::CLOSING {
+                return Err(format!(
+                    "Musicable said it would quit, but still answers after {} seconds: \
+                     get_status says what it's doing.",
+                    lifecycle::CLOSING.as_secs()
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // The process may hold its program a moment longer.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Ok(())
+    }
+}
+
+/// Calls the app's tool `name` with `arguments` through `app`, and gives
+/// back its answer, as JSON, or why it failed.
+async fn call(app: &Peer<RoleClient>, name: &str, arguments: JsonObject) -> Result<Json, String> {
+    let request = CallToolRequestParams::new(name.to_owned()).with_arguments(arguments);
+    match app.call_tool(request).await {
+        Ok(result) => client::read(&result),
+        Err(error) => Err(format!("Musicable didn't answer {name}: {error}.")),
+    }
+}
+
 impl ServerHandler for Bridge {
     fn get_info(&self) -> ServerConfig {
         tools::server_info_with(&self.local.instructions())
@@ -215,6 +358,7 @@ impl ServerHandler for Bridge {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         let mut list = tools::list();
+        list.extend(lifecycle::tools());
         list.extend(self.local_tools.iter().cloned());
         Ok(ListToolsResult::with_all_items(list))
     }
@@ -228,6 +372,10 @@ impl ServerHandler for Bridge {
             return Ok(self.call_local(request, context).await.into());
         }
         let agent = context.client_info();
+        if [lifecycle::LAUNCH_APP, lifecycle::RESTART_APP].contains(&request.name.as_ref()) {
+            let arguments = request.arguments.unwrap_or_default();
+            return Ok(self.launch(&request.name, &arguments, agent).await.into());
+        }
         let app = match self.connect(agent.clone()).await {
             Ok(app) => app,
             Err(why) => return Ok(failed(why).into()),

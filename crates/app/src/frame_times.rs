@@ -97,9 +97,72 @@ impl FrameTimes {
     }
 }
 
+/// How long frames took on the CPU over the last few seconds, for agents,
+/// whether or not `MUSICABLE_FRAME_TIMES` asks: see `get_performance`.
+#[derive(Debug, Default)]
+pub(crate) struct FrameLoad {
+    /// When each frame lately was drawn, and its time on the CPU, oldest
+    /// first.
+    frames: std::collections::VecDeque<(Instant, f32)>,
+}
+
+impl FrameLoad {
+    /// How far back it looks.
+    const OVER: Duration = Duration::from_secs(5);
+
+    /// Notes a frame drawn at `now`, that took `cpu` seconds on the CPU, if
+    /// eframe says.
+    pub fn frame(&mut self, now: Instant, cpu: Option<f32>) {
+        if let Some(cpu) = cpu {
+            self.frames.push_back((now, cpu));
+        }
+        while (self.frames.front()).is_some_and(|(at, _)| now.duration_since(*at) > Self::OVER) {
+            self.frames.pop_front();
+        }
+    }
+
+    /// The frames over the last few seconds before `now`, if there were any.
+    pub fn lately(&self, now: Instant) -> Option<musicable_mcp::Frames> {
+        let lately: Vec<f32> = (self.frames.iter())
+            .filter(|(at, _)| now.duration_since(*at) <= Self::OVER)
+            .map(|(_, cpu)| *cpu)
+            .collect();
+        if lately.is_empty() {
+            return None;
+        }
+        let count = lately.len() as f32;
+        Some(musicable_mcp::Frames {
+            count: lately.len() as u32,
+            seconds: Self::OVER.as_secs_f32(),
+            average_ms: lately.iter().sum::<f32>() / count * 1000.0,
+            longest_ms: lately.iter().copied().fold(0.0, f32::max) * 1000.0,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_frame_load_covers_the_last_five_seconds() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut load = FrameLoad::default();
+        assert_eq!(load.lately(at(0)), None);
+        load.frame(at(0), Some(0.020));
+        load.frame(at(1000), Some(0.002));
+        load.frame(at(2000), None);
+        load.frame(at(3000), Some(0.004));
+        let lately = load.lately(at(3000)).unwrap();
+        assert_eq!((lately.count, lately.longest_ms), (3, 20.0));
+        assert!((lately.average_ms - 26.0 / 3.0).abs() < 1e-3, "{lately:?}");
+        // The 20 ms frame is more than five seconds ago.
+        load.frame(at(5500), Some(0.003));
+        let lately = load.lately(at(5500)).unwrap();
+        assert_eq!((lately.count, lately.longest_ms), (3, 4.0));
+        assert_eq!(load.lately(at(20_000)), None);
+    }
 
     #[test]
     fn frame_times_are_printed_every_five_seconds() {

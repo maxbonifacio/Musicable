@@ -13,6 +13,9 @@ project. These do more:
 | `musicable analyse FILE...` | Finds the tempo, beats and downbeats of audio files, as warping will, and scores them against beats you've marked, and against Live's: see [Analysing files](#analysing-files). |
 | `musicable mcp` | Connects an agent, such as Claude Code, to the Musicable that's running, and gives it the audio commands as tools. The agent's app starts it: see [Agents](#agents). |
 | `musicable api` | Prints the commands agents can run, with their arguments, and the audio commands, as JSON. |
+| `musicable --headless [PROJECT]` | Runs Musicable with no window, for agents, until one quits it: see [Agents](#agents). With `--no-audio`, it plays through no audio device. |
+| `musicable check FILE...` | Runs scenarios, the checks agents write of what Musicable should do, each in a Musicable with no window, and says which held. It's a check for developers. |
+| `musicable soak` | Watches the Musicable that's open for a long run, an hour unless `--minutes` or `--hours` says, and says how it went: how hard the audio worked, dropouts, memory, the log's errors, and whether it stopped. It's a check for developers. |
 | `musicable --help` | Lists these. |
 
 On Windows, the program opens no console window of its own, so run these
@@ -162,6 +165,15 @@ covers it. On Windows, they can take pictures of the windows you moved
 panels to, and of plugins' windows, too. They can read what's in a window
 as a screen reader does: its buttons, sliders, switches and menus, with
 their names, values and places.
+
+Agents can quit Musicable, saving or throwing away your changes as they
+say, or asking you if they don't, start it again, a new build of it if
+they give one, with the project you had open, and bring its window to the
+front. They can also run Musicable with no window, `musicable --headless`,
+which nobody else sees or uses: it lets them in whatever your settings
+say, without changing them, and asks them, not you, whether to save. To
+run one beside your own, give it a folder of its own for its settings, in
+the environment variable `MUSICABLE_CONFIG_DIR`.
 
 Agents also get the [audio commands](audio-commands.md) as tools, which
 cut, convert and measure audio files. `musicable mcp` runs those itself,

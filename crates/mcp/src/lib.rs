@@ -22,8 +22,8 @@
 use std::path::{Path, PathBuf};
 
 use musicable_commands::{
-    Args, BatchError, CommandError, CommandId, Editor, Keymap, Registry, Steps, Value, edit,
-    history, json,
+    Args, BatchError, CommandError, CommandId, Editor, Keymap, Linked, Registry, Steps, Value,
+    edit, history, json,
 };
 use musicable_model::clip::ClipId;
 use musicable_model::modulation::ModulatorId;
@@ -34,8 +34,10 @@ use serde_json::{Map, Value as Json};
 use tokio::sync::oneshot;
 
 pub mod bridge;
+pub mod client;
 mod hands;
 mod host;
+mod lifecycle;
 pub mod local;
 mod midi;
 pub mod pipe;
@@ -112,6 +114,31 @@ enum Asked {
         clear: bool,
     },
     Run(Run),
+    /// Quit Musicable, with what to do with unsaved changes, if it says.
+    Quit(Option<Unsaved>),
+    /// Bring the main window to the front.
+    Focus,
+    /// Answer the question the window asks, where there's no one else to:
+    /// in headless Musicable.
+    AnswerQuestion(Choice),
+}
+
+/// What to do with unsaved changes as Musicable quits: see
+/// [`Window::quit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsaved {
+    Save,
+    Discard,
+}
+
+/// An answer to the question whether to save the changes first: see
+/// [`Window::answer_question`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    Save,
+    Discard,
+    /// Keep the project open, and don't go ahead.
+    Cancel,
 }
 
 /// Commands an agent asked to run, their arguments checked against their
@@ -121,8 +148,9 @@ pub enum Run {
     /// One command with its arguments, as a menu or a key runs it.
     One(CommandId, Args),
     /// Several commands in order, as one step in the undo history with this
-    /// name: see [`Registry::run_batch`].
-    Batch(String, Vec<(CommandId, Args)>),
+    /// name, each using what those before it gave back if it says: see
+    /// [`Registry::run_linked`].
+    Batch(String, Vec<Linked>),
 }
 
 impl Run {
@@ -263,6 +291,31 @@ pub struct Performance {
     pub rows: Vec<CpuRow>,
     /// The whole project's share of a core: 1.5 is a core and a half.
     pub total: f32,
+    /// How long the window's frames took on the CPU lately, if it draws.
+    pub frames: Option<Frames>,
+    /// How much memory Musicable uses, where the system says.
+    pub memory: Option<Memory>,
+}
+
+/// How long the window's frames took on the CPU over the last few seconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Frames {
+    /// The frames drawn, over `seconds`.
+    pub count: u32,
+    pub seconds: f32,
+    /// Their average and their longest, in milliseconds.
+    pub average_ms: f32,
+    pub longest_ms: f32,
+}
+
+/// How much memory Musicable uses, in megabytes (10⁶ bytes).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Memory {
+    /// What's in RAM now: the working set, on Windows.
+    pub resident_mb: f64,
+    /// What it has to itself, in RAM or paged out, where the system says:
+    /// Windows' private bytes. A leak shows here first.
+    pub private_mb: Option<f64>,
 }
 
 /// How far ahead of the audio device the engine rendered lately, as the
@@ -354,6 +407,9 @@ pub struct Status {
     /// Goes up with every change to the project, undone and redone ones
     /// too, and when another project opens.
     pub revision: u64,
+    /// Whether Musicable runs headless, with no window and no user, as
+    /// `musicable --headless` starts it.
+    pub headless: bool,
 }
 
 /// What to take a picture of, and where to save it: see
@@ -538,6 +594,25 @@ pub trait Window {
     /// Clears the messages, as Dismiss does.
     fn clear_messages(&mut self) {}
 
+    /// Quits Musicable, as File > Quit does, and answers `reply` before it
+    /// closes. Unsaved changes are saved or let go as `unsaved` says, or
+    /// else as the user says, if there's one to ask.
+    fn quit(&mut self, _unsaved: Option<Unsaved>, reply: Reply) {
+        reply.failed("This window can't quit.");
+    }
+
+    /// Brings the main window to the front, and answers `reply`.
+    fn focus(&mut self, reply: Reply) {
+        reply.failed("This window can't come to the front.");
+    }
+
+    /// Answers the question the window asks, such as whether to save the
+    /// changes before opening another project, as `choice` says, where
+    /// there's no user to answer it, and answers `reply`.
+    fn answer_question(&mut self, _choice: Choice, reply: Reply) {
+        reply.failed("Only the user answers the window's questions.");
+    }
+
     /// Runs `run`, as the agent `reply` names asked, and answers with
     /// [`Reply::ran`] or [`Reply::ran_batch`], at once or once it knows.
     fn run(&mut self, run: Run, reply: Reply);
@@ -557,6 +632,9 @@ pub fn answer(call: Call, window: &mut impl Window) {
         Asked::UiTree(tree) => return window.ui_tree(tree, reply),
         Asked::Hands(hands) => return window.use_mouse_and_keys(hands, reply),
         Asked::Midi(messages) => return window.play_midi(messages, reply),
+        Asked::Quit(unsaved) => return window.quit(unsaved, reply),
+        Asked::Focus => return window.focus(reply),
+        Asked::AnswerQuestion(choice) => return window.answer_question(choice, reply),
         Asked::Windows => Ok(window.windows()),
         Asked::Commands(filter) => Ok(reads::commands(window, filter.as_deref())),
         Asked::Command(id) => reads::command(window, &id),

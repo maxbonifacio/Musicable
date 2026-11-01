@@ -10,6 +10,8 @@
 //! Callers that speak JSON can't answer the questions the app asks the user,
 //! so they must give the parameters the app would [ask](Param::asked) for.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Number, Value as Json, json};
 
 use crate::{Args, Command, CommandError, CommandId, Param, Registry, Type, Value, param_text};
@@ -212,6 +214,103 @@ pub fn type_text(ty: Type) -> String {
     }
 }
 
+/// What earlier commands gave back, by the names they were given, for the
+/// arguments of those after them: see [`link`].
+pub type Results = BTreeMap<String, Json>;
+
+/// `args` with each reference to an earlier command's result replaced by
+/// that result, or by a part of it. A reference is a string that is
+/// nothing but `$` and a name, such as `"$comp"`, which [`Results`] has,
+/// optionally followed by a path into it: `"$notes.0"` is the first item
+/// of a list, and `"$made.device"` a field of an object. References can be
+/// anywhere in the arguments, in lists too. A string that starts with `$$`
+/// stands for itself with one `$` less, and other strings, such as
+/// `"$5 off"`, are left as they are.
+///
+/// Fails, saying why in a phrase, when a reference names no result, or a
+/// part the result doesn't have.
+pub fn link(args: &Map<String, Json>, results: &Results) -> Result<Map<String, Json>, String> {
+    (args.iter())
+        .map(|(name, json)| Ok((name.clone(), link_value(json, results)?)))
+        .collect()
+}
+
+/// The names of the earlier commands' results that `args` refer to, as
+/// [`link`] reads them, each once, in order.
+pub fn references(args: &Map<String, Json>) -> Vec<&str> {
+    fn find<'a>(json: &'a Json, names: &mut Vec<&'a str>) {
+        match json {
+            Json::String(text) => {
+                if let Some((name, _)) = reference(text)
+                    && !names.contains(&name)
+                {
+                    names.push(name);
+                }
+            }
+            Json::Array(items) => items.iter().for_each(|item| find(item, names)),
+            Json::Object(fields) => fields.values().for_each(|field| find(field, names)),
+            _ => {}
+        }
+    }
+    let mut names = Vec::new();
+    args.values().for_each(|json| find(json, &mut names));
+    names
+}
+
+fn link_value(json: &Json, results: &Results) -> Result<Json, String> {
+    Ok(match json {
+        Json::String(text) => match reference(text) {
+            Some((name, path)) => {
+                let Some(mut found) = results.get(name) else {
+                    return Err(match results.is_empty() {
+                        true => format!("${name} names no earlier command's result"),
+                        false => format!(
+                            "${name} names no earlier command's result: those named are {}",
+                            (results.keys().map(|name| format!("${name}")))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    });
+                };
+                for part in path {
+                    let next = match found {
+                        Json::Array(items) => part.parse::<usize>().ok().and_then(|i| items.get(i)),
+                        Json::Object(fields) => fields.get(part),
+                        _ => None,
+                    };
+                    found =
+                        next.ok_or_else(|| format!("{text} isn't in ${name}, which is {found}"))?;
+                }
+                found.clone()
+            }
+            None => match text.strip_prefix("$$") {
+                Some(rest) => Json::String(format!("${rest}")),
+                None => json.clone(),
+            },
+        },
+        Json::Array(items) => Json::Array(
+            (items.iter())
+                .map(|item| link_value(item, results))
+                .collect::<Result<_, _>>()?,
+        ),
+        Json::Object(fields) => Json::Object(link(fields, results)?),
+        other => other.clone(),
+    })
+}
+
+/// The name a reference such as `"$comp"` or `"$notes.0"` refers to, and
+/// the path after it, if `text` is one.
+fn reference(text: &str) -> Option<(&str, Vec<&str>)> {
+    let mut parts = text.strip_prefix('$')?.split('.');
+    let name = parts.next()?;
+    let word = |part: &str| {
+        !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let starts = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+    let path: Vec<&str> = parts.collect();
+    (starts && word(name) && path.iter().all(|part| word(part))).then_some((name, path))
+}
+
 #[cfg(test)]
 mod tests {
     use musicable_model::clip::{ClipId, NoteId};
@@ -366,6 +465,49 @@ mod tests {
                 name: "clips".into(),
                 expected: Type::CLIPS
             })
+        );
+    }
+
+    #[test]
+    fn references_take_what_earlier_commands_gave_back() {
+        let results: Results = [
+            ("comp".to_owned(), json!(7)),
+            ("made".to_owned(), json!({"clips": [3, 4], "name": "Kick"})),
+        ]
+        .into_iter()
+        .collect();
+        let linked = link(
+            &object(json!({
+                "device": "$comp",
+                "clips": ["$made.clips.1", 9],
+                "name": "$made.name",
+                "price": "$5",
+                "money": "$$comp",
+                "nested": {"at": "$made.clips"},
+            })),
+            &results,
+        );
+        assert_eq!(
+            linked,
+            Ok(object(json!({
+                "device": 7,
+                "clips": [4, 9],
+                "name": "Kick",
+                "price": "$5",
+                "money": "$comp",
+                "nested": {"at": [3, 4]},
+            })))
+        );
+        let args = object(json!({"clips": ["$made.clips.0", "$comp"], "to": "$made"}));
+        assert_eq!(references(&args), ["made", "comp"]);
+        assert!(references(&object(json!({"name": "$$made", "price": "$5"}))).is_empty());
+        assert_eq!(
+            link(&object(json!({"device": "$made.clips.2"})), &results),
+            Err("$made.clips.2 isn't in $made, which is [3,4]".to_owned())
+        );
+        assert_eq!(
+            link(&object(json!({"device": "$eq"})), &Results::new()),
+            Err("$eq names no earlier command's result".to_owned())
         );
     }
 

@@ -51,15 +51,15 @@ agent needn't start over.
 ## The tools
 
 A few tools cover every command, so a new command reaches agents with no
-change to them. The others read what the window shows, but `get_log`, which
-the bridge runs itself.
+change to them. The others read what the window shows, or start and quit it, but
+`get_log`, `launch_app` and `restart_app`, which the bridge runs itself.
 
 | Tool | Takes | Gives back |
 |---|---|---|
 | `list_commands` | `filter`?, text the id or the title holds | Each command's id, title, arguments with their types, whether it applies now if it needs no arguments, and its keys |
 | `describe_command` | `id` | Its arguments as a JSON Schema, saying what each is for, whether it applies now, its keys, and whether it runs alone |
 | `run_command` | `id`, `args`? | Its `result`, such as a new track's id, and `undo`, the name of the step it made, if it made one |
-| `run_commands` | `name`, `commands`: each an `id` and `args`? | Each one's result, in `results`, and `undo`: they're one step, called `name` |
+| `run_commands` | `name`, `commands`: each an `id`, `args`? and `as`? | Each one's result, in `results`, and `undo`: they're one step, called `name`. A command's `args` can use what one before it gave back, by the name it took `as`, such as `"$comp"`: see [One step for several commands](#one-step-for-several-commands) |
 | `get_project` | nothing | The file and whether it's saved, the tempo map, the time signatures, the loop, the metronome and punch switches, the tracks with their mixer settings, devices, clips and takes, and their modulators and routings if they have any, the master, the wires, each from its tap to its device's port at its gain, the locators, and which parameters are automated. A track that takes its input from another track's tap has it as `mixer.set_input` takes it, `from` and `tap`, `after` or `resampling`, with the tap's `name`, and one that feeds nothing but its sends has the output `"sends_only"`. A bypassed device has `"bypassed": true`, and a deactivated one `"active": false`. A routing has the names the modulation commands take: `modulator`, `output`, `param`, `amount`, `curve`, `steps` if it's stepped, `scale` if it has one, `lag`, `"bypassed": true` if it is, and `"plays": false` while its parameter is out of its modulator's reach |
 | `get_clip` | `clip` | Where it is, and its notes with their expression and its controllers' curves, in the clip's own time, or its audio file, with its warp (its markers, mode, transpose, detune, Slice's settings, Spectral's Formants, High quality and Envelope, and Granular's Follow pitch, Grain Size and Fluctuation) and its curves, by parameter, if it has them. An audio clip's warp has its `transients`, each its `frame`, `strength` and whether you `added` it, once analysis found them, or null |
 | `get_device` | `device`, `filter`?, text the parameters' names hold | What it is and where, whether it's bypassed or deactivated, each parameter's number, name, value, range, default and unit (with a `filter`, only those whose names hold it, in any case), and its ports, a Compressor's or a Gate's Sidechain or a plugin's side inputs, by the plugin's ids and names for them, with the wires into each. A plugin's says whether it's `loaded`, the `problem` if it didn't load, whether it `has_window` and whether that's `window_open`, and its `readouts`: what its read-only parameters say now, such as Test Load's Position, which the project doesn't keep |
@@ -67,8 +67,8 @@ the bridge runs itself.
 | `get_automation` | `param`, such as `track 3 volume`, `wire 1` or `modulator 6 param 2` | Its points, in beats and the parameter's units, and whether it's overridden |
 | `get_editor` | nothing | What's selected, the selected track, which panel has the focus, the start marker, the grid, what's in sight, the piano roll's clip and selected notes, the Sample Editor's clip, selected warp markers and the parameter its lane shows, and the devices selected in the devices panel, of the selected track's, in the order they play; the piano roll's and the Sample Editor's `in_sight`, and the Sample Editor's `time` selection; which panel the clip editor shows, `clip_editor`; the `track_heights` you set, the tracks showing their `take_lanes`, the `automation_lanes` shown, by track, and what's on the `clipboards`: `clips` (how many and how long), `notes` and `devices`, or null |
 | `get_history` | nothing | Each step's name, oldest first, how many are done, and what Undo and Redo would change |
-| `get_performance` | nothing | What the project costs the CPU, as the Performance panel lists it, busiest first: each device's share of one core over the last second, `average`, whether it `renders` `ahead` of the device or `live`, and while live its longest block as a share of the buffer, `longest`, by its `device` id, `name` and `chain`, and the same for each channel's `clips`, `modulators` and `mixer`, and the `metronome`, in `rows`; the project's `total`; the transport bar's figures: whether an audio device is `playing`, the `audio` it plays, the audio thread's `load`, and the `dropouts`; and while Render Ahead is on, `render_ahead`: its `setting`, whether the project renders `ahead` now, how far ahead it was lately and aims to be, `lead_ms` and `target_ms`, the share of a core of what rendered ahead, `load`, and the blocks the audio thread had to render itself since the device started, `short_blocks`. Without an audio device, there are no rows, and `render_ahead` is null, as it is for the quarter of a second after the device starts or Render Ahead changes |
-| `get_status` | nothing | What plays: whether the transport is `playing`, from the moment Play is pressed, and `recording`, the `playhead` in beats and `playhead_seconds`, and the `takes` being recorded, each a `track` with the `start` and `end` it covers so far; the `question` the window waits for you to answer, such as whether to save your changes, or null; and the work that lands later, with nothing to wait on: the audio files being analysed for warping, `analysing`, by their names in the project, the `rendering_segments` left, whether a graph is `compiling`, the `export` under way, with its `stage` (`preparing`, `rendering`, `normalising`), `pass` of `passes`, the share `done` and while it renders its `speed`, times real time, `scanning_plugins`, and the `library`'s folders `scanning`, with the files `found`, and `reading`, with the files `left`, and whether it's `finding_presets`. `idle` is true once none of that work is under way; `wait_for` waits until it is. `revision` goes up with every change to the project, undone and redone ones too, and when another project opens |
+| `get_performance` | nothing | What the project costs the CPU, as the Performance panel lists it, busiest first: each device's share of one core over the last second, `average`, whether it `renders` `ahead` of the device or `live`, and while live its longest block as a share of the buffer, `longest`, by its `device` id, `name` and `chain`, and the same for each channel's `clips`, `modulators` and `mixer`, and the `metronome`, in `rows`; the project's `total`; the transport bar's figures: whether an audio device is `playing`, the `audio` it plays, the audio thread's `load`, and the `dropouts`; and while Render Ahead is on, `render_ahead`: its `setting`, whether the project renders `ahead` now, how far ahead it was lately and aims to be, `lead_ms` and `target_ms`, the share of a core of what rendered ahead, `load`, and the blocks the audio thread had to render itself since the device started, `short_blocks`. Without an audio device, there are no rows, and `render_ahead` is null, as it is for the quarter of a second after the device starts or Render Ahead changes; the window's `frames` over the last 5 seconds: their `count`, the `seconds` they cover, and their `average_ms` and `longest_ms`; and the `memory` Musicable uses, `resident_mb`, and on Windows `private_mb`, which grows as a leak does |
+| `get_status` | nothing | What plays: whether the transport is `playing`, from the moment Play is pressed, and `recording`, the `playhead` in beats and `playhead_seconds`, and the `takes` being recorded, each a `track` with the `start` and `end` it covers so far; the `question` the window waits for you to answer, such as whether to save your changes, or null; and the work that lands later, with nothing to wait on: the audio files being analysed for warping, `analysing`, by their names in the project, the `rendering_segments` left, whether a graph is `compiling`, the `export` under way, with its `stage` (`preparing`, `rendering`, `normalising`), `pass` of `passes`, the share `done` and while it renders its `speed`, times real time, `scanning_plugins`, and the `library`'s folders `scanning`, with the files `found`, and `reading`, with the files `left`, and whether it's `finding_presets`. `idle` is true once none of that work is under way; `wait_for` waits until it is. `revision` goes up with every change to the project, undone and redone ones too, and when another project opens. `headless` says whether it runs [with no window](#headless), and `process` is its process id |
 | `wait_for` | `until`, with `timeout` and `since` | Waits until what lands later has, reading the status every tenth of a second, then answers with `met`, the `waited_seconds` and the `status` as `get_status` reads it. `until` is `idle`; `stopped`, the transport not playing; `recorded`, nothing recording and the takes in the project; `analysed`, no audio file being analysed; `scanned`, no plugin scan and the library neither scanning, reading nor finding presets; `rendered`, no segments left to render and no graph compiling; `changed`, the project's `revision` other than `since`, or than when the wait began, as when you edit it; or `answered`, no `question` waiting for you. The status has to say so twice in a row, so work the window starts on the frame after a command, such as analysing the file it brought in, has started. `timeout` is in seconds, 60 unless it says, up to 600; when it runs out, `met` is false. With 0, it reads the status once. Cancelling the call stops the wait |
 | `get_messages` | `clear`? | The status bar's `messages`, oldest first: errors and notices, such as a missing file or plugin, a device that failed, or an export's problems. With `clear`, it clears them too, as **Dismiss** does, so the next call gives only those that came after |
 | `get_settings` | nothing | The `settings` as `settings.toml` has them, by section, with the profile in use's `behaviour`, `appearance` and `workspaces`; the keys `options.set` can change, in `changeable`; the `profile` in use; the settings `file`; what's `playing`: its `device` id and `name`, `driver_type` (`system` or `asio`), `api`, `sample_rate`, `buffer`, `latency_ms` and `inputs`, or null; and the `recording_offset_frames` of the device playing |
@@ -82,6 +82,11 @@ the bridge runs itself.
 | `get_levels` | nothing | The meters, as the mixer shows them: the `master`'s and each of the `tracks`', by `track` id and `name`: `peak` and `rms`, left and right, and the `highest` sample since the peaks were cleared, in dBFS to a hundredth, null for silence; `playing`, whether an audio device plays, and `moving`, whether a meter shows a signal; each modulator's outputs, in `modulators`, by `modulator`, `output` and `value`; and how far routings move each parameter they move, in `moved`, by `param` and `by`. The meters move only while an audio device plays, and fall back for a few seconds after the music stops |
 | `get_command_log` | `since`?, `last`? | The commands run this session, oldest first: yours, from the menus, keys and panels, and agents'. Each entry has its number `n`, its `time` in UTC, `by`, `user` or the agent's name, and the `command` and its `args`, or for `run_commands` the `batch`'s name and its `commands`, and the `error` if it failed. It gives the last 100 unless `last` says, up to 10,000, and with `since`, only the entries after that number. `count` says how many commands have run, and `file` is the session's log in the `command logs` folder of the config folder, one entry a line, which keeps the latest 20 sessions |
 | `list_audio_devices` | nothing | Lists the devices again: the `driver_types` this build plays through, the `outputs`, each with its `id`, `name`, `driver_type`, whether it's the system's `default` and whether it's `playing`, for `options.set_audio_device`, and the audio `inputs`, with their `channels`, and `midi_inputs`, by the ids `mixer.set_input` takes |
+| `quit_app` | `unsaved`? (`save` or `discard`) | Quits Musicable, as File > Quit does, so a new build can replace it, answering with `quitting` and whether it `saved` before it closes. Without `unsaved`, the window asks you about unsaved changes, and the call answers once you have; headless Musicable has no one to ask, so the call fails |
+| `focus_app` | nothing | Brings the main window to the front, over other apps' windows, restoring it if it's minimized, so pictures and the mouse and keys see it. Headless, it fails |
+| `answer_question` | `answer` (`save`, `discard` or `cancel`) | Answers the window's `question`, as `get_status` gives it, such as whether to save changes before a project opens, and says whether it `went_ahead`. Only headless: anywhere else, only you answer |
+| `launch_app` | `build`?, `project`?, `headless`?, `audio`?, `wait`? (30, at most 300) | Starts Musicable, the program at `build`, a full path, or the one running the bridge, with the `project` if given, as the app or `headless`, with the config folder the bridge has, and answers once it answers agents, with its `process` id, the `build`, whether it's `headless`, the `project` and the `seconds` it took. The app's window comes to the front. Headless, `audio` false plays through no device. It fails while a Musicable answers already, and if the one it started stops, or doesn't answer within `wait`, as the app doesn't while you keep agents out |
+| `restart_app` | as `launch_app`, and `unsaved`? | Quits the Musicable running, as `quit_app` does, waits for it to close, then starts one as `launch_app` does, with the project it had open unless `project` says another. Between the two, a new build can replace the program |
 | `get_log` | `lines`? (100, at most 1000), `level`? (`error`, `warn` or `info`), `since`?, a time in UTC such as `2026-10-31T05:00:00Z` | The latest `entries` of `musicable.log` and `musicable.old.log` in the config folder, oldest first, those as bad as `level` or worse, logged at `since` or after: each its `time`, `level`, `target`, such as `wgpu_hal` or `panic`, and `message`, a panic's over several lines with its calls; the `file`; and whether `earlier` entries were left out. The bridge reads the file itself, so it works while Musicable is closed, and after it stopped |
 
 What the tools give back is JSON, as text. A call that fails, such as one
@@ -101,7 +106,7 @@ window has between frames, so they never see a change half made.
 ### What agents can run
 
 Every command, but those that only show a window or ask you something,
-which an agent can't see or answer, and Quit: the Settings window's pages,
+which an agent can't see or answer, and Quit, which `quit_app` does instead: the Settings window's pages,
 the command palette, Search in Browser, Rename, Load Sample, and Save As,
 Rename and Delete of workspaces (`Command::agents`). `musicable api` lists
 those they can run.
@@ -228,6 +233,133 @@ changes anything, and the error says which one failed and why
 [commands.md](commands.md#arguments-and-results)). Undo, Redo, Go to Step
 and the file commands run alone, never among others.
 
+A command can use what one before it in the batch gave back. Its entry
+names its result with `as`, and the arguments of those after it use the
+name with a `$`: a string that's exactly `"$comp"` stands for the whole
+result, and `"$comp.tracks.0"` for a part of it, by fields and items.
+`"$$"` at the start is a plain `$`. Each command's arguments are filled in
+once those before it have run, then checked as usual, so a command that
+added a device and one that bypasses it by its id are one step:
+
+```json
+{"name": "Compress the bass", "commands": [
+  {"id": "device.add", "args": {"kind": "compressor", "track": 1}, "as": "comp"},
+  {"id": "device.set_bypass", "args": {"devices": ["$comp"], "bypassed": true}}
+]}
+```
+
+A name used before it's given, or given twice, is refused before anything
+runs (`musicable_commands::json::link`).
+
+## Without you
+
+These are for the PC checks an agent runs on its own: a Musicable with no
+window, tools that start, quit and restart it, scenarios that say what to
+expect, and a watcher for long runs.
+
+### Headless
+
+`musicable --headless [--no-audio] [PROJECT]` runs the app with no window,
+until an agent quits it with `quit_app`. It's the same app, with the same
+session, commands, engine and tools, its frames run as the window's are,
+drawn nowhere. It lets agents in whatever the settings say, and saves the
+settings as they were, keeping your Agents switches. It plays through the
+audio device the settings name, or with `--no-audio` through none, so
+exports still render on a computer with none. Nobody sees it, so:
+
+- it never saves the workspace;
+- `get_screenshot` of the main window and `focus_app` fail, and
+  `get_ui_tree` reads what's in it instead;
+- the window's questions, such as whether to save changes before
+  `file.open`, wait for `answer_question`, and `quit_app` needs `unsaved`.
+
+It takes the config folder as the app does, so to run beside the app, give
+it one of its own with `MUSICABLE_CONFIG_DIR`; a second Musicable on the
+same folder is refused at once. It prints its process id and its pipe.
+
+### Starting, quitting and restarting
+
+`launch_app`, `quit_app` and `restart_app` let an agent put a new build in
+place and carry on. The bridge starts Musicable as a process of its own,
+so it lives on after the bridge, and waits until it answers on the pipe;
+`restart_app` reopens the project that was open. On Windows, a program
+that's running can't be written over, and that includes the bridge's own:
+point the agent's client at a copy of `musicable.exe`, kept apart from
+`target`, and `launch_app`'s `build` at `target\release\musicable.exe`, so
+Cargo can relink it while the bridge runs.
+
+### Scenarios: `musicable check`
+
+`musicable check FILE...` runs scenarios, each in a headless Musicable of
+its own, with a config folder of its own that has your plugin scan in it,
+and says which held: `ok` or `FAIL` with why, then how many held, and
+exits with 1 if any didn't. Every step goes through the tools, over the
+pipe, as an agent's calls do. A scenario is a TOML file:
+
+```toml
+about = "A compressor on the bass, bypassed by the id it came back with."
+covers = ["devices.bypass"]       # the manual's promises it holds
+project = "kick-and-bass"         # a fixture, or a project file from here
+
+[[run]]
+command = "device.add"
+args = { kind = "compressor", track = 1 }
+as = "comp"                       # what it gave back, as $comp
+
+[[run]]
+command = "device.set_bypass"
+args = { devices = ["$comp"], bypassed = true }
+
+[[run]]
+command = "device.add"
+args = { kind = "theremin", track = 1 }
+fails = "theremin"                # it must fail, with this in the error
+
+[[expect]]                        # get_project unless tool says
+tool = "get_device"
+args = { device = "$comp" }
+at = "bypassed"                   # fields and items, as tracks.1.muted
+equals = true                     # or near = 0.5, within = 0.01
+
+[[expect]]
+render = { from = 0, to = 8 }     # beats, or the song without it
+golden = "goldens/bass.flac"
+compare = "null"                  # or "measures"
+```
+
+The steps run in order, then `wait_for` waits for what they started to
+land, then each expectation is checked. A render exports the mix, 24-bit
+(32-bit float to WAV), with no dither, normalizing or tail, and compares
+it with its golden: `null`, every sample of the difference below
+`null_below_dbfs` (-120 unless it says), or `measures`, as `audio_compare`
+measures them, loudness within `loudness_within_lu` (0.05) and every third
+octave within `bands_within_db` (0.1). `--bless` writes a golden that's
+missing or differs, to listen to before it's committed. `--app` plays the
+scenario into the Musicable that's open, and `--step` with it waits for
+Enter before each step, so you can watch.
+
+The fixtures are made in code (`crates/app/src/fixtures.rs`), the same on
+every computer: `empty`; `demo`, the Tier 0 demo; and `kick-and-bass`,
+two bars at 120 BPM of a short sine kick on every beat and a held saw bass,
+each a MIDI track playing the built-in Synth. The scenarios are in
+[`acceptance/scenarios`](../acceptance/scenarios).
+
+### Soaks: `musicable soak`
+
+`musicable soak [--minutes M | --hours H] [--every S] [--out FILE]`
+watches the Musicable that's open for a long run: every few seconds it
+reads `get_performance` and `get_status`, and the log's warnings and
+errors since the last read, and writes them as a JSON line to FILE, so a
+run cut short still says what happened. When Musicable stops answering,
+as when it crashes, it says so, tries to reach it again for a minute, and
+reads the log's last words. Every minute it prints how it's going, and at
+the end the audio load, dropouts, the longest frame, memory at the start,
+end and most, and the log's warnings, errors and panics; it exits with 1
+if Musicable stopped answering or logged an error. On Windows,
+`--sleep-displays MINUTES` puts the displays to sleep that often and
+`--asleep SECONDS` wakes them after so long (60), with a pixel of mouse
+movement, as the crash when the displays woke needed.
+
 ## The audio tools
 
 `musicable mcp` also has a tool for each audio command, which works on
@@ -339,7 +471,19 @@ read it to find their way around without a running Musicable.
   starts, so the status bar shows the agent at once, and again at a call
   after Musicable has closed or stopped letting agents in. The audio
   tools' calls, and `get_log`'s, it runs itself
-  (`crates/app/src/bridge_tools.rs`).
+  (`crates/app/src/bridge_tools.rs`), and starts and quits Musicable for
+  `launch_app` and `restart_app` (`crates/mcp/src/lifecycle.rs`).
+- **The client** (`crates/mcp/src/client.rs`) is what `musicable check`
+  and `musicable soak` speak to Musicable with: an MCP client on the pipe,
+  calling one tool at a time.
+- **Headless** (`crates/app/src/app/headless.rs`) runs `App` as eframe
+  would, frame by frame with `egui::Context::run_ui`, with a frame due
+  when the app asks for a repaint, or each second, and closes as the
+  window would, so the question about unsaved changes can cancel it.
+- **Scenarios** are run by `crates/app/src/check.rs`, and **soaks** by
+  `crates/app/src/soak.rs`. The memory figures come from
+  `GetProcessMemoryInfo` on Windows and `/proc/self/statm` on Linux, and
+  none on macOS yet (`crates/app/src/memory.rs`).
 
 ### Testing
 
@@ -372,14 +516,21 @@ read it to find their way around without a running Musicable.
   a real pipe to a session, and runs the audio tools and reads the log
   with nothing listening, on Windows, macOS and Linux in CI. It runs
   `musicable audio` too, in text and in JSON, and checks its exit codes.
+- [`crates/app/tests/headless.rs`](../crates/app/tests/headless.rs) runs
+  `musicable --headless` with a config folder of its own: its questions
+  and quitting, saving and opening again, a second one refused, the
+  bridge's `launch_app`, `restart_app` and `quit_app`, every scenario in
+  `acceptance/scenarios` through `musicable check`, and a render blessed,
+  then nulling against its golden.
 
 ## Not done yet
 
-- `musicable --headless`, which would let agents in without a window.
+- The Heavy fixture, a project that loads the CPU, for soaks.
+- Golden renders in the repository: the scenarios have none yet.
+- Putting the displays to sleep on macOS and Linux, and memory on macOS.
 - Agents hearing of your changes as they're made, rather than reading the
   project again.
 - Extensions, which will run in WebAssembly, on the same commands.
-- More audio tools: spectra, matching and comparing two files, and
-  warping a file as a clip would, for A/B tests of warping; then pitch,
-  pictures and test signals. And MP3 and AAC files, which io doesn't read
+- More audio tools: warping a file as a clip would, for A/B tests of
+  warping; then pitch and pictures. And MP3 and AAC files, which io doesn't read
   yet.

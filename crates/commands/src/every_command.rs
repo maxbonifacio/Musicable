@@ -2934,6 +2934,89 @@ fn commands_run_as_a_batch_make_one_step_or_none() {
     assert_eq!(s.document.redo_name(), Some("Start a Beat"));
 }
 
+#[test]
+fn commands_in_a_batch_use_what_those_before_them_gave_back() {
+    let mut s = setup();
+    let linked = |id: CommandId, args: serde_json::Value, named: Option<&str>| crate::Linked {
+        id,
+        args: match args {
+            serde_json::Value::Object(args) => args,
+            _ => panic!("arguments are an object"),
+        },
+        named: named.map(str::to_owned),
+    };
+    let batch = [
+        linked(track::NEW_MIDI_TRACK, serde_json::json!({}), Some("bass")),
+        linked(
+            track::RENAME,
+            serde_json::json!({"track": "$bass", "name": "$$5 Bass"}),
+            None,
+        ),
+        linked(
+            mixer::SET_MUTE,
+            serde_json::json!({"track": "$bass", "muted": true}),
+            None,
+        ),
+    ];
+    let values = s.run_linked("Add a Bass", &batch).unwrap();
+    let Value::Track(bass) = values[0] else {
+        panic!("a new track's id, not {:?}", values[0]);
+    };
+    let track = project(&s).track(bass).expect("the new track");
+    assert_eq!((track.name.as_str(), track.muted), ("$5 Bass", true));
+    assert_eq!(s.document.steps().len(), 1);
+    assert_eq!(s.document.undo_name(), Some("Add a Bass"));
+
+    // A name no command before it was given, or a part its result doesn't
+    // have, fails the batch, which changes nothing.
+    let before = project(&s).clone();
+    let unnamed = [
+        linked(track::NEW_AUDIO_TRACK, serde_json::json!({}), Some("drums")),
+        linked(
+            track::RENAME,
+            serde_json::json!({"track": "$kick", "name": "Kick"}),
+            None,
+        ),
+    ];
+    let error = s.run_linked("Kick", &unnamed).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "command 2 failed: $kick names no earlier command's result: those named are $drums"
+    );
+    let part = [
+        linked(track::NEW_AUDIO_TRACK, serde_json::json!({}), Some("drums")),
+        linked(
+            track::RENAME,
+            serde_json::json!({"track": "$drums.id", "name": "Kick"}),
+            None,
+        ),
+    ];
+    let error = s.run_linked("Kick", &part).unwrap_err();
+    assert!(
+        error.to_string().contains("$drums.id isn't in $drums"),
+        "{error}"
+    );
+    // Arguments are read as agents' are, once linked.
+    let wrong = [
+        linked(track::NEW_AUDIO_TRACK, serde_json::json!({}), Some("drums")),
+        linked(
+            mixer::SET_MUTE,
+            serde_json::json!({"track": "$drums", "muted": "$drums"}),
+            None,
+        ),
+    ];
+    let error = s.run_linked("Mute", &wrong).unwrap_err();
+    assert_eq!(
+        error.error,
+        CommandError::WrongType {
+            name: "muted".into(),
+            expected: crate::Type::Bool
+        }
+    );
+    assert_eq!(masked(project(&s)), masked(&before));
+    assert_eq!(s.document.steps().len(), 1);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         failure_persistence: None,
