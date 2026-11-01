@@ -363,7 +363,8 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                 }
             }
             // As the app would, keep the zoom and scrolling the
-            // arrangement and the piano roll ask for, and give the focus to
+            // arrangement and the piano roll ask for, and the sizes the
+            // arrangement draws its lanes at, and give the focus to
             // the panel clicked in, as the tests look for the editor's
             // state, not these.
             actions.retain(|action| match action {
@@ -389,6 +390,15 @@ fn build(builder: HarnessBuilder<State>, project: Project) -> Harness<'static, S
                     viewport.zoom = number("zoom");
                     viewport.top = number("top") as f32;
                     viewport.width = number("width") as f32;
+                    false
+                }
+                Action::RunWith(id, args) if *id == view::SET_LANE_SIZES => {
+                    let number = |name| args.get::<f64>(name).unwrap_or_default() as f32;
+                    let lanes = &mut state.editor.lanes;
+                    lanes.height = number("height");
+                    lanes.track = number("track");
+                    lanes.take = number("take");
+                    lanes.automation = number("automation");
                     false
                 }
                 _ => true,

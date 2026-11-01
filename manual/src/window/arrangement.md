@@ -83,12 +83,14 @@ changes it ([The mouse](../customising/mouse.md)):
 | A lane | Click | Selects the track, or the master, and puts the start marker there |
 | | Drag | Selects the time dragged over, on the tracks dragged over, and on the master's lane too if it's dragged over |
 | The ruler | Click | Puts the start marker and the playhead there |
+| | Double-click | Zooms to the selection, or with nothing selected, to the whole song |
 | | Drag | Zooms up and down, and scrolls sideways |
 | The ruler's strip | Drag | Draws a new loop region, and turns looping on |
 | The loop brace | Click; drag; drag an end | Turns looping on or off; moves the loop; moves its start or end |
 | A locator | Click; drag; double-click | Jumps there; moves it; renames it |
 | A track's header or strip, where the mixer strip has no control | Click; Ctrl- or Shift-click; double-click | Selects the track; adds it or takes it out; renames it. The master's header and strip select the master |
-| A track's edge: its header's bottom edge, or the master's top edge | Drag | Makes the track taller or shorter |
+| A track's edge: its header's bottom edge, or the master's top edge | Drag; Alt-drag | Makes the track taller or shorter; makes every track the same height |
+| | Double-click | Puts the track back to its usual height |
 | A take's lane | Drag; Alt-drag; click | Copies the stretch dragged over to the track, on the grid; off it; copies the clip clicked |
 | A take's name, in its header | Double-click | Renames the take |
 | An automation lane | Click; double-click | Selects the track, or the master, and puts the start marker there; adds a point there |
@@ -98,6 +100,7 @@ changes it ([The mouse](../customising/mouse.md)):
 | An automation lane's header | Click | Selects the track, or the master |
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
+| | Alt-wheel | Makes the track under the pointer taller or shorter, or the selected tracks, if it's one of them |
 
 Modifiers count while a drag goes, not only as it starts. **Alt** keeps
 any drag that snaps to the grid off it while it's held, from whenever it's
@@ -110,6 +113,14 @@ them again; held with Alt, it copies them off the grid. **Shift** pressed
 part of the way through dragging a clip's edge stretches it rather than
 trimming it, from the edge's place as the drag started, and letting go of
 it trims it again. Escape cancels a drag.
+
+A drag held at the lanes' edge scrolls them, faster the further past the
+edge it goes, once it has gone that way from where it started, so a drag
+that starts by an edge doesn't scroll at once. Drags along the song, such
+as trimming, a time selection or drawing automation, scroll sideways;
+moving clips and what's dragged from the browser or the devices panel
+scroll up and down too. What's dragged keeps its place in the song while
+the lanes scroll under it.
 
 ## Right-click menus
 
@@ -131,13 +142,35 @@ Each shows its keys, and works on what the menu was opened on: the clip, the
 track, the parameter, or the place. Rename, from a menu, a key or a
 double-click, opens a box for the new name.
 
-## Audio files and following the playhead
+## Getting around
+
+These keys act on the arrangement while it has the focus, and the first
+four on the piano roll and the Sample Editor while they have it:
+
+| Keys | What they do |
+|---|---|
+| W | Fit Song Width: shows the whole song across, from its start to the end of its last clip, locator, automation point or loop, or 16 bars of an empty song. In the piano roll and the Sample Editor, the whole clip |
+| X, Shift+X | Zoom Back and Zoom Forward: back to the view before the last change of zoom or scrolling, and forward again |
+| Ctrl+Shift+F | Follow, on or off |
+| Home, End | Go to Start and Go to End of the song, scrolling there if it's out of sight |
+| H | Fit Track Heights: makes the tracks share the arrangement's height, as far as they can. If they can't all fit at the smallest size, it says how many are in sight |
+| Alt+Equals, Alt+Minus | Make Tracks Taller and Shorter: the selected tracks, or the selected track, a size at a time, through 24, 60, 120 and 200 points |
+
+Each view keeps its own history of where it's been, up to 32 steps back. A
+gesture is one step: a burst of the wheel, a drag of the ruler, or a
+command such as W or Zoom to Selection. Pressing W twice, or H twice,
+does nothing the second time, and X after W goes back to where you were.
+Scroll to Playhead and Reset Track Height are in the View and Track menus,
+and in the command palette.
+
+While the transport plays, **Follow** turns the page when the playhead
+leaves the view. Scrolling, zooming or jumping away while it plays pauses
+it in that view until the playhead plays into sight again, or Play starts
+again; a drag or the wheel holds it while they go on.
+
+## Audio files
 
 Audio files dropped on the window become clips, one after another, where
 they're dropped: on that track if it's an audio track, or else on the
 selected one or a new one ([Projects and
 files](../using/projects.md#audio-files)).
-
-While the transport plays, **Follow** (Ctrl+Shift+F) turns the page when the
-playhead leaves the view. Scrolling away pauses it until the playhead is in
-sight again.

@@ -653,6 +653,13 @@ fn the_wheel_scrolls_and_zooms_the_keys_and_the_time() {
     assert!(roll.key_height > 12.0, "{}", roll.key_height);
     let after = at(&harness, 6.0, 64);
     assert!((after.y - over.y).abs() < roll.key_height / 2.0);
+    // Alt and the wheel, which make tracks taller in the arrangement, make
+    // the rows taller over the notes too.
+    let before = harness.state().editor().piano_roll.key_height;
+    let over = at(&harness, 6.0, 64);
+    wheel(&mut harness, over, vec2(0.0, 100.0), Modifiers::ALT);
+    let roll = &harness.state().editor().piano_roll;
+    assert!(roll.key_height > before, "{}", roll.key_height);
     assert!(harness.state().errors.is_empty());
 }
 

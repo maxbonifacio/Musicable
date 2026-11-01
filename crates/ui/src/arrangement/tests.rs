@@ -2182,3 +2182,110 @@ fn the_masters_lanes_scroll_on_their_own_when_they_dont_fit() {
     assert!(drums.bottom() <= top, "{drums:?}");
     assert!(harness.state().errors.is_empty());
 }
+
+#[test]
+fn alt_wheel_makes_the_track_under_the_pointer_taller() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let at = in_lane(&harness, "Keys", 4.0);
+    harness.hover_at(at);
+    harness.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, 100.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers: Modifiers::ALT,
+    });
+    harness.run();
+    let editor = harness.state().editor();
+    let height = editor.height_of(Chain::Track(ids.keys));
+    assert!(height > Theme::default().track_height + 10.0, "{height}");
+    assert_eq!(
+        editor.height_of(Chain::Track(ids.drums)),
+        Theme::default().track_height
+    );
+    // The zoom and scrolling stay as they were.
+    assert_eq!(editor.viewport.start, Beats::ZERO);
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn a_tracks_edge_sizes_every_track_with_alt_and_double_clicked_resets() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let edge = |harness: &Harness<'_, State>| {
+        let header = harness.get_by_label("Track Drums").rect();
+        pos2(header.center().x, header.bottom() - 1.0)
+    };
+    let from = edge(&harness);
+    drag(&mut harness, from, from + vec2(0.0, 30.0), Modifiers::ALT);
+    let tall = Theme::default().track_height + 30.0;
+    for track in [ids.drums, ids.keys, ids.bass] {
+        assert_eq!(
+            harness.state().editor().height_of(Chain::Track(track)),
+            tall
+        );
+    }
+    pause(&mut harness);
+    let at = edge(&harness);
+    double_click(&mut harness, at);
+    let editor = harness.state().editor();
+    assert_eq!(
+        editor.height_of(Chain::Track(ids.drums)),
+        Theme::default().track_height
+    );
+    assert_eq!(editor.height_of(Chain::Track(ids.keys)), tall);
+}
+
+#[test]
+fn a_double_click_on_the_ruler_fits_the_selection_or_the_song() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let ruler = harness.get_by_label("Ruler").rect();
+    double_click(&mut harness, ruler.center());
+    let visible = harness.state().editor().viewport.visible();
+    // The song ends with the outro, at beat 1008.
+    assert!(visible.start == Beats::ZERO && Beats::new(1008) <= visible.end);
+    assert!(visible.end < Beats::new(1200), "{visible:?}");
+    // With clips selected, it fits them.
+    let clip = ids.chords;
+    let args = Args::new().with("clips", vec![clip]);
+    harness
+        .state_mut()
+        .carry_out(&Action::RunWith(edit::SELECT_CLIPS, args));
+    pause(&mut harness);
+    double_click(&mut harness, ruler.center());
+    let visible = harness.state().editor().viewport.visible();
+    assert!(visible.start < Beats::new(8) && Beats::new(16) < visible.end);
+    assert!(visible.len() < Beats::new(20), "{visible:?}");
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn a_clip_held_at_the_edge_scrolls_the_lanes_and_keeps_its_place() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let from = title(&harness, "Kick", 30.0);
+    let to = pos2(lanes.right() - 2.0, from.y);
+    harness.hover_at(from);
+    harness.run();
+    press(&mut harness, from, true, Modifiers::NONE);
+    for step in 1..=4 {
+        harness.hover_at(from + (to - from) * step as f32 / 4.0);
+        harness.step();
+    }
+    for _ in 0..30 {
+        harness.step();
+    }
+    let start = harness.state().editor().viewport.start;
+    assert!(start > Beats::new(4), "{start:?}");
+    // Let go where the pointer is: the clip goes as far along the song as
+    // the pointer went, counting what scrolled under it.
+    let zoom = harness.state().editor().viewport.zoom;
+    let along = Beats::from_f64(f64::from(to.x - from.x) / zoom);
+    press(&mut harness, to, false, Modifiers::NONE);
+    let moved = clip(&harness, ids.kick).1.start;
+    assert!(moved > along + Beats::new(4), "{moved:?} {along:?}");
+    assert!(harness.state().errors.is_empty());
+}

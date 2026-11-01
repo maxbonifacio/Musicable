@@ -19,6 +19,7 @@ use musicable_model::{Chain, Device, DeviceId, Project, TrackId};
 use serde::{Deserialize, Serialize};
 
 use crate::auto_warp::Pending;
+use crate::navigation::{Lanes, Navigation};
 use crate::panel;
 
 /// The arrangement's and the piano roll's editing state.
@@ -41,6 +42,10 @@ pub struct Editor {
     /// The height of each track in the arrangement, and of the master's
     /// row, in points, where it isn't the theme's.
     pub track_heights: BTreeMap<Chain, f32>,
+    /// The sizes the arrangement drew its lanes at last.
+    pub lanes: Lanes,
+    /// Each timeline panel's history of views, and its Follow state.
+    pub navigation: Navigation,
     pub behaviour: Behaviour,
     /// What the app has read about the audio files that clips play, by the
     /// path the clips give.
@@ -86,6 +91,8 @@ impl Default for Editor {
             viewport: Viewport::default(),
             follow: true,
             track_heights: BTreeMap::new(),
+            lanes: Lanes::default(),
+            navigation: Navigation::default(),
             behaviour: Behaviour::default(),
             files: BTreeMap::new(),
             analyses: BTreeMap::new(),
@@ -148,6 +155,7 @@ impl Editor {
             roll.clip = Some(clip.id);
             roll.notes.clear();
             roll.show(clip, &midi.notes);
+            self.navigation.piano_roll.clear();
         }
         self.clip_editor = panel::PIANO_ROLL;
         true
@@ -175,6 +183,7 @@ impl Editor {
             shown.markers.clear();
             shown.time = None;
             shown.viewport.show(clip.range());
+            self.navigation.sample_editor.clear();
         }
         self.clip_editor = panel::SAMPLE_EDITOR;
         true
@@ -273,6 +282,7 @@ impl Editor {
             None => {
                 roll.clip = None;
                 roll.notes.clear();
+                self.navigation.piano_roll.clear();
                 if self.focus == Focus::PIANO_ROLL {
                     self.focus = Focus::ARRANGEMENT;
                 }
@@ -297,6 +307,7 @@ impl Editor {
                 shown.clip = None;
                 shown.markers.clear();
                 shown.time = None;
+                self.navigation.sample_editor.clear();
                 if self.focus == Focus::SAMPLE_EDITOR {
                     self.focus = Focus::ARRANGEMENT;
                 }
@@ -906,6 +917,34 @@ pub struct Behaviour {
     /// points, as Live's have since 10.0.1. Without it, they start without
     /// automation.
     pub copies_take_automation: bool,
+    /// The sizes tracks can be given at once, in points: Small, Medium,
+    /// Large and Huge. Make Tracks Taller and Make Tracks Shorter step
+    /// through them.
+    pub small_tracks: u16,
+    pub medium_tracks: u16,
+    pub large_tracks: u16,
+    pub huge_tracks: u16,
+    /// Whether dragging a track's edge snaps its height to those sizes, as
+    /// Cubase's Snap Track Heights does.
+    pub snap_track_heights: bool,
+}
+
+impl Behaviour {
+    /// The sizes tracks can be given at once, smallest first, kept within
+    /// the heights tracks can have.
+    pub fn track_sizes(&self) -> [f32; 4] {
+        let mut sizes = [
+            self.small_tracks,
+            self.medium_tracks,
+            self.large_tracks,
+            self.huge_tracks,
+        ]
+        .map(|size| {
+            f32::from(size).clamp(crate::view::MIN_TRACK_HEIGHT, crate::view::MAX_TRACK_HEIGHT)
+        });
+        sizes.sort_by(f32::total_cmp);
+        sizes
+    }
 }
 
 impl Default for Behaviour {
@@ -920,6 +959,11 @@ impl Default for Behaviour {
             sync_one_shots: true,
             tempo_from_first_file: true,
             copies_take_automation: true,
+            small_tracks: 24,
+            medium_tracks: 60,
+            large_tracks: 120,
+            huge_tracks: 200,
+            snap_track_heights: false,
         }
     }
 }

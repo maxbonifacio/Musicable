@@ -256,6 +256,18 @@ pub enum MouseAction {
     /// Deactivates the device, taking its latency out too, or activates
     /// it.
     ToggleActive,
+    /// Makes the track under the pointer taller or shorter, or the selected
+    /// tracks, if it's one of them, as the wheel turns. In the piano roll,
+    /// the keys' rows.
+    TrackHeight,
+    /// Makes every track taller or shorter together, as Live's Alt-drag of
+    /// a track's edge does.
+    ResizeAllTracks,
+    /// Gives the track its default height back.
+    ResetHeight,
+    /// Zooms to the selection, or with nothing selected to the whole song,
+    /// as Live's double click on its ruler does.
+    ZoomToFit,
 }
 
 impl Target {
@@ -427,8 +439,9 @@ impl Target {
             (T::Lane | T::Empty, Click | DoubleClick) => &[A::PlaceMarker, A::Locate],
             (T::Lane | T::Empty, Drag) => &[A::SelectTime],
             (T::TrackHeader, Click | DoubleClick) => &[A::Select, A::ToggleSelect, A::Rename],
-            (T::TrackEdge, Drag) => &[A::ResizeTrack],
-            (T::Ruler, Click | DoubleClick) => &[A::Locate],
+            (T::TrackEdge, Drag) => &[A::ResizeTrack, A::ResizeAllTracks],
+            (T::TrackEdge, Click | DoubleClick) => &[A::ResetHeight],
+            (T::Ruler, Click | DoubleClick) => &[A::Locate, A::ZoomToFit],
             (T::Ruler, Drag) => &[A::ScrubZoom],
             (T::Strip, Click | DoubleClick) => &[A::Locate, A::ToggleLoop],
             (T::Strip, Drag) => &[A::DrawLoop, A::ScrubZoom],
@@ -456,7 +469,13 @@ impl Target {
             (T::NoteGrid | T::DrawGrid, Click | DoubleClick) => &[A::PlaceMarker, A::AddNote],
             (T::NoteGrid | T::DrawGrid, Drag) => &[A::SelectArea, A::DrawNotes],
             (T::PianoKey, Click | DoubleClick) => &[A::SelectKey, A::AddKey],
-            (T::PianoKey, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom, A::ZoomKeys],
+            (T::PianoKey, Wheel) => &[
+                A::Scroll,
+                A::ScrollSideways,
+                A::Zoom,
+                A::ZoomKeys,
+                A::TrackHeight,
+            ],
             (T::VelocityLane, Drag) => &[A::Velocity],
             (T::ControllerLane, Click | Drag) => &[A::DrawController, A::EraseController],
             // The Sample Editor's. Its rulers are the ruler's, and its gain
@@ -481,7 +500,7 @@ impl Target {
             (T::BypassButton, Click) => &[A::ToggleBypass, A::ToggleActive],
             (T::DeviceTitle, Click) => &[A::Select, A::ToggleSelect],
             (T::DeviceTitle, Drag) => &[A::Move, A::Copy],
-            (T::Timeline, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom],
+            (T::Timeline, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom, A::TrackHeight],
             _ => &[],
         }
     }
@@ -556,7 +575,7 @@ impl Gesture {
 
 impl MouseAction {
     /// Every action, which mouse map files name.
-    pub const ALL: [MouseAction; 56] = [
+    pub const ALL: [MouseAction; 60] = [
         MouseAction::Select,
         MouseAction::ToggleSelect,
         MouseAction::SelectAndMark,
@@ -613,6 +632,10 @@ impl MouseAction {
         MouseAction::MoveTransient,
         MouseAction::ToggleBypass,
         MouseAction::ToggleActive,
+        MouseAction::TrackHeight,
+        MouseAction::ResizeAllTracks,
+        MouseAction::ResetHeight,
+        MouseAction::ZoomToFit,
     ];
 
     /// Its name in mouse map files.
@@ -674,6 +697,10 @@ impl MouseAction {
             MouseAction::MoveTransient => "move_transient",
             MouseAction::ToggleBypass => "toggle_bypass",
             MouseAction::ToggleActive => "toggle_active",
+            MouseAction::TrackHeight => "track_height",
+            MouseAction::ResizeAllTracks => "resize_all_tracks",
+            MouseAction::ResetHeight => "reset_height",
+            MouseAction::ZoomToFit => "zoom_to_fit",
         }
     }
 
@@ -736,6 +763,10 @@ impl MouseAction {
             MouseAction::MoveTransient => "Move the transient",
             MouseAction::ToggleBypass => "Bypass the device or bring it back",
             MouseAction::ToggleActive => "Deactivate the device or activate it",
+            MouseAction::TrackHeight => "Make the track or the keys taller or shorter",
+            MouseAction::ResizeAllTracks => "Make every track taller or shorter",
+            MouseAction::ResetHeight => "Give the track its default height",
+            MouseAction::ZoomToFit => "Zoom to the selection, or to the whole song",
         }
     }
 
@@ -997,6 +1028,7 @@ impl MouseMap {
         bind(T::Lane, Drag, &[none], A::SelectTime);
         bind(T::Empty, Click, &[none], A::PlaceMarker);
         bind(T::Ruler, Click, &[none], A::Locate);
+        bind(T::Ruler, DoubleClick, &[none], A::ZoomToFit);
         bind(T::Ruler, Drag, &[none], A::ScrubZoom);
         bind(T::Strip, Click, &[none], A::Locate);
         bind(T::Strip, Drag, &[none], A::DrawLoop);
@@ -1010,6 +1042,8 @@ impl MouseMap {
         bind(T::TrackHeader, Click, &toggle, A::ToggleSelect);
         bind(T::TrackHeader, DoubleClick, &[none], A::Rename);
         bind(T::TrackEdge, Drag, &[none], A::ResizeTrack);
+        bind(T::TrackEdge, Drag, &[alt], A::ResizeAllTracks);
+        bind(T::TrackEdge, DoubleClick, &[none], A::ResetHeight);
         bind(T::TakeLane, Click, &[none], A::Comp);
         bind(T::TakeLane, Drag, &[none], A::Comp);
         bind(T::TakeLane, Drag, &[alt], A::CompFree);
@@ -1043,7 +1077,10 @@ impl MouseMap {
         bind(T::DeviceTitle, Drag, &ctrl, A::Copy);
         bind(T::Timeline, Wheel, &[none], A::Scroll);
         bind(T::Timeline, Wheel, &[shift], A::ScrollSideways);
-        bind(T::Timeline, Wheel, &[ctrl[0], ctrl[1], alt], A::Zoom);
+        // Alt and the wheel make tracks taller or shorter, as in Live, and
+        // the piano roll's keys.
+        bind(T::Timeline, Wheel, &ctrl, A::Zoom);
+        bind(T::Timeline, Wheel, &[alt], A::TrackHeight);
         // The MIDI note editor's. Live bypasses the grid with Alt while a
         // drag goes, but Alt-dragging a note changes its velocity, so here
         // Snap to Grid turns the grid off.

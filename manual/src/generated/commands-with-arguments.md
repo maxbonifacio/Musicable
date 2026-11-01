@@ -195,6 +195,7 @@
 | Command | Id |
 |---|---|
 | Set Focus | `view.set_focus` |
+| Set Lane Sizes | `view.set_lane_sizes` |
 | Set Piano Roll Viewport | `view.set_piano_roll_viewport` |
 | Set Sample Editor Viewport | `view.set_sample_editor_viewport` |
 | Set Track Height | `view.set_track_height` |
