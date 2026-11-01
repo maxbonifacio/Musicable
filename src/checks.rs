@@ -112,6 +112,38 @@ pub mod sig {
         vec![l, rr]
     }
 
+    /// Plucked harmonic notes (8 harmonics, 2 ms attack ramp, exponential decays), each note
+    /// ringing on under the next one; returns (signal, onset frames).
+    pub fn plucked_notes(n: usize, seed: u64) -> (Vec<f32>, Vec<u64>) {
+        let mut r = Rng::new(seed);
+        let mut x = vec![0f32; n];
+        let mut on = Vec::new();
+        let mut t = (0.35 * SR as f64) as usize;
+        let notes = [196.0, 261.63, 329.63, 233.08, 392.0, 293.66, 349.23, 220.0];
+        let mut k = 0;
+        while t + SR as usize / 3 < n {
+            let f0 = notes[k % notes.len()] * (1.0 + 0.002 * r.gauss());
+            let ramp = 0.002 * SR as f64;
+            for u in 0..(n - t) {
+                let tt = u as f64 / SR as f64;
+                let env = (u as f64 / ramp).min(1.0);
+                let mut v = 0.0;
+                for h in 1..=8 {
+                    let fh = f0 * h as f64;
+                    if fh > 15000.0 {
+                        break;
+                    }
+                    v += (2.0 * PI * fh * tt + 0.7 * h as f64).sin() / h as f64 * (-tt / (0.6 / (h as f64).sqrt())).exp();
+                }
+                x[t + u] += (0.22 * env * v) as f32;
+            }
+            on.push(t as u64);
+            t += (SR as f64 * (0.42 + 0.11 * ((k * 5) % 3) as f64)) as usize;
+            k += 1;
+        }
+        (x, on)
+    }
+
     pub fn onsets(frames: &[u64]) -> Vec<Onset> {
         frames.iter().map(|&f| Onset::at(f)).collect()
     }
@@ -233,15 +265,19 @@ pub mod metric {
             .collect()
     }
 
-    /// First index in [c-s, c+s] where env >= thr * (max env in that range).
+    /// Attack time: in [c-s, c+s] take the peak, the minimum before it (base), and return the
+    /// first index after the minimum where env >= base + thr * (peak - base). Works on top of
+    /// a decaying previous note.
     pub fn attack_time(env: &[f32], c: usize, s: usize, thr: f32) -> Option<usize> {
         let a = c.saturating_sub(s);
         let b = (c + s).min(env.len());
-        let peak = env[a..b].iter().cloned().fold(0f32, f32::max);
+        let (pi, peak) = (a..b).map(|i| (i, env[i])).fold((a, 0f32), |m, v| if v.1 > m.1 { v } else { m });
         if peak <= 0.0 {
             return None;
         }
-        (a..b).find(|&i| env[i] >= thr * peak)
+        let (bi, base) = (a..=pi).map(|i| (i, env[i])).fold((a, f32::INFINITY), |m, v| if v.1 < m.1 { v } else { m });
+        let th = base + thr * (peak - base);
+        (bi..=pi).find(|&i| env[i] >= th)
     }
 
     /// Number of secondary attacks within 50 ms after the main one: local maxima more than 3 ms
@@ -523,6 +559,53 @@ pub fn check_attacks(v: Variant, ratios: &[f64], with_onsets: bool) -> Vec<Row> 
     rows
 }
 
+/// Harmonic attacks: timing error and pre-echo excess (output envelope over the stretched input
+/// envelope, 5 ms RMS, in the 50..4 ms before each attack).
+pub fn tonal_attack_eval(x: &[f32], y: &[f32], on: &[u64], r: f64) -> (f64, f64) {
+    let ms = SR as usize / 1000;
+    // 6 ms RMS: at least one period of the lowest note, so the envelope doesn't ripple
+    let ex = metric::env_rms(x, 6 * ms);
+    let ey = metric::env_rms(y, 6 * ms);
+    let ex5 = metric::env_rms(x, 5 * ms);
+    let ey5 = metric::env_rms(y, 5 * ms);
+    let mut max_err = 0f64;
+    let mut pre = -200f64;
+    let floor = 1e-3 * ex5.iter().cloned().fold(0f32, f32::max) as f64;
+    for &t in on {
+        let t = t as usize;
+        let ys = (r * t as f64).round() as usize;
+        if ys + 60 * ms >= y.len() || ys < 60 * ms {
+            continue;
+        }
+        let s = (12.0 * r.min(1.0)) as usize * ms;
+        let ti = metric::attack_time(&ex, t, s, 0.5).unwrap() as f64 - t as f64;
+        let to = metric::attack_time(&ey, ys, s, 0.5).map(|v| v as f64 - ys as f64).unwrap_or(1e9);
+        max_err = max_err.max((to - ti).abs() / ms as f64);
+        for d in (4 * ms..50 * ms).step_by(ms / 4) {
+            let yo = ys - d;
+            let xi = ((t as f64) - d as f64 / r).round() as usize;
+            let v = 20.0 * ((ey5[yo] as f64 + floor) / (ex5[xi] as f64 + floor)).log10();
+            pre = pre.max(v);
+        }
+    }
+    (max_err, pre)
+}
+
+pub fn check_tonal_attacks(v: Variant, ratios: &[f64], with_onsets: bool) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let (x, on) = sig::plucked_notes(7 * SR as usize, 4);
+    for &r in ratios {
+        let ons = if with_onsets { sig::onsets(&on) } else { vec![] };
+        let y = run(vec![x.clone(), x.clone()], r, v, ons);
+        let (err, pre) = tonal_attack_eval(&x, &y[0], &on, r);
+        let p = format!("plucked R={r}{}", if with_onsets { "" } else { " no onsets" });
+        // informational: a 6 ms RMS envelope on beating harmonic tones resolves ~+-3 ms only
+        rows.push(row("tonal attack timing max |err|", v, p.clone(), err, "ms", "", None));
+        rows.push(row("tonal pre-echo excess (worst)", v, p, pre, "dB", "", None));
+    }
+    rows
+}
+
 pub fn check_noise(v: Variant, ratios: &[f64]) -> Vec<Row> {
     let mut rows = Vec::new();
     let x = sig::white(12 * SR as usize, 0.1, 11);
@@ -613,6 +696,12 @@ pub fn run_all(material: Option<&Path>, quick: bool) -> Vec<Row> {
         rows.extend(check_attacks(Variant::Full, &[2.0], false));
         rows.extend(check_attacks(Variant::Pv, &[2.0], false));
         rows.extend(check_attacks(Variant::Hptsm, &[2.0], false));
+    }
+    rows.extend(check_tonal_attacks(Variant::Full, &[0.5, 2.0, 4.0], true));
+    if !quick {
+        rows.extend(check_tonal_attacks(Variant::Full, &[2.0, 4.0], false));
+        rows.extend(check_tonal_attacks(Variant::Pv, &[2.0, 4.0], false));
+        rows.extend(check_tonal_attacks(Variant::Hptsm, &[2.0, 4.0], false));
     }
     rows.extend(check_noise(Variant::Full, &[0.5, 2.0, 4.0]));
     if !quick {

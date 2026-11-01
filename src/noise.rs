@@ -6,7 +6,9 @@
 //! samples of c (triangular weights, never across an onset), and draw Y = chol(C) z with
 //! z_i = exp(i theta_i), theta uniform (seeded). This keeps the expected power spectrum,
 //! inter-channel level difference, phase difference and coherence of every bin, while the
-//! random phases give the texture a natural, unfrozen fine structure. Frames are overlap-
+//! random phases give the texture a natural, unfrozen fine structure. Near onsets only
+//! analysis frames that do not straddle the onset are used, and frames synthesised from
+//! post-onset material are gated to start at the onset's output position. Frames are overlap-
 //! added with a Hann window and normalised by sqrt(sum w^2) (incoherent sum).
 
 use crate::fft::Fft;
@@ -52,6 +54,25 @@ fn cholesky(a: &mut [Complex32], n: usize) {
     }
 }
 
+fn add_frame_from(out: &mut [f32], y: i64, frame: &[f32], win: &[f32], start: i64) {
+    let h = (win.len() / 2) as i64;
+    let m = frame.len() as i64;
+    let lo = (-h).max(-y).max(start - y);
+    let hi = h.min(out.len() as i64 - y);
+    for u in lo..hi {
+        out[(y + u) as usize] += frame[u.rem_euclid(m) as usize] * win[(u + h) as usize];
+    }
+}
+
+fn add_weight_from(norm: &mut [f32], y: i64, w: &[f32], start: i64) {
+    let h = (w.len() / 2) as i64;
+    let lo = (-h).max(-y).max(start - y);
+    let hi = h.min(norm.len() as i64 - y);
+    for u in lo..hi {
+        norm[(y + u) as usize] += w[(u + h) as usize];
+    }
+}
+
 pub fn stretch_noise(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[i64], p: &NoiseParams) -> Vec<Vec<f32>> {
     let nch = x.len();
     if (r - 1.0).abs() < 1e-9 {
@@ -89,8 +110,9 @@ pub fn stretch_noise(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[i64], p: &N
     for n in n_lo..=n_hi {
         let y = n * hop;
         let c = y as f64 / r;
-        let jlo = ((c - hw) / g as f64).ceil() as i64;
-        let jhi = ((c + hw) / g as f64).floor() as i64;
+        let ext = hw + l as f64 / 2.0 + g as f64;
+        let jlo = ((c - ext) / g as f64).ceil() as i64;
+        let jhi = ((c + ext) / g as f64).floor() as i64;
         // maintain cache [jlo, jhi]
         if j0 == i64::MIN || jlo < j0 {
             cache.clear();
@@ -112,26 +134,41 @@ pub fn stretch_noise(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[i64], p: &N
             }
             cache.push_back(fr);
         }
-        // weights
+        // weights: only analysis frames on the same side of every onset as c whose window
+        // does not straddle an onset (so no attack energy is smeared before the attack)
         let sc = side(c);
+        let half = l as f64 / 2.0;
+        let valid = |gc: f64| side(gc - half) == sc && side(gc + half - 1.0) == sc;
         let mut wts: Vec<(usize, f32)> = Vec::new();
         let mut wsum = 0f32;
+        let mut nearest: Option<(f64, i64)> = None;
         for j in jlo..=jhi {
             let gc = (j * g) as f64;
-            if side(gc) != sc {
+            if !valid(gc) {
                 continue;
             }
-            let wv = (1.0 - (gc - c).abs() / hw).max(0.0) as f32;
+            let d = (gc - c).abs();
+            if nearest.map(|(nd, _)| d < nd).unwrap_or(true) {
+                nearest = Some((d, j));
+            }
+            let wv = (1.0 - d / hw).max(0.0) as f32;
             if wv > 0.0 {
                 wts.push(((j - j0) as usize, wv));
                 wsum += wv;
             }
         }
         if wsum <= 0.0 {
-            let j = ((c / g as f64).round() as i64).clamp(jlo, jhi);
+            let j = nearest.map(|v| v.1).unwrap_or(((c / g as f64).round() as i64).clamp(jlo, jhi));
             wts = vec![((j - j0) as usize, 1.0)];
             wsum = 1.0;
         }
+        // frames analysed after an onset start no earlier than its output position
+        let gate_at = if sc > 0 {
+            let ys = (onsets[sc - 1] as f64 * r).round() as i64;
+            (ys > y - l as i64 / 2).then_some(ys)
+        } else {
+            None
+        };
         cov.iter_mut().for_each(|v| *v = Complex32::new(0.0, 0.0));
         for &(ji, wv) in &wts {
             let fr = &cache[ji];
@@ -170,9 +207,15 @@ pub fn stretch_noise(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[i64], p: &N
         }
         for ch in 0..nch {
             fft.inverse(&mut ys[ch], &mut obuf);
-            add_frame(&mut out[ch], y, &obuf, &win.w, 1.0);
+            match gate_at {
+                None => add_frame(&mut out[ch], y, &obuf, &win.w, 1.0),
+                Some(st) => add_frame_from(&mut out[ch], y, &obuf, &win.w, st),
+            }
         }
-        add_weight(&mut norm, y, &w2);
+        match gate_at {
+            None => add_weight(&mut norm, y, &w2),
+            Some(st) => add_weight_from(&mut norm, y, &w2, st),
+        }
     }
     for ch in out.iter_mut() {
         for (v, &nv) in ch.iter_mut().zip(norm.iter()) {

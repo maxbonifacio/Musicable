@@ -126,6 +126,7 @@ pub fn stretch_channels(x: &[Vec<f32>], sr: u32, r: f64, n_out: usize, opt: &Opt
                 Some(e) if (r - 1.0).abs() > 1e-9 => *e,
                 _ => parts,
             };
+            split::gate_before_onsets(&mut parts, x, &all_on, MedianSplit::full(sr).win);
             let p = pv::PvParams::new(sr);
             if opt.variant == Variant::Full2Way {
                 let res = std::mem::take(&mut parts.residual);

@@ -306,3 +306,55 @@ impl Separator for MedianSplit {
         Parts { harmonic: harm, percussive: perc, residual: resid, stretch }
     }
 }
+
+/// Keep separation smear out of the time before each onset.
+///
+/// A time-varying STFT mask spreads energy over the whole analysis/synthesis window, so the
+/// percussive and residual parts of an attack start up to one split window (L) *before* the
+/// attack. At R = 1 these smears cancel between the parts; once the parts are stretched by
+/// different methods they don't, and become audible pre-echo. For every onset t0 we
+/// therefore hand the region [t0 - D, t0) entirely to the harmonic part (whose phase
+/// vocoder gates new components at the onset): P <- g P, R <- g R, H <- g H + (1 - g) x with
+/// g = 0 there (raised-cosine fades). Parts still sum to x when they did before.
+/// D = min(L, 0.75 * gap to the previous onset).
+pub fn gate_before_onsets(parts: &mut Parts, x: &[Vec<f32>], onsets: &[i64], l: usize) {
+    let n = x[0].len() as i64;
+    let mut g = vec![1f32; n as usize];
+    let fade_in = 32i64; // just before the attack
+    let mut prev = i64::MIN / 4;
+    for &t0 in onsets {
+        if t0 <= 0 || t0 >= n {
+            prev = t0;
+            continue;
+        }
+        let d = (l as i64).min(((t0 - prev) as f64 * 0.75) as i64);
+        if d < 2 * fade_in {
+            prev = t0;
+            continue;
+        }
+        let fade_out = (d / 4).min(256);
+        let a = t0 - d;
+        for t in a.max(0)..t0 {
+            let v = if t < a + fade_out {
+                0.5 + 0.5 * (std::f32::consts::PI * (t - a) as f32 / fade_out as f32).cos()
+            } else if t >= t0 - fade_in {
+                0.5 - 0.5 * (std::f32::consts::PI * (t - (t0 - fade_in)) as f32 / fade_in as f32).cos()
+            } else {
+                0.0
+            };
+            let gi = &mut g[t as usize];
+            *gi = gi.min(v);
+        }
+        prev = t0;
+    }
+    for ch in 0..x.len() {
+        for t in 0..n as usize {
+            let gv = g[t];
+            if gv < 1.0 {
+                parts.harmonic[ch][t] = gv * parts.harmonic[ch][t] + (1.0 - gv) * x[ch][t];
+                parts.percussive[ch][t] *= gv;
+                parts.residual[ch][t] *= gv;
+            }
+        }
+    }
+}
