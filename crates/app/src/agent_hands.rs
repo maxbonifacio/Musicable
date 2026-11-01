@@ -435,7 +435,13 @@ impl Script {
                 Op::Wait(seconds) => {
                     self.current = Some(Current::Waiting(now + Duration::from_secs_f32(seconds)));
                 }
-                Op::NextFrame => self.current = Some(Current::NextFrame),
+                // The rest waits for the next frame, so a button let go of
+                // or a modifier given up there isn't in this frame's input
+                // too, which only says how the frame ends.
+                Op::NextFrame => {
+                    self.current = Some(Current::NextFrame);
+                    break;
+                }
                 Op::StepDone => self.done += 1,
             }
         }

@@ -1612,3 +1612,68 @@ fn the_status_playhead_moves_on_as_the_song_plays() {
         last = now;
     }
 }
+
+#[test]
+fn modifiers_the_agent_holds_change_what_its_drags_and_clicks_do() {
+    let dir = TempDir::new("agents-held-modifiers");
+    let file = dir.0.join("Song.musicable");
+    project::save(&file, &song()).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    window
+        .get_by_label("Let agents use the mouse and keys")
+        .click();
+    window.run();
+    std::thread::sleep(crate::agent_hands::IDLE);
+    let agent = Agent::connect(&dir.0);
+    // The middle of each clip's title bar, which moves it, left to right.
+    let titles = |window: &mut Window| {
+        let found = agent
+            .call(window, "get_ui_tree", json!({"filter": "Clip Chord"}))
+            .unwrap();
+        let mut titles: Vec<[f64; 2]> = (every_node(&found["nodes"]).into_iter())
+            .filter(|node| node["label"] == "Clip Chord")
+            .map(|clip| {
+                let at = |axis: usize| clip["at"][axis].as_f64().unwrap();
+                [at(0) + clip["size"][0].as_f64().unwrap() / 2.0, at(1) + 4.0]
+            })
+            .collect();
+        titles.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        titles
+    };
+    let clips = |window: &Window| window.state().session.project().tracks[0].clips.len();
+
+    // Ctrl held from before the button goes down copies the clip.
+    let [x, y] = titles(&mut window)[0];
+    let done = use_hands(
+        &agent,
+        &mut window,
+        json!({"steps": [
+            {"hold": "Ctrl"},
+            {"drag": [x, y], "to": [x + 200.0, y], "seconds": 0.2},
+            {"release": "Ctrl"},
+        ]}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(clips(&window), 2, "Ctrl copies the clip: {done}");
+
+    // A click with Ctrl held adds to what's selected.
+    let [first, copy] = titles(&mut window)[..] else {
+        panic!("two clips");
+    };
+    let done = use_hands(
+        &agent,
+        &mut window,
+        json!({"steps": [
+            {"click": first},
+            {"hold": "Ctrl"},
+            {"click": copy},
+            {"release": "Ctrl"},
+        ]}),
+        None,
+    )
+    .unwrap();
+    let selected = window.state().session.editor().selection.clips.len();
+    assert_eq!(selected, 2, "Ctrl adds the copy to the selection: {done}");
+}
