@@ -91,7 +91,8 @@ impl App {
         }
         if self.is_headless() {
             return reply.failed(
-                "Musicable runs headless, with no window to take a picture of: get_ui_tree reads                  what's in it.",
+                "Musicable runs headless, with no window to take a picture of: get_ui_tree reads \
+                 what's in it.",
             );
         }
         let (window, viewport, crop) = match self.place(shot.window, shot.panel.as_deref()) {

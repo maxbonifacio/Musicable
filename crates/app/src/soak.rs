@@ -300,6 +300,14 @@ fn clock(started: Instant) -> String {
     )
 }
 
+/// `value` rounded to `places` decimal places, with no minus sign on a
+/// change that rounds to nothing.
+fn rounded(value: f64, places: i32) -> f64 {
+    let scale = 10f64.powi(places);
+    // Adding 0 turns -0 into 0.
+    (value * scale).round() / scale + 0.0
+}
+
 /// How the run has gone so far.
 #[derive(Debug, Default)]
 struct Summary {
@@ -310,7 +318,8 @@ struct Summary {
     loads: u64,
     /// The dropouts at the first read and the last.
     dropouts: Option<(u64, u64)>,
-    frames_longest_ms: f64,
+    /// The longest frame, if any frames ran: headless, none do.
+    frames_longest_ms: Option<f64>,
     /// Private memory where the system says it, else resident: the first,
     /// the last and the most.
     memory: Option<(f64, f64, f64)>,
@@ -336,7 +345,10 @@ impl Summary {
             self.dropouts = Some((first, dropouts));
         }
         if let Some(longest) = performance["frames"]["longest_ms"].as_f64() {
-            self.frames_longest_ms = self.frames_longest_ms.max(longest);
+            self.frames_longest_ms = Some(
+                self.frames_longest_ms
+                    .map_or(longest, |most| most.max(longest)),
+            );
         }
         let memory = &performance["memory"];
         if let Some(mb) = memory["private_mb"]
@@ -367,12 +379,17 @@ impl Summary {
         let memory = self
             .memory
             .map_or("memory unknown".to_owned(), |(first, last, _)| {
-                format!("{last:.0} MB, {:+.0} MB since the start", last - first)
+                format!(
+                    "{last:.0} MB, {:+.0} MB since the start",
+                    rounded(last - first, 0)
+                )
             });
+        let frames = self.frames_longest_ms.map_or("no frames".to_owned(), |ms| {
+            format!("frames at most {ms:.1} ms")
+        });
         format!(
-            "load at most {:.2}, {dropouts} dropouts, frames at most {:.1} ms, {memory}, {} \
-             warnings, {} errors",
-            self.load_max, self.frames_longest_ms, self.warnings, self.errors
+            "load at most {:.2}, {dropouts} dropouts, {frames}, {memory}, {} warnings, {} errors",
+            self.load_max, self.warnings, self.errors
         )
     }
 
@@ -397,7 +414,7 @@ impl Summary {
             report.push_str(&format!(
                 " Memory went from {first:.0} MB to {last:.0} MB, at most {most:.0} MB: {:+.1} MB \
                  an hour.",
-                (last - first) / hours
+                rounded((last - first) / hours, 1)
             ));
         }
         if self.panics > 0 {
@@ -581,6 +598,24 @@ mod tests {
         assert!(report.contains("+20.0 MB an hour"), "{report}");
         assert!(report.contains("The load averaged 0.40."), "{report}");
         assert!(report.contains("1 panics."), "{report}");
+    }
+
+    #[test]
+    fn a_headless_run_with_steady_memory_says_so() {
+        let mut summary = Summary::default();
+        // Headless runs no frames, and memory that falls a little hasn't
+        // changed to the megabyte.
+        summary.add(&json!({"load": 0.0, "dropouts": 0, "frames": null,
+            "memory": {"resident_mb": 30.0, "private_mb": 12.6}}));
+        summary.add(&json!({"load": 0.0, "dropouts": 0, "frames": null,
+            "memory": {"resident_mb": 30.0, "private_mb": 12.59}}));
+        assert_eq!(
+            summary.lately(),
+            "load at most 0.00, 0 dropouts, no frames, 13 MB, +0 MB since the start, 0 warnings, \
+             0 errors"
+        );
+        let report = summary.report(Duration::from_secs(3600));
+        assert!(report.contains("+0.0 MB an hour"), "{report}");
     }
 
     #[test]
