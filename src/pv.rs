@@ -9,23 +9,33 @@
 //! `window.rs`) taken at input positions c_n, and let the synthesis frames sit at output
 //! positions y_n. We write the synthesis phase as
 //!
-//!     phi_out(n,k) = arg X(n,k) + psi(n,k)
+//! ```text
+//! phi_out(n,k) = arg X(n,k) + psi(n,k)
+//! ```
 //!
 //! and integrate the *correction field* psi with the PGHI heap instead of the absolute phase.
 //! The target gradient of phi_out is the PVDR one: time direction 2*pi*f*dy (instantaneous
-//! frequency f kept), frequency direction -2*pi*R*t_off/M (the time offset t_off of the
-//! energy inside the frame is scaled by the stretch, which is PVDR's b_s = alpha*b_a). The
+//! frequency f kept), frequency direction -2*pi*s*t_off/M (the time offset t_off of the
+//! energy inside the frame is scaled by s, which is PVDR's b_s = alpha*b_a when s = R). The
 //! analysis phase already carries 2*pi*f*dc and -2*pi*t_off/M exactly (mod 2pi), so
 //!
-//!     d psi / dn = 2*pi * f * (dy - dc)            (trapezoid between frames)
-//!     d psi / dk = -2*pi * (R - 1) * t_off / M     (trapezoid between bins)
+//! ```text
+//! d psi / dn = 2*pi * f * (dy - dc)            (trapezoid between frames)
+//! d psi / dk = -2*pi * (s - 1) * t_off / M     (trapezoid between bins)
+//! ```
 //!
-//! For an impulse (f = k/M) and for a linear chirp this field is curl-free, so the heap order
-//! does not matter for them; at R = 1 psi is constant and the input is reconstructed exactly.
+//! s = R for impulse-like bins and s = 1 for noise-like ones (see `impulse_scale`). For an
+//! impulse (f = k/M) and for a linear chirp this field is curl-free, so the heap order does not
+//! matter for them; at R = 1 psi is constant and the input is reconstructed exactly.
 //! Because every channel uses the same psi, inter-channel phase and level differences of the
 //! analysis frame are kept exactly: Y_ch = X_ch * exp(i psi). f and t_off are taken from the
 //! energy-weighted channel sum, computed by reassignment (derivative and time-weighted windows)
 //! rather than from finite phase differences.
+//!
+//! Onsets (optional, Roebel 2003 / Duxbury et al. 2002): a synthesis frame is placed exactly at
+//! y* = round(R*t0) and analysed at t0; bins whose energy rises across the onset are reset to
+//! psi = 0 there, kept silent before y* and normalised for their truncated analysis windows
+//! (see `OnsetAcc`). Weak or non-percussive onsets are left to the plain PV.
 
 use crate::fft::Fft;
 use crate::onsets::Onset;
@@ -53,7 +63,16 @@ pub struct PvParams {
     pub reset: bool,
     /// Energy rise (post/pre) a bin needs at an onset to be reset.
     pub reset_ratio: f32,
+    /// Onsets weaker than this get no reset/gating. Weak onsets (most of a vocal's, median
+    /// strength ~0.1 in the test lists) would keep interrupting sustained voices: at one per
+    /// 120 ms the gating removed up to 5 dB in some bands of a vocal stem.
     pub min_strength: f32,
+    /// Onsets less percussive than this get no reset/gating either: on sung onsets (glides,
+    /// vibrato) "new" bins also carry legitimate pre-onset energy, and gating it cost up to
+    /// 4.5 dB in a vocal's fundamental band; the PV's own smoothing suits soft onsets.
+    pub min_percussiveness: f32,
+    /// Sample rate (for the attack rise-time measurement).
+    pub sr: u32,
 }
 
 impl PvParams {
@@ -68,7 +87,9 @@ impl PvParams {
             scale_toff: true,
             reset: true,
             reset_ratio: 2.0,
-            min_strength: 0.0,
+            min_strength: 0.25,
+            min_percussiveness: 0.3,
+            sr,
         }
     }
 }
@@ -87,11 +108,10 @@ fn schedule(n_out: usize, r: f64, onsets: &[i64], hop: i64, l: i64) -> (Vec<Fram
     let mut on: Vec<(i64, i64)> = Vec::new();
     for &t in onsets {
         let y = (r * t as f64).round() as i64;
-        if let Some(&(py, _)) = on.last() {
-            if y - py < hop / 2 {
+        if let Some(&(py, _)) = on.last()
+            && y - py < hop / 2 {
                 continue;
             }
-        }
         on.push((y, t));
     }
     let mut frames = Vec::new();
@@ -117,9 +137,11 @@ fn schedule(n_out: usize, r: f64, onsets: &[i64], hop: i64, l: i64) -> (Vec<Fram
     (frames, on)
 }
 
-/// Bins that start a new component at an onset (returned weight > 0): energy (summed over channels, smoothed over
-/// +-1 bin) in a frame centred L/4 after the onset exceeds `ratio` times the energy in a frame
-/// ending at the onset. Sustained partials crossing the onset are left alone.
+/// Bins that start a new component at an onset (returned weight > 0): energy (summed over
+/// channels, smoothed over +-1 bin) in a frame centred L/4 after the onset exceeds `ratio`
+/// times the energy in a frame ending at the onset. Sustained partials crossing the onset are
+/// left alone. (Weak bins must be included: they carry the attack's spectral splatter, and
+/// leaving them ungated raised the pre-echo of plucked notes by ~12 dB.)
 fn new_bins(an: &mut Analyzer, x: &[Vec<f32>], t0: i64, l: i64, ratio: f32, tmp: &mut [Complex32]) -> Vec<f32> {
     let kb = tmp.len();
     let mut e_pre = vec![0f32; kb];
@@ -146,10 +168,62 @@ fn new_bins(an: &mut Analyzer, x: &[Vec<f32>], t0: i64, l: i64, ratio: f32, tmp:
         .collect()
 }
 
-/// Fraction of a Hann window's weight (length l, centred on 0) that lies after offset d.
-fn window_fraction_after(d: f32, l: f32) -> f32 {
-    let d = d.clamp(-0.5 * l, 0.5 * l);
-    0.5 - d / l - (2.0 * PI * d / l).sin() / (2.0 * PI)
+/// Rise time of the attack at t0: time until the energy envelope (1 ms blocks, channel sum)
+/// has covered 80 % of its rise above the pre-onset level, searched over 60 ms.
+fn rise_time(x: &[Vec<f32>], t0: i64, sr_ms: i64) -> i64 {
+    let n = x[0].len() as i64;
+    let blk = |a: i64| -> f32 {
+        let mut e = 0f32;
+        for t in a.max(0)..(a + sr_ms).min(n) {
+            for c in x {
+                e += c[t as usize] * c[t as usize];
+            }
+        }
+        e
+    };
+    let pre = (1..=10).map(|i| blk(t0 - i * sr_ms)).sum::<f32>() / 10.0;
+    let env: Vec<f32> = (0..60).map(|i| blk(t0 + i * sr_ms)).collect();
+    let top = env.iter().fold(0f32, |m, &v| m.max(v));
+    if top <= pre {
+        return 0;
+    }
+    let i = env.iter().position(|&v| v - pre >= 0.8 * (top - pre)).unwrap_or(0) as i64;
+    i * sr_ms
+}
+
+/// Output accumulator for the new components of one onset.
+///
+/// A frame whose analysis window contains the onset t0 sees a new component only for
+/// u > t0 - c (frame-relative), and since new bins keep their analysis waveform (psi is
+/// constant across their main lobe, s = 1) the synthesised frame carries that truncation too.
+/// The plain overlap-add normalisation sum(w^2) assumes every frame carries the component over
+/// its whole window, so the attack would come out too quiet right after the onset by
+/// T/W, where W = sum over the onset's frames of w^2 and T = the same sum with each term cut
+/// at its frame's truncation point. We accumulate the new share of those frames separately
+/// and scale it by W/T (at most 4) when it is flushed into the output. For a stationary
+/// component starting at t0 this is exact at every ratio; a fixed per-frame boost by the
+/// analysed window fraction (tried first) overshot the first 25 ms by 3.5..4.7 dB.
+struct OnsetAcc {
+    start: i64,
+    acc: Vec<Vec<f32>>,
+    w: Vec<f32>,
+    t: Vec<f32>,
+}
+
+impl OnsetAcc {
+    fn flush(self, out: &mut [Vec<f32>]) {
+        let n = out[0].len() as i64;
+        for (ch, a) in self.acc.iter().enumerate() {
+            for i in 0..a.len() {
+                let t = self.start + i as i64;
+                if t < 0 || t >= n || a[i] == 0.0 {
+                    continue;
+                }
+                let g = self.w[i] / self.t[i].max(0.25 * self.w[i]).max(1e-12);
+                out[ch][t as usize] += a[i] * g;
+            }
+        }
+    }
 }
 
 /// Overlap-add a frame, keeping only output samples t >= start (raised-cosine ramp of `fade`
@@ -232,7 +306,7 @@ impl BucketQueue {
     #[inline]
     fn push(&mut self, idx: u32, mag: f32, inv_max: f32) {
         let r = mag * inv_max;
-        let db = if r > 0.0 { 8.685_889_6 * r.ln() } else { -140.0 };
+        let db = if r > 0.0 { 8.685_889 * r.ln() } else { -140.0 };
         let b = ((db + 140.0) * 4.0).clamp(0.0, (NB - 1) as f32) as usize;
         self.buckets[b].push(idx);
         if b > self.top {
@@ -264,20 +338,25 @@ const IMP_RADIUS: usize = 8;
 fn impulse_scale(mag: &[f32], toff: &[f32], sc: &mut [f32], r: f32, l: f32) {
     let kb = mag.len();
     let sig2 = 2.0 * (l / 32.0) * (l / 32.0);
+    // prefix sums of e, e*t, e*t^2 (f64: differences of large sums)
+    let mut p0 = vec![0f64; kb + 1];
+    let mut p1 = vec![0f64; kb + 1];
+    let mut p2 = vec![0f64; kb + 1];
+    for k in 0..kb {
+        let e = (mag[k] as f64) * (mag[k] as f64);
+        let t = toff[k] as f64;
+        p0[k + 1] = p0[k] + e;
+        p1[k + 1] = p1[k] + e * t;
+        p2[k + 1] = p2[k] + e * t * t;
+    }
     for k in 0..kb {
         let lo = k.saturating_sub(IMP_RADIUS);
-        let hi = (k + IMP_RADIUS).min(kb - 1);
-        let (mut w, mut m1, mut m2) = (0f32, 0f32, 0f32);
-        for j in lo..=hi {
-            let e = mag[j] * mag[j];
-            w += e;
-            m1 += e * toff[j];
-            m2 += e * toff[j] * toff[j];
-        }
+        let hi = (k + IMP_RADIUS).min(kb - 1) + 1;
+        let w = p0[hi] - p0[lo];
         let c = if w > 0.0 {
-            let mean = m1 / w;
-            let var = (m2 / w - mean * mean).max(0.0);
-            (-var / sig2).exp()
+            let mean = (p1[hi] - p1[lo]) / w;
+            let var = ((p2[hi] - p2[lo]) / w - mean * mean).max(0.0);
+            (-var / sig2 as f64).exp() as f32
         } else {
             0.0
         };
@@ -308,7 +387,7 @@ pub fn stretch_pv(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[Onset], p: &Pv
     let on: Vec<i64> = if p.reset {
         onsets
             .iter()
-            .filter(|o| o.strength >= p.min_strength && (o.frame as i64) < n_in)
+            .filter(|o| o.strength >= p.min_strength && o.percussiveness >= p.min_percussiveness && (o.frame as i64) < n_in)
             .map(|o| o.frame as i64)
             .collect()
     } else {
@@ -323,10 +402,31 @@ pub fn stretch_pv(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[Onset], p: &Pv
     let on_y: Vec<i64> = on.iter().map(|o| o.0).collect();
     let on_t: Vec<i64> = on.iter().map(|o| o.1).collect();
     let mut owner = vec![usize::MAX; kb];
+    let mut rot = vec![Complex32::new(0.0, 0.0); kb];
     let mut near: Vec<usize> = Vec::new();
     const GATE_FADE: i64 = 16;
+    // Gate fade-in per onset. A 16-sample gate on a soft (e.g. sung) onset turns the PV's
+    // smeared rise into a step and a low-frequency thump (+12 dB at 50-100 Hz on a vocal
+    // stem). Non-percussive onsets therefore fade in over the input's own measured rise time,
+    // scaled by (1 - percussiveness); percussive ones keep the sharp gate (a rise-time gate on
+    // plucked notes doubled their attack timing error).
+    let sr_ms = (p.sr as i64 / 1000).max(1);
+    let fades: Vec<i64> = on
+        .iter()
+        .map(|&(_, t)| {
+            let perc = onsets.iter().find(|o| o.frame as i64 == t).map(|o| o.percussiveness).unwrap_or(1.0);
+            let soft = (rise_time(x, t, sr_ms) as f32 * (1.0 - perc.clamp(0.0, 1.0))) as i64;
+            soft.clamp(GATE_FADE, 2048)
+        })
+        .collect();
+    // per-onset accumulators (see OnsetAcc); frames come in output order, so an onset's
+    // accumulator is flushed once the frames have moved past its reach
+    let reach = ((r.max(1.0) + 1.0) * (l as f64) / 2.0) as i64 + hop + 2 * 2048;
+    let mut accs: Vec<Option<OnsetAcc>> = (0..on.len()).map(|_| None).collect();
+    let mut flushed = 0usize;
     let w2: Vec<f32> = an.win.w.iter().map(|v| v * v).collect();
     let mut out = vec![vec![0f32; n_out]; nch];
+    let mut out_new = vec![vec![0f32; n_out]; nch];
     let mut norm = vec![0f32; n_out];
 
     let cap = p.block + 1;
@@ -390,6 +490,20 @@ pub fn stretch_pv(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[Onset], p: &Pv
             }
             if p.scale_toff && rv != 1.0 {
                 impulse_scale(&mag[row.clone()], &toff[row.clone()], &mut sc[row.clone()], rv, l as f32);
+                // Bins of a component that starts at a nearby onset are handled by the onset
+                // model (reset, gating, level). Their reassigned time is the centroid of a
+                // truncated partial, not an event position, so scaling it would only push
+                // the new note later (measured: -8 dB right after drum hits at R = 4).
+                let a = on_t.partition_point(|&t| t <= fr.c - (l as i64) / 2);
+                let mut j = a;
+                while j < on_t.len() && on_t[j] < fr.c + (l as i64) / 2 {
+                    for k in 0..kb {
+                        if newb[j][k] > 0.0 {
+                            sc[n * kb + k] = 1.0;
+                        }
+                    }
+                    j += 1;
+                }
             } else {
                 sc[row.clone()].iter_mut().for_each(|v| *v = 1.0);
             }
@@ -487,14 +601,14 @@ pub fn stretch_pv(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[Onset], p: &Pv
         }
         // --- synthesis
         for n in 1..nb {
-            // Onset handling for bins that start a new component (`newb`, weight nu in (0,1]):
-            // * gating: if the onset's output position y* falls inside this frame, those bins
-            //   are synthesised separately and kept only for t >= y* (no pre-echo);
-            // * level: a frame whose analysis window contains the onset sees the new note in
-            //   only part of its window, so its magnitude is too small by the window-weight
-            //   fraction F(d) (d = t0 - c). The phase vocoder spreads that reduced level over
-            //   the whole frame, which turns a sharp attack into a ramp R*L/2 long. Those bins
-            //   are scaled by 1 + nu (1/F(d) - 1) (F clamped at 0.25).
+            // Onset handling for bins that start a new component (`newb`, weight nu in (0,1],
+            // the fraction of the bin's post-onset energy that is new), in frames whose
+            // analysis or synthesis window contains the onset:
+            // * gating: those bins are kept only for t >= y* (no pre-echo); frames that end
+            //   before y* get no new-bin content at all;
+            // * level: their new share (nu) goes through the onset's accumulator, which
+            //   normalises it for the truncated analysis windows (see OnsetAcc); the old share
+            //   (1 - nu) is added directly.
             let y = ys[n];
             let c = cs[n];
             let hl = (l as i64) / 2;
@@ -519,46 +633,74 @@ pub fn stretch_pv(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[Onset], p: &Pv
                         }
                     }
                 }
-            }
-            let groups = near.len();
-            for ch in 0..nch {
-                let s = &spec[ch][n * kb..(n + 1) * kb];
-                for gi in 0..=groups {
-                    // gi == 0: ordinary bins; gi > 0: new bins owned by onset near[gi-1]
-                    let want = if gi == 0 { usize::MAX } else { near[gi - 1] };
-                    let fr = if gi == 0 || (on_t[want] - c).abs() >= hl {
-                        1.0
-                    } else {
-                        window_fraction_after((on_t[want] - c) as f32, l as f32).max(0.25)
-                    };
-                    let mut any = false;
-                    for k in 0..kb {
-                        let i = n * kb + k;
-                        let own = if groups == 0 { usize::MAX } else { owner[k] };
-                        if own != want {
-                            ybuf[k] = Complex32::new(0.0, 0.0);
+                for &j in &near {
+                    let acc = accs[j].get_or_insert_with(|| {
+                        let len = (2 * reach) as usize;
+                        OnsetAcc { start: on_y[j] - reach, acc: vec![vec![0.0; len]; nch], w: vec![0.0; len], t: vec![0.0; len] }
+                    });
+                    // window weights of this frame, full and cut at the analysis truncation
+                    let cut = on_t[j] - c;
+                    for u in -hl..hl {
+                        let i = y + u - acc.start;
+                        if i < 0 || i >= acc.w.len() as i64 {
                             continue;
                         }
-                        any = true;
-                        let mut g = if sc[i] != 1.0 { place_gain(toff[i], sc[i], l as f32) } else { 1.0 };
-                        if gi > 0 {
-                            g *= 1.0 + newb[want][k] * (1.0 / fr - 1.0);
-                        }
-                        let (sn, cn) = psi[i].sin_cos();
-                        ybuf[k] = s[k] * Complex32::new(cn * g, sn * g);
+                        let w2u = w2[(u + hl) as usize];
+                        let step = ((u - cut) as f32 / GATE_FADE as f32 + 0.5).clamp(0.0, 1.0);
+                        acc.w[i as usize] += w2u;
+                        acc.t[i as usize] += w2u * step;
                     }
-                    if !any {
+                }
+            }
+            let groups = near.len();
+            for k in 0..kb {
+                let i = n * kb + k;
+                let g = if sc[i] != 1.0 { place_gain(toff[i], sc[i], l as f32) } else { 1.0 };
+                let (sn, cn) = psi[i].sin_cos();
+                rot[k] = Complex32::new(cn * g, sn * g);
+            }
+            for ch in 0..nch {
+                let s = &spec[ch][n * kb..(n + 1) * kb];
+                // ordinary bins
+                for k in 0..kb {
+                    let own = if groups == 0 { usize::MAX } else { owner[k] };
+                    ybuf[k] = if own == usize::MAX { s[k] * rot[k] } else { Complex32::new(0.0, 0.0) };
+                }
+                an.fft.inverse(&mut ybuf, &mut obuf);
+                add_frame(&mut out[ch], y, &obuf, &an.win.w, inv_m);
+                // new bins owned by each nearby onset: new share, then old share
+                for &want in near.iter().take(groups) {
+                    if y + hl <= on_y[want] || !owner.contains(&want) {
                         continue;
                     }
-                    an.fft.inverse(&mut ybuf, &mut obuf);
-                    if gi > 0 && (on_y[want] - y).abs() < hl {
-                        add_frame_gated(&mut out[ch], y, &obuf, &an.win.w, inv_m, on_y[want], GATE_FADE);
-                    } else {
-                        add_frame(&mut out[ch], y, &obuf, &an.win.w, inv_m);
+                    for share in [true, false] {
+                        for k in 0..kb {
+                            ybuf[k] = if owner[k] == want {
+                                let nu = newb[want][k];
+                                s[k] * rot[k] * if share { nu } else { 1.0 - nu }
+                            } else {
+                                Complex32::new(0.0, 0.0)
+                            };
+                        }
+                        an.fft.inverse(&mut ybuf, &mut obuf);
+                        if share {
+                            let acc = accs[want].as_mut().expect("accumulator");
+                            let st = acc.start;
+                            add_frame_gated(&mut acc.acc[ch], y - st, &obuf, &an.win.w, inv_m, on_y[want] - st + fades[want] / 2 - 8, fades[want]);
+                        } else {
+                            add_frame_gated(&mut out[ch], y, &obuf, &an.win.w, inv_m, on_y[want] + fades[want] / 2 - 8, fades[want]);
+                        }
                     }
                 }
             }
             add_weight(&mut norm, y, &w2);
+            // flush accumulators no later frame can reach
+            while flushed < on.len() && on_y[flushed] + reach <= y - hl {
+                if let Some(a) = accs[flushed].take() {
+                    a.flush(&mut out_new);
+                }
+                flushed += 1;
+            }
         }
         // --- carry the last frame
         let last = nb - 1;
@@ -575,9 +717,12 @@ pub fn stretch_pv(x: &[Vec<f32>], r: f64, n_out: usize, onsets: &[Onset], p: &Pv
         }
         b0 = b1;
     }
-    for ch in out.iter_mut() {
-        for (v, &nv) in ch.iter_mut().zip(norm.iter()) {
-            *v = if nv > 1e-6 { *v / nv } else { 0.0 };
+    for a in accs.into_iter().skip(flushed).flatten() {
+        a.flush(&mut out_new);
+    }
+    for (ch, nw) in out.iter_mut().zip(&out_new) {
+        for ((v, &nv), &a) in ch.iter_mut().zip(norm.iter()).zip(nw) {
+            *v = if nv > 1e-6 { (*v + a) / nv } else { 0.0 };
         }
     }
     out

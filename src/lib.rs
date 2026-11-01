@@ -2,6 +2,9 @@
 //!
 //! See README.md for the design and the papers it is built from.
 
+// DSP loops index several parallel arrays (bins, channels, frames) by the same index.
+#![allow(clippy::needless_range_loop)]
+
 pub mod audio;
 pub mod checks;
 pub mod classic_pv;
@@ -63,11 +66,13 @@ pub struct Options {
     pub onsets: Vec<Onset>,
     /// Onsets weaker than this are ignored for percussive grain placement.
     pub min_place_strength: f32,
+    /// Onsets weaker than this don't get the pre-onset hand-over of P and R to the PV.
+    pub min_gate_strength: f32,
 }
 
 impl Options {
     pub fn new(ratio: f64) -> Self {
-        Options { ratio, pitch_semitones: 0.0, variant: Variant::Full, onsets: Vec::new(), min_place_strength: 0.0 }
+        Options { ratio, pitch_semitones: 0.0, variant: Variant::Full, onsets: Vec::new(), min_place_strength: 0.0, min_gate_strength: 0.25 }
     }
     pub fn variant(mut self, v: Variant) -> Self {
         self.variant = v;
@@ -114,19 +119,25 @@ pub fn stretch_channels(x: &[Vec<f32>], sr: u32, r: f64, n_out: usize, opt: &Opt
             let parts = MedianSplit::hptsm(sr).split(x, sr);
             let pvw = scaled_pow2(4096, sr);
             let mut h = classic_pv::stretch_classic_pv(&parts.harmonic, r, n_out, pvw, pvw / 4);
-            let pp = ola::stretch_ola(&parts.percussive, &TimeMap::uniform(r), n_out, lp, lp / 2);
+            let op = ola::OlaParams { win: lp, hop: lp / 2, tol: 0 };
+            let pp = ola::stretch_ola(&parts.percussive, &TimeMap::uniform(r), n_out, &op, &[], 0);
             add_into(&mut h, &pp);
             h
         }
         Variant::Full | Variant::Full2Way => {
-            let parts = MedianSplit::full(sr).split(x, sr);
-            // at R = 1 every path is an identity and the plain parts sum to the input;
-            // otherwise use the energy-normalised parts (incoherent recombination)
-            let mut parts = match parts.stretch {
-                Some(e) if (r - 1.0).abs() > 1e-9 => *e,
-                _ => parts,
-            };
-            split::gate_before_onsets(&mut parts, x, &all_on, MedianSplit::full(sr).win);
+            let mut sep = MedianSplit::full(sr);
+            // at R = 1 every path is an identity: use the amplitude parts, which sum to the
+            // input; otherwise the energy parts (incoherent recombination, see split::Parts)
+            sep.energy_parts = (r - 1.0).abs() > 1e-9;
+            sep.merge_residual = opt.variant == Variant::Full2Way;
+            let mut parts = sep.split(x, sr);
+            split::percussive_attacks_only(&mut parts, &place, lp, lp / 2);
+            parts.merged_hp = None;
+            // only clear attacks need the pre-onset hand-over; doing it before every weak
+            // (e.g. sung) onset would keep switching the residual between two textures
+            let strong: Vec<i64> =
+                ons.iter().filter(|o| o.strength >= opt.min_gate_strength).map(|o| o.frame as i64).collect();
+            split::gate_before_onsets(&mut parts, x, &strong, sep.win);
             let p = pv::PvParams::new(sr);
             if opt.variant == Variant::Full2Way {
                 let res = std::mem::take(&mut parts.residual);
@@ -134,7 +145,8 @@ pub fn stretch_channels(x: &[Vec<f32>], sr: u32, r: f64, n_out: usize, opt: &Opt
             }
             let mut h = pv::stretch_pv(&parts.harmonic, r, n_out, &ons, &p);
             let map = TimeMap::anchored(r, &place, (lp / 2) as f64);
-            let pp = ola::stretch_ola(&parts.percussive, &map, n_out, lp, lp / 2);
+            let op = ola::OlaParams { win: lp, hop: lp / 2, tol: lp * 7 / 8 };
+            let pp = ola::stretch_ola(&parts.percussive, &map, n_out, &op, &place, (lp / 2) as i64);
             add_into(&mut h, &pp);
             if opt.variant == Variant::Full {
                 let nz = noise::stretch_noise(&parts.residual, r, n_out, &all_on, &noise::NoiseParams::new(sr));

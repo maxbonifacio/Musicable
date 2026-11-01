@@ -494,6 +494,23 @@ pub fn check_sine(v: Variant, ratios: &[f64]) -> Vec<Row> {
     rows
 }
 
+/// Pitch shift: a 440 Hz sine shifted by +12 / -7 semitones (with and without time stretch)
+/// must land on the target frequency and stay clean (stretch + windowed-sinc resampling).
+pub fn check_pitch(v: Variant) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let x = sig::sine(4 * SR as usize, 440.0, 0.5);
+    for (semis, r) in [(12.0, 1.0), (-7.0, 1.0), (5.0, 1.5)] {
+        let a = Audio::new(SR, vec![x.clone()]);
+        let y = process(&a, &Options::new(r).variant(v).pitch(semis)).ch;
+        let target = 440.0 * 2f64.powf(semis / 12.0);
+        let s = metric::sine_stats(&y[0], target);
+        let p = format!("440 Hz {semis:+} st R={r}");
+        rows.push(row("pitch shift freq error", v, p.clone(), s.freq_err_cents, "cents", "|x| < 1", Some(s.freq_err_cents.abs() < 1.0)));
+        rows.push(row("pitch shift max spurious", v, p, s.spur_db, "dB", "< -50", Some(s.spur_db < -50.0)));
+    }
+    rows
+}
+
 pub struct AttackResult {
     pub max_err_ms: f64,
     pub mean_err_ms: f64,
@@ -638,7 +655,10 @@ fn stereo_compare(x: &[Vec<f32>], y: &[Vec<f32>], trim_s: f64) -> (f64, f64) {
 
 pub fn check_stereo(v: Variant, ratios: &[f64], material: Option<&Path>) -> Vec<Row> {
     let mut rows = Vec::new();
-    let x = sig::wide_stereo(10 * SR as usize, 21);
+    // 30 s: the per-band correlation of a noise-like signal is itself a random estimate; at
+    // 10 s its standard error in the 63 Hz octave (~400 degrees of freedom) was ~0.035 for the
+    // difference of two realisations, too close to the 0.05 limit to tell bias from chance
+    let x = sig::wide_stereo(30 * SR as usize, 21);
     let lim = v == Variant::Full;
     for &r in ratios {
         let y = run(x.clone(), r, v, vec![]);
@@ -691,6 +711,7 @@ pub fn run_all(material: Option<&Path>, quick: bool) -> Vec<Row> {
     for v in [Variant::Full, Variant::Pv] {
         rows.extend(check_sine(v, ratios));
     }
+    rows.extend(check_pitch(Variant::Full));
     rows.extend(check_attacks(Variant::Full, &[0.5, 0.8, 1.25, 2.0, 4.0], true));
     if !quick {
         rows.extend(check_attacks(Variant::Full, &[2.0], false));

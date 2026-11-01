@@ -34,7 +34,7 @@ impl Fft {
     pub fn inverse(&mut self, spec: &mut [Complex32], out: &mut [f32]) {
         let k = spec.len();
         spec[0].im = 0.0;
-        if self.n % 2 == 0 {
+        if self.n.is_multiple_of(2) {
             spec[k - 1].im = 0.0;
         }
         self.inv
