@@ -146,6 +146,7 @@
 | Switch Devices and Clip Editor | F12 | `view.switch_devices_piano_roll` |
 | Browser | Ctrl+Alt+B | `view.toggle_browser` |
 | History | Ctrl+Alt+H | `view.toggle_history` |
+| Overview | Ctrl+Alt+O | `view.toggle_overview` |
 | Move Panel to New Window |  | `view.move_to_new_window` |
 | Move Panel to Main Window |  | `view.move_to_main_window` |
 | Zoom In | Equals, NumpadAdd | `view.zoom_in` |

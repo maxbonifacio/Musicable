@@ -38,6 +38,8 @@ pub const TOGGLE_CLIP_EDITOR: CommandId = CommandId::new("view.toggle_clip_edito
 /// Shows or hides the History panel, which lists the steps of the undo
 /// history, in a tab beside the browser.
 pub const TOGGLE_HISTORY: CommandId = CommandId::new("view.toggle_history");
+/// Shows or hides the overview of the whole song over the arrangement.
+pub const TOGGLE_OVERVIEW: CommandId = CommandId::new("view.toggle_overview");
 /// Shows or hides the Routing panel, which lists every connection in the
 /// project, in a tab beside the mixer: Live's In/Out section, for the whole
 /// project.
@@ -218,7 +220,7 @@ const COMMANDS: [(CommandId, &str, When, Handler); 19] = [
 ];
 
 /// The view commands that ask the app for something.
-const REQUESTS: [(CommandId, &str, Request); 11] = [
+const REQUESTS: [(CommandId, &str, Request); 12] = [
     (
         COMMAND_PALETTE,
         "Command Palette...",
@@ -238,6 +240,7 @@ const REQUESTS: [(CommandId, &str, Request); 11] = [
         Request::TogglePanel(panel::SAMPLE_EDITOR),
     ),
     (TOGGLE_HISTORY, "History", Request::TogglePanel("history")),
+    (TOGGLE_OVERVIEW, "Overview", Request::ToggleOverview),
     (
         TOGGLE_ROUTING,
         "Routing",

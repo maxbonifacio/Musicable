@@ -40,6 +40,8 @@ const GROUPS: [(&str, &[Target]); 7] = [
             Target::LoopBrace,
             Target::LoopEdge,
             Target::Locator,
+            Target::Overview,
+            Target::OverviewEdge,
         ],
     ),
     (

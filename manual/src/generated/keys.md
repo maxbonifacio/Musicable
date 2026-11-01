@@ -76,6 +76,7 @@
 | Ctrl+Alt+I | View: Routing |
 | Ctrl+Alt+L | View: Devices |
 | Ctrl+Alt+M | View: Mixer |
+| Ctrl+Alt+O | View: Overview |
 | Ctrl+Alt+T | Track: New Return Track |
 | Ctrl+Alt+U | View: Show/Hide Take Lanes |
 | Ctrl+Alt+3 | View: Clip Editor |

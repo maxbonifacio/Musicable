@@ -190,6 +190,7 @@ const LAST_MENUS: [MenuSpec; 5] = [
             Some(view::SWITCH_DEVICES_PIANO_ROLL),
             Some(view::TOGGLE_BROWSER),
             Some(view::TOGGLE_HISTORY),
+            Some(view::TOGGLE_OVERVIEW),
             None,
             Some(view::MOVE_TO_NEW_WINDOW),
             Some(view::MOVE_TO_MAIN_WINDOW),

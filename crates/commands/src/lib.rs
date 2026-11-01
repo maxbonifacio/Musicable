@@ -388,6 +388,8 @@ pub enum Request {
     NextProfile,
     /// Show or hide the panel with this id, such as the mixer.
     TogglePanel(&'static str),
+    /// Show or hide the overview over the arrangement.
+    ToggleOverview,
     /// Show the panel with this id, such as the piano roll, if it's hidden.
     ShowPanel(&'static str),
     /// Bring the panel with this id, the piano roll or the Sample Editor,

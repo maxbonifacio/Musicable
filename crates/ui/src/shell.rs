@@ -330,6 +330,9 @@ pub struct Shell {
     /// The kinds of panel there are.
     registry: panels::Registry,
     panels: Panels,
+    /// Whether the overview was shown or hidden since the workspace was
+    /// last handed out.
+    overview_changed: bool,
     /// How the panels are laid out.
     dock: Dock,
     theme: Theme,
@@ -372,6 +375,7 @@ impl Default for Shell {
             dock: Dock::new(&registry),
             registry,
             panels: Panels::default(),
+            overview_changed: false,
             theme: Theme::default(),
             mouse: MouseMap::live(),
             parts: Parts::default(),
@@ -470,6 +474,7 @@ impl Shell {
         let focus = view.editor.focus.panel();
         let state = MenuState {
             shown: &shown,
+            overview: !self.panels.arrangement.hide_overview,
             to_new_window: self.can_move_to_new_window(focus),
             to_main_window: self.window_of(focus).is_some(),
         };
@@ -721,6 +726,14 @@ impl Shell {
     /// Shows the panel with id `id`, such as [`MIXER`], if it's hidden or
     /// behind another tab, or else hides it. A hidden panel comes back
     /// where it was.
+    /// Shows or hides the overview over the arrangement, which the
+    /// workspace keeps.
+    pub fn toggle_overview(&mut self) {
+        let arrangement = &mut self.panels.arrangement;
+        arrangement.hide_overview = !arrangement.hide_overview;
+        self.overview_changed = true;
+    }
+
     pub fn toggle_panel(&mut self, id: &str) {
         if self.panel_shown(id) {
             self.hide_panel(id);
@@ -1068,6 +1081,7 @@ impl Shell {
             slot: None,
             views: self.parts.views(),
             windows,
+            hide_overview: self.panels.arrangement.hide_overview,
         }
     }
 
@@ -1089,7 +1103,9 @@ impl Shell {
     /// stay put unless `now`.
     fn hand_out(&mut self, now: bool) -> Option<Workspace> {
         // Each is asked, so none tells of the same change again.
-        let mut changed = self.dock.take_changed() | self.parts.take_changed();
+        let mut changed = self.dock.take_changed()
+            | self.parts.take_changed()
+            | std::mem::take(&mut self.overview_changed);
         for window in &mut self.windows {
             changed |= window.dock.take_changed();
         }
@@ -1116,6 +1132,7 @@ impl Shell {
             None => Dock::new(&self.registry),
         };
         self.parts.set_views(&workspace.views);
+        self.panels.arrangement.hide_overview = workspace.hide_overview;
         match main.filter(|window| window.at.is_some() || window.size.is_some()) {
             Some(window) => self.main.set(Place::of(window)),
             None => self.main.forget(),
@@ -1387,6 +1404,8 @@ impl Shell {
 struct MenuState<'a> {
     /// The ids of the panels in sight.
     shown: &'a BTreeSet<&'static str>,
+    /// Whether the arrangement shows its overview.
+    overview: bool,
     /// Whether the panel with the focus can move to a new window.
     to_new_window: bool,
     /// Whether it's in a window of its own, to send back to the main one.
@@ -1464,6 +1483,7 @@ fn command_button(
         id if *id == view::TOGGLE_HISTORY => Some(shown.contains(HISTORY)),
         id if *id == view::TOGGLE_ROUTING => Some(shown.contains(ROUTING)),
         id if *id == view::TOGGLE_PERFORMANCE => Some(shown.contains(PERFORMANCE)),
+        id if *id == view::TOGGLE_OVERVIEW => Some(state.overview),
         _ if slot.is_some() => slot.map(|slot| slot == workspaces.current),
         id => toggled(view, id),
     };

@@ -84,6 +84,11 @@ pub enum Target {
     /// The arrangement's tracks and ruler, and the piano roll's notes and
     /// ruler, for the wheel.
     Timeline,
+    /// The overview of the whole song, over the arrangement's ruler, away
+    /// from the edges of the box that shows what's in sight.
+    Overview,
+    /// Near the start or the end of the overview's box.
+    OverviewEdge,
     /// A note in the piano roll.
     Note,
     /// Near a note's start or end.
@@ -268,12 +273,22 @@ pub enum MouseAction {
     /// Zooms to the selection, or with nothing selected to the whole song,
     /// as Live's double click on its ruler does.
     ZoomToFit,
+    /// Shows the part of the song clicked in the overview, in the middle
+    /// of the arrangement.
+    ShowHere,
+    /// Scrolls the arrangement along with the drag in the overview, and
+    /// zooms in or out as it goes down or up, as Live's overview does.
+    MoveView,
+    /// Moves the start or the end of what's in sight, zooming to fit.
+    ResizeView,
+    /// Zooms to the whole song.
+    FitSong,
 }
 
 impl Target {
     /// Every place a gesture starts, in the order the Mouse page and mouse
     /// map files list them.
-    pub const ALL: [Target; 37] = [
+    pub const ALL: [Target; 39] = [
         Target::ClipTitle,
         Target::ClipBody,
         Target::ClipEdge,
@@ -311,6 +326,8 @@ impl Target {
         Target::BypassButton,
         Target::DeviceTitle,
         Target::Timeline,
+        Target::Overview,
+        Target::OverviewEdge,
     ];
 
     /// Its name in mouse map files.
@@ -341,6 +358,8 @@ impl Target {
             Target::BypassButton => "bypass_button",
             Target::DeviceTitle => "device_title",
             Target::Timeline => "timeline",
+            Target::Overview => "overview",
+            Target::OverviewEdge => "overview_edge",
             Target::Note => "note",
             Target::NoteEdge => "note_edge",
             Target::NoteGrid => "note_grid",
@@ -384,6 +403,8 @@ impl Target {
             Target::BypassButton => "A device's Bypass button",
             Target::DeviceTitle => "A device's title bar",
             Target::Timeline => "Over the tracks or the notes",
+            Target::Overview => "The overview",
+            Target::OverviewEdge => "The overview box's start or end",
             Target::Note => "A note",
             Target::NoteEdge => "A note's start or end",
             Target::NoteGrid => "The rows, where there's no note",
@@ -501,6 +522,12 @@ impl Target {
             (T::DeviceTitle, Click) => &[A::Select, A::ToggleSelect],
             (T::DeviceTitle, Drag) => &[A::Move, A::Copy],
             (T::Timeline, Wheel) => &[A::Scroll, A::ScrollSideways, A::Zoom, A::TrackHeight],
+            // The overview's.
+            (T::Overview | T::OverviewEdge, Click | DoubleClick) => {
+                &[A::ShowHere, A::FitSong, A::Locate]
+            }
+            (T::Overview, Drag) => &[A::MoveView],
+            (T::OverviewEdge, Drag) => &[A::ResizeView, A::MoveView],
             _ => &[],
         }
     }
@@ -575,7 +602,7 @@ impl Gesture {
 
 impl MouseAction {
     /// Every action, which mouse map files name.
-    pub const ALL: [MouseAction; 60] = [
+    pub const ALL: [MouseAction; 64] = [
         MouseAction::Select,
         MouseAction::ToggleSelect,
         MouseAction::SelectAndMark,
@@ -636,6 +663,10 @@ impl MouseAction {
         MouseAction::ResizeAllTracks,
         MouseAction::ResetHeight,
         MouseAction::ZoomToFit,
+        MouseAction::ShowHere,
+        MouseAction::MoveView,
+        MouseAction::ResizeView,
+        MouseAction::FitSong,
     ];
 
     /// Its name in mouse map files.
@@ -701,6 +732,10 @@ impl MouseAction {
             MouseAction::ResizeAllTracks => "resize_all_tracks",
             MouseAction::ResetHeight => "reset_height",
             MouseAction::ZoomToFit => "zoom_to_fit",
+            MouseAction::ShowHere => "show_here",
+            MouseAction::MoveView => "move_view",
+            MouseAction::ResizeView => "resize_view",
+            MouseAction::FitSong => "fit_song",
         }
     }
 
@@ -767,6 +802,10 @@ impl MouseAction {
             MouseAction::ResizeAllTracks => "Make every track taller or shorter",
             MouseAction::ResetHeight => "Give the track its default height",
             MouseAction::ZoomToFit => "Zoom to the selection, or to the whole song",
+            MouseAction::ShowHere => "Show that part of the song",
+            MouseAction::MoveView => "Scroll along, and zoom going up and down",
+            MouseAction::ResizeView => "Move that edge of the view, zooming to fit",
+            MouseAction::FitSong => "Zoom to the whole song",
         }
     }
 
@@ -1030,6 +1069,12 @@ impl MouseMap {
         bind(T::Ruler, Click, &[none], A::Locate);
         bind(T::Ruler, DoubleClick, &[none], A::ZoomToFit);
         bind(T::Ruler, Drag, &[none], A::ScrubZoom);
+        bind(T::Overview, Click, &[none], A::ShowHere);
+        bind(T::Overview, DoubleClick, &[none], A::FitSong);
+        bind(T::Overview, Drag, &[none], A::MoveView);
+        bind(T::OverviewEdge, Click, &[none], A::ShowHere);
+        bind(T::OverviewEdge, DoubleClick, &[none], A::FitSong);
+        bind(T::OverviewEdge, Drag, &[none], A::ResizeView);
         bind(T::Strip, Click, &[none], A::Locate);
         bind(T::Strip, Drag, &[none], A::DrawLoop);
         bind(T::LoopBrace, Click, &[none], A::ToggleLoop);

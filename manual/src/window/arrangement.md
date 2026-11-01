@@ -86,6 +86,9 @@ changes it ([The mouse](../customising/mouse.md)):
 | | Double-click | Zooms to the selection, or with nothing selected, to the whole song |
 | | Drag | Zooms up and down, and scrolls sideways |
 | The ruler's strip | Drag | Draws a new loop region, and turns looping on |
+| The overview | Click; double-click | Shows that part of the song; shows the whole song |
+| | Drag | Scrolls along, and zooms in going down and out going up |
+| The overview box's start or end | Drag | Moves that edge of the view, zooming to fit |
 | The loop brace | Click; drag; drag an end | Turns looping on or off; moves the loop; moves its start or end |
 | A locator | Click; drag; double-click | Jumps there; moves it; renames it |
 | A track's header or strip, where the mixer strip has no control | Click; Ctrl- or Shift-click; double-click | Selects the track; adds it or takes it out; renames it. The master's header and strip select the master |
@@ -155,10 +158,21 @@ four on the piano roll and the Sample Editor while they have it:
 | Home, End | Go to Start and Go to End of the song, scrolling there if it's out of sight |
 | H | Fit Track Heights: makes the tracks share the arrangement's height, as far as they can. If they can't all fit at the smallest size, it says how many are in sight |
 | Alt+Equals, Alt+Minus | Make Tracks Taller and Shorter: the selected tracks, or the selected track, a size at a time, through 24, 60, 120 and 200 points |
+| Ctrl+Alt+O | Shows or hides the overview |
+
+The **overview**, a strip over the ruler, shows the whole song: where the
+tracks have clips, each track in a row of its own while there's room,
+the loop, the locators, the playhead, and a box round what's in sight.
+Clicking it shows that part of the song, and dragging scrolls along and
+zooms; it reaches past the song's end while the view or a recording does.
+Ctrl+Alt+O, or Overview in the View menu, shows and hides it, and
+workspaces keep which. It stays out of the way while the arrangement is
+shorter than 300 points, so the tracks keep their room.
 
 Each view keeps its own history of where it's been, up to 32 steps back. A
-gesture is one step: a burst of the wheel, a drag of the ruler, or a
-command such as W or Zoom to Selection. Pressing W twice, or H twice,
+gesture is one step: a burst of the wheel, a drag of the ruler or the
+overview, a click on the overview, or a command such as W or Zoom to
+Selection. Pressing W twice, or H twice,
 does nothing the second time, and X after W goes back to where you were.
 Scroll to Playhead and Reset Track Height are in the View and Track menus,
 and in the command palette.

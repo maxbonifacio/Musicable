@@ -23,6 +23,7 @@
 
 mod header;
 mod menu;
+mod overview;
 mod paint;
 #[cfg(test)]
 mod tests;
@@ -99,6 +100,10 @@ pub(crate) struct Arrangement {
     /// How far the master's row and lanes are scrolled up, when they don't
     /// all fit.
     master_scroll: f32,
+    /// Whether the overview over the ruler is hidden, as workspaces keep.
+    pub(crate) hide_overview: bool,
+    /// The overview's gesture in progress.
+    overview: overview::Overview,
 }
 
 /// The parts of the arrangement that take the mouse.
@@ -1935,8 +1940,20 @@ impl Arrangement {
         parts: &Parts,
         actions: &mut Vec<Action>,
     ) {
-        let rect = ui.available_rect_before_wrap();
-        ui.allocate_rect(rect, Sense::hover());
+        let whole = ui.available_rect_before_wrap();
+        ui.allocate_rect(whole, Sense::hover());
+        // The overview along the top, over the lanes, when it's shown and
+        // the arrangement has room for it.
+        let room = whole.height() >= overview::MIN_ARRANGEMENT;
+        let (strip, rect) = match self.hide_overview || !room {
+            true => (None, whole),
+            false => {
+                let bottom = (whole.top() + overview::HEIGHT).min(whole.bottom());
+                let split = (whole.right() - theme.header_width).max(whole.left());
+                let strip = Rect::from_min_max(whole.left_top(), pos2(split, bottom));
+                (Some(strip), whole.with_min_y(bottom))
+            }
+        };
         let editor = view.editor;
         let master_scroll = self.master_scroll;
         let layout = Layout::new(
@@ -1994,14 +2011,22 @@ impl Arrangement {
         }
         let wheeled = self.wheel(ui, &scene, &mut viewport, actions);
         self.edge_scroll(ui, &scene, &mut viewport);
+        let overviewed = strip.and_then(|strip| {
+            (self.overview).interact(ui, strip, view, mouse, &mut viewport, actions)
+        });
+        let held = self.drag.is_some() || self.overview.dragging() || overviewed.is_some();
         let (record, force) = self.navigating.frame(
             ui,
             &view.playback,
             editor,
             Panel::Arrangement,
             &mut viewport,
-            (wheeled, self.drag.is_some()),
+            (wheeled, held),
         );
+        let (record, force) = match overviewed {
+            Some(record) => (record, true),
+            None => (record, force),
+        };
         if viewport != editor.viewport || force {
             set_viewport(actions, &viewport, record);
         }
@@ -2024,6 +2049,13 @@ impl Arrangement {
         });
 
         let painter = ui.painter_at(rect);
+        if let Some(strip) = strip {
+            let viewport = &scene.layout.viewport;
+            let overview = ui.painter_at(strip);
+            (self.overview).paint(ui, &overview, strip, view, theme, viewport);
+            let corner = Rect::from_min_max(strip.right_top(), pos2(whole.right(), strip.bottom()));
+            ui.painter_at(corner).rect_filled(corner, 0.0, theme.ruler);
+        }
         paint::lanes(
             &painter.with_clip_rect(scene.layout.lanes),
             &scene,

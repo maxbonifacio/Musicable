@@ -2330,3 +2330,63 @@ fn continuous_follow_keeps_the_playhead_still_and_waits_after_a_drag() {
     assert!(!harness.state().editor().navigation.arrangement.suspended);
     assert!(harness.state().errors.is_empty());
 }
+
+/// Where song position `at` is across the overview, which shows the song
+/// to its end, the outro's, at beat 1008, or what's in sight past it.
+fn in_overview(harness: &Harness<'_, State>, at: f64) -> Pos2 {
+    let strip = harness.get_by_label("Overview").rect();
+    let visible = harness.state().editor().viewport.visible();
+    let end = visible.end.to_f64().max(1008.0);
+    pos2(
+        strip.left() + (at / end) as f32 * strip.width(),
+        strip.center().y,
+    )
+}
+
+#[test]
+fn the_overview_shows_where_it_s_clicked_and_the_whole_song_double_clicked() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    let at = in_overview(&harness, 500.0);
+    click(&mut harness, at, Modifiers::NONE);
+    let editor = harness.state().editor();
+    let visible = editor.viewport.visible();
+    let middle = (visible.start.to_f64() + visible.end.to_f64()) / 2.0;
+    assert!((middle - 500.0).abs() < 10.0, "{visible:?}");
+    assert_eq!(editor.navigation.arrangement.len(), 1);
+    pause(&mut harness);
+    let at = in_overview(&harness, 100.0);
+    double_click(&mut harness, at);
+    let visible = harness.state().editor().viewport.visible();
+    assert!(
+        visible.start == Beats::ZERO && Beats::new(1008) <= visible.end,
+        "{visible:?}"
+    );
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn dragging_in_the_overview_scrolls_and_its_box_s_edge_zooms() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    let before = harness.state().editor().viewport;
+    // Along scrolls: 100 beats' worth of the strip.
+    let from = in_overview(&harness, 20.0);
+    let to = in_overview(&harness, 120.0);
+    drag(&mut harness, from, to, Modifiers::NONE);
+    let viewport = harness.state().editor().viewport;
+    assert_eq!(viewport.zoom, before.zoom);
+    let moved = (viewport.start - before.start).to_f64();
+    assert!((moved - 100.0).abs() < 2.0, "{moved}");
+    // The drag is one step back.
+    assert_eq!(harness.state().editor().navigation.arrangement.len(), 1);
+    // The box's end, dragged out, zooms out to fit.
+    let visible = viewport.visible();
+    let end = in_overview(&harness, visible.end.to_f64());
+    let to = in_overview(&harness, visible.end.to_f64() + 200.0);
+    drag(&mut harness, end, to, Modifiers::NONE);
+    let after = harness.state().editor().viewport;
+    assert!(after.zoom < viewport.zoom * 0.7, "{after:?}");
+    assert_eq!(after.start, viewport.start);
+    assert!(harness.state().errors.is_empty());
+}

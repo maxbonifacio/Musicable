@@ -962,6 +962,7 @@ impl App {
                 self.shell.toggle_panel(panel);
                 self.focus_in_sight();
             }
+            Request::ToggleOverview => self.shell.toggle_overview(),
             Request::ShowPanel(panel) => {
                 self.shell.show_panel(panel);
                 self.focus_in_sight();
