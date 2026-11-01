@@ -450,7 +450,9 @@ fn run(
     if result != kResultOk {
         return false;
     }
+    let dropped = audio.out_events.take_dropped();
     if played_to.takes() {
+        played_to.drop(dropped);
         let Audio {
             out_events, made, ..
         } = audio;
@@ -460,6 +462,8 @@ fn run(
             let offset = usize::try_from(event.sampleOffset).unwrap_or(0);
             played(event, made, &mut |p| played_to.play(time, offset, p));
         }
+    } else {
+        audio.made.idle();
     }
     let Some(output) = output else {
         return true;

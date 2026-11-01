@@ -142,6 +142,13 @@ struct Rank {
 /// four blocks can send.
 const NOTE_QUEUE: usize = 4 * Notes::CAPACITY;
 
+/// The room a graph keeps in its queue of events, and each node in what
+/// comes to it, for the ends and the switches a graph it replaces hands
+/// over ([`take_over`]): as many notes as a node can have sounding, and
+/// every switch on every channel. Beyond them, the rest are dropped and
+/// counted.
+const HAND_OVER: usize = Notes::CAPACITY + 17 * 6;
+
 impl Graph {
     /// The most frames late a path can be, to compensate for: 262,144, about
     /// 5.5 seconds at 48 kHz. Paths later than that are lined up as if they
@@ -301,10 +308,17 @@ impl Graph {
         Ok(())
     }
 
+    /// Whether sending the notes `from` plays to `to`
+    /// ([`send_notes`](Graph::send_notes)) would close a loop, which it
+    /// refuses.
+    pub(crate) fn notes_would_loop(&self, from: NodeId, to: NodeId) -> bool {
+        from == to || self.notes_reach(to, from) || self.made_way(to, from)
+    }
+
     fn route_notes(&mut self, from: NodeId, to: NodeId, side: bool) -> Result<(), GraphError> {
         self.check(from)?;
         self.check(to)?;
-        if from == to || self.notes_reach(to, from) || self.made_way(to, from) {
+        if self.notes_would_loop(from, to) {
             return Err(GraphError::Cycle);
         }
         if !self.note_routes.contains(&(from, to, side)) {
@@ -1025,7 +1039,8 @@ impl Graph {
             let routes_in = notes_into(player.node);
             let feeds_in = self.feeds.iter().filter(|f| f.0 == player.node).count();
             plays_notes[player.node.0] = true;
-            inbox = inbox.max(EVENT_CAPACITY + routes_in * Notes::CAPACITY + feeds_in * room);
+            let notes_in = routes_in * Notes::CAPACITY + HAND_OVER;
+            inbox = inbox.max(EVENT_CAPACITY + notes_in + feeds_in * room);
         }
         let mut controllers = self.order_controllers();
         controllers.sort_by_key(|c| stage_of[c.node.0]);
@@ -1043,7 +1058,7 @@ impl Graph {
             let routes_in = notes_into(node);
             let feeds_in = self.feeds.iter().filter(|f| f.0 == node).count();
             let ports_in = self.modulations.iter().filter(|m| m.1 == node).count();
-            let notes_in = routes_in * Notes::CAPACITY;
+            let notes_in = routes_in * Notes::CAPACITY + HAND_OVER;
             inbox = inbox.max(EVENT_CAPACITY + notes_in + (feeds_in + ports_in) * room);
         }
         // Where each stage's nodes, players, makers and controllers are.
@@ -1077,13 +1092,14 @@ impl Graph {
             .collect();
         // Room for every parameter event the engine can hold, for each
         // player's and maker's notes to each of its targets, for the
-        // automation the graph sends and for what each controller sends.
+        // automation the graph sends, for what each controller sends, and
+        // for what a graph it replaces hands over.
         let notes: usize = (ordered.iter().chain(&makers))
             .map(|p| p.targets.len())
             .sum();
         let feeds = self.feeds.len() * room;
         let ports: usize = controllers.iter().map(|c| c.room).sum();
-        let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY + feeds + ports;
+        let capacity = EVENT_CAPACITY + notes * Notes::CAPACITY + feeds + ports + HAND_OVER;
         // The nodes that can be live sources, for the engine to ask before
         // each block, and their keys, for the events it sends them.
         let live: Vec<NodeId> = (0..self.nodes.len())
@@ -1593,6 +1609,10 @@ struct Player {
 struct Sounding {
     notes: Vec<NoteId>,
     switches: Switches,
+    /// Whether they're all to end, as a block had no room left to end
+    /// them in: they end first thing in the node's next turn
+    /// ([`Notes::release_all`]).
+    releasing: bool,
 }
 
 /// The switches held on, a bit for each, the sustain pedal's lowest: for
@@ -1605,6 +1625,7 @@ impl Sounding {
         Self {
             notes: Vec::with_capacity(Notes::CAPACITY),
             switches: [0; 17],
+            releasing: false,
         }
     }
 
@@ -1780,22 +1801,38 @@ impl Notes<'_> {
     /// lets go of the switches it holds on there, such as the sustain
     /// pedal, which would hold the notes on: as when what it plays changes
     /// all at once, such as a MIDI effect's switch bypassing it. Each end
-    /// takes room as a note does.
+    /// takes room as a note does. Those the block has no room left for
+    /// end first thing in the node's next block, before anything it plays
+    /// then: with no room left, it plays nothing more in this one.
     pub fn release_all(&mut self, offset: usize) {
         let Some(sounding) = self.sounding.take() else {
             return;
         };
-        while let Some(note) = sounding.notes.pop() {
-            let velocity = Note::RELEASE_VELOCITY;
-            self.send_kind(
-                offset,
-                NodeEventKind::Note(NoteEvent::Off { note, velocity }),
-            );
+        let velocity = Note::RELEASE_VELOCITY;
+        while self.room > 0
+            && let Some(note) = sounding.notes.pop()
+        {
+            let off = NodeEventKind::Note(NoteEvent::Off { note, velocity });
+            self.send_kind(offset, off);
         }
-        for (controller, channel) in switches_on(std::mem::take(&mut sounding.switches)) {
+        for (controller, channel) in switches_on(sounding.switches) {
+            if self.room == 0 {
+                break;
+            }
             self.send_controller_on(offset, controller, 0.0, channel);
+            sounding.switches[channel_lane(channel)] &= !switch_bit(controller);
         }
+        sounding.releasing = !sounding.notes.is_empty() || sounding.switches != [0; 17];
         self.sounding = Some(sounding);
+    }
+
+    /// Ends what the node had sounding that the last block had no room to
+    /// end ([`release_all`](Self::release_all)), at the block's first
+    /// frame.
+    fn finish_releasing(&mut self) {
+        if self.sounding.as_ref().is_some_and(|s| s.releasing) {
+            self.release_all(0);
+        }
     }
 
     /// The block's length: notes are sent at offsets below it.
@@ -1841,9 +1878,11 @@ impl<'a> Notes<'a> {
         self.dropped
     }
 
-    /// Counts `count` notes as dropped, as a node that hands on what
-    /// another plays had no room for them.
-    pub(crate) fn drop_more(&mut self, count: u64) {
+    /// Counts `count` notes as dropped, in
+    /// [`Stats::events_dropped`](crate::Stats::events_dropped), as a node
+    /// that hands on what another plays had no room for them, such as a
+    /// plugin's node for the notes the plugin played.
+    pub fn drop_more(&mut self, count: u64) {
         self.dropped += count;
     }
 }
@@ -2138,10 +2177,14 @@ impl PreparedGraph {
     pub(crate) fn adopt_from(&mut self, old: &mut PreparedGraph) {
         let mut live = self.live_half.take();
         let mut old_live = old.live_half.take();
-        take_over(self, live.as_deref_mut(), old);
+        let mut dropped = take_over(self, live.as_deref_mut(), old);
         if let Some(old_live) = old_live.as_deref_mut() {
-            take_over(self, live.as_deref_mut(), old_live);
+            dropped += take_over(self, live.as_deref_mut(), old_live);
         }
+        assert_eq!(
+            dropped, 0,
+            "a test's graphs have room for what they hand over"
+        );
         self.live_half = live;
         old.live_half = old_live;
     }
@@ -2272,6 +2315,7 @@ impl PreparedGraph {
                 dropped: 0,
             };
             let started = load::now();
+            notes.finish_releasing();
             nodes[player.node.0].play_notes(&ctx, &mut notes);
             let ticks = load::now().wrapping_sub(started);
             loads.loads[*load_base + player.node.0].add_before(ticks);
@@ -2402,6 +2446,7 @@ impl PreparedGraph {
                 dropped: 0,
             };
             let started = load::now();
+            notes.finish_releasing();
             nodes[maker.node.0].made_notes(&ctx, &mut notes);
             let ticks = load::now().wrapping_sub(started);
             loads.loads[*load_base + maker.node.0].add_before(ticks);
@@ -2488,17 +2533,19 @@ impl PreparedGraph {
 /// at the same joint, and hands over what `old`'s players and makers had
 /// sounding: see [`PreparedGraph::adopt_from`]. The engine calls it for
 /// each half of the old graph, on the side of the engine where that half
-/// renders up to the swap. Runs on the audio thread.
+/// renders up to the swap. Returns how many of the ends and switches it
+/// hands over there was no room for. Runs on the audio thread.
+#[must_use = "the ends dropped are counted"]
 pub(crate) fn take_over(
     ahead: &mut PreparedGraph,
     live: Option<&mut PreparedGraph>,
     old: &mut PreparedGraph,
-) {
+) -> u64 {
     ahead.adopt_nodes(old);
     match live {
         Some(live) => {
             live.adopt_nodes(old);
-            hand_over(&mut [ahead, live], old);
+            hand_over(&mut [ahead, live], old)
         }
         None => hand_over(&mut [ahead], old),
     }
@@ -2509,29 +2556,31 @@ pub(crate) fn take_over(
 /// the events queued for the new graph so far, so none comes after a
 /// switch goes on, though the other half of the old graph may have handed
 /// over its switches before, on the other side of the engine: neither half
-/// of the new graph has rendered yet.
-fn hand_over(new: &mut [&mut PreparedGraph], old: &mut PreparedGraph) {
+/// of the new graph has rendered yet. Returns how many there was no room
+/// for.
+fn hand_over(new: &mut [&mut PreparedGraph], old: &mut PreparedGraph) -> u64 {
     let mut queued = [0; 2];
     for (queued, graph) in queued.iter_mut().zip(new.iter()) {
         *queued = graph.routed.len();
     }
-    let_go(new, &old.players, false);
-    let_go(new, &old.makers, true);
+    let mut dropped = let_go(new, &old.players, false) + let_go(new, &old.makers, true);
     for (&queued, graph) in queued.iter().zip(new.iter_mut()) {
         let let_go = graph.routed.len() - queued;
         graph.routed.rotate_right(let_go);
         renumber(&mut graph.routed);
     }
-    hold_on(new, &mut old.players, false);
-    hold_on(new, &mut old.makers, true);
+    dropped += hold_on(new, &mut old.players, false);
+    dropped + hold_on(new, &mut old.makers, true)
 }
 
 /// Ends the notes each of `gone`, an old graph's players, or with `made`
 /// its makers, had sounding where its notes don't go any more in `new`,
 /// the halves of the graph that takes over, and lets go of the switches it
 /// held on there: see [`PreparedGraph::adopt_from`]. A queue's player plays
-/// on notes another node keeps sounding, so it lets go of nothing.
-fn let_go(new: &mut [&mut PreparedGraph], gone: &[Player], made: bool) {
+/// on notes another node keeps sounding, so it lets go of nothing. Returns
+/// how many ends and switches there was no room for.
+fn let_go(new: &mut [&mut PreparedGraph], gone: &[Player], made: bool) -> u64 {
+    let mut dropped = 0;
     for gone in gone.iter().filter(|gone| gone.key.is_some()) {
         let player = find_player(new, gone.key, made);
         for &(to, side) in &gone.target_keys {
@@ -2556,17 +2605,20 @@ fn let_go(new: &mut [&mut PreparedGraph], gone: &[Player], made: bool) {
             });
             for kind in ends.chain(ups) {
                 let kind = if side { kind.to_side() } else { kind };
-                graph.route(to, NodeEvent { offset: 0, kind });
+                dropped += u64::from(!graph.route(to, NodeEvent { offset: 0, kind }));
             }
         }
     }
+    dropped
 }
 
 /// Has the notes each of `gone`, an old graph's players, or with `made` its
 /// makers, had sounding sound on where its notes still go in `new`, the
 /// halves of the graph that takes over, and the switches it held on hold
-/// on where they go now: see [`PreparedGraph::adopt_from`].
-fn hold_on(new: &mut [&mut PreparedGraph], gone: &mut [Player], made: bool) {
+/// on where they go now: see [`PreparedGraph::adopt_from`]. Returns how
+/// many switches there was no room for.
+fn hold_on(new: &mut [&mut PreparedGraph], gone: &mut [Player], made: bool) -> u64 {
+    let mut dropped = 0;
     for gone in gone.iter_mut().filter(|gone| gone.key.is_some()) {
         let Some((half, p)) = find_player(new, gone.key, made) else {
             continue;
@@ -2576,6 +2628,11 @@ fn hold_on(new: &mut [&mut PreparedGraph], gone: &mut [Player], made: bool) {
             let (to, side) = new[half].list(made)[p].target_keys[t];
             if gone.target_keys.contains(&(to, side)) {
                 kept_any = true;
+                continue;
+            }
+            // Switches about to come up don't go down where the notes go
+            // now.
+            if gone.sounding.releasing {
                 continue;
             }
             let Some((graph, to)) = (new.iter_mut()).find_map(|g| g.find(to).map(|to| (g, to)))
@@ -2589,19 +2646,27 @@ fn hold_on(new: &mut [&mut PreparedGraph], gone: &mut [Player], made: bool) {
                     channel,
                 };
                 let kind = if side { kind.to_side() } else { kind };
-                graph.route(to, NodeEvent { offset: 0, kind });
+                dropped += u64::from(!graph.route(to, NodeEvent { offset: 0, kind }));
             }
         }
         let player = match made {
             true => &mut new[half].makers[p],
             false => &mut new[half].players[p],
         };
-        // Its notes sound on where it still sends them, if anywhere.
+        // Its notes sound on where it still sends them, if anywhere, and
+        // what was still to end there ends.
         if kept_any {
             std::mem::swap(&mut player.sounding.notes, &mut gone.sounding.notes);
+            player.sounding.releasing = gone.sounding.releasing;
         }
-        player.sounding.switches = gone.sounding.switches;
+        // Those still to come up came up where the notes went, unless they
+        // go there still.
+        player.sounding.switches = match kept_any || !gone.sounding.releasing {
+            true => gone.sounding.switches,
+            false => [0; 17],
+        };
     }
+    dropped
 }
 
 /// Which of `new`'s halves has the player, or with `made` the maker, with
@@ -3115,6 +3180,78 @@ mod tests {
             kind: NodeEventKind::Note(on),
         }];
         assert_eq!(graph.record_notes(NodeKey(9)), Some(&recorded[..]));
+    }
+
+    #[test]
+    fn ends_a_block_has_no_room_for_come_first_in_the_next() {
+        let mut routed = Vec::with_capacity(2 * Notes::CAPACITY);
+        let targets = [(NodeId(1), false)];
+        let mut sounding = Sounding::new();
+        let block =
+            |routed: &mut Vec<Routed>, sounding: &mut Sounding, play: &dyn Fn(&mut Notes<'_>)| {
+                routed.clear();
+                let mut notes = Notes {
+                    routed,
+                    targets: &targets,
+                    rank: 1,
+                    record: None,
+                    sounding: Some(sounding),
+                    frames: 64,
+                    room: Notes::CAPACITY,
+                    dropped: 0,
+                };
+                notes.finish_releasing();
+                play(&mut notes);
+                assert_eq!(notes.dropped, 0);
+                let kinds: Vec<(usize, NodeEventKind)> = routed
+                    .iter()
+                    .map(|r| (r.event.offset, r.event.kind))
+                    .collect();
+                kinds
+            };
+        let on = |n: u64| NoteEvent::On {
+            note: NoteId(n),
+            key: 60 + n as u8,
+            velocity: 1.0,
+            channel: None,
+        };
+        let pressure = NoteEvent::Expression {
+            note: NoteId(0),
+            dimension: musicable_model::clip::Dimension::Pressure,
+            value: 0.5,
+        };
+        // Two notes and the pedal, then expression that leaves room for
+        // one more, and every end: the first ends, and the rest wait.
+        let played = block(&mut routed, &mut sounding, &|notes| {
+            notes.send(0, on(0));
+            notes.send(0, on(1));
+            notes.send_controller(0, Controller::SUSTAIN, 1.0);
+            while notes.room() > 1 {
+                notes.send(1, pressure);
+            }
+            notes.release_all(2);
+        });
+        let off = |n: u64| {
+            NodeEventKind::Note(NoteEvent::Off {
+                note: NoteId(n),
+                velocity: Note::RELEASE_VELOCITY,
+            })
+        };
+        assert_eq!(played.last(), Some(&(2, off(1))));
+        assert!(sounding.releasing);
+        // They end first in the next block, before what plays then.
+        let played = block(&mut routed, &mut sounding, &|notes| {
+            notes.send(10, on(2));
+        });
+        let up = NodeEventKind::Controller {
+            controller: Controller::SUSTAIN,
+            value: 0.0,
+            channel: None,
+        };
+        let started = NodeEventKind::Note(on(2));
+        assert_eq!(played, [(0, off(0)), (0, up), (10, started)]);
+        assert!(!sounding.releasing);
+        assert_eq!(sounding.notes, [NoteId(2)]);
     }
 
     #[test]

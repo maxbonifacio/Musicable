@@ -604,10 +604,22 @@ impl MidiNotes {
     }
 }
 
-/// The ids of the notes a [`MidiMonitor`] plays start here, clear of the
-/// ids of clips' notes ([`clips::note_id`](crate::clips::note_id)), whose
-/// clip ids never reach the top bit.
-const LIVE_NOTES: u64 = 1 << 63;
+/// The first id of the notes played under ids of their own by number `n`
+/// of those that give them: the MIDI monitors ([`MidiMonitor`]) are number
+/// 0, and each plugin instance that plays notes, as a MIDI effect does,
+/// takes a number of its own from 1 up. Their ids have the top bit set and
+/// the next clear, clear of the ids of clips' notes
+/// ([`clips::note_id`](crate::clips::note_id)), whose clip ids never reach
+/// the top bit, and of a [`NoteWire`]'s, which have both set. `n` goes in
+/// the 30 bits below them and a count in the 32 below that, so the notes of
+/// two that meet where they go never clash, as a MIDI effect's bypassed
+/// notes and the monitor's it passes on do, or two MIDI effects'.
+pub const fn played_notes(n: u32) -> u64 {
+    1 << 63 | ((n as u64) & 0x3FFF_FFFF) << 32
+}
+
+/// The ids of the notes a [`MidiMonitor`] plays start here.
+const LIVE_NOTES: u64 = played_notes(0);
 
 /// The most clip notes a [`MidiMonitor`] keeps track of at once, as a clip
 /// player does, and the most notes from its side input.
@@ -1038,11 +1050,11 @@ impl Node for MidiMonitor {
 }
 
 /// The ids of the notes a [`NoteWire`] plays have the top two bits set,
-/// clear of the ids of clips' notes, whose top bit is clear, and of those a
-/// [`MidiMonitor`] or a plugin's notes count up from [`LIVE_NOTES`], which
-/// never reach the next bit. The wire's id goes in the 30 bits below them,
-/// so the notes of two wires never clash where they meet, and a count in
-/// the 32 below that.
+/// clear of the ids of clips' notes, whose top bit is clear, and of those
+/// a [`MidiMonitor`] or a plugin plays ([`played_notes`]), whose next bit
+/// is clear. The wire's id goes in the 30 bits below them, so the notes of
+/// two wires never clash where they meet, and a count in the 32 below
+/// that.
 const WIRED_NOTES: u64 = 3 << 62;
 
 /// Plays the notes a note wire takes on into where it goes: an

@@ -1233,7 +1233,8 @@ impl Core {
         let drain = old.as_deref().is_some_and(|old| old.turns_ahead(&graph));
         let halves = live.is_some() || old.as_deref().is_some_and(|old| !old.live_ids.is_empty());
         if let Some(old) = old.as_deref_mut() {
-            take_over(&mut graph, live.as_deref_mut(), old);
+            let dropped = take_over(&mut graph, live.as_deref_mut(), old);
+            self.counters.events_dropped.fetch_add(dropped, Relaxed);
         }
         // Its loads have all carried on, for the control thread to read,
         // unless the live side has some to carry on still.
@@ -1265,7 +1266,8 @@ impl Core {
     ) {
         if let Some(graph) = self.graph.as_deref_mut() {
             if let Some(old) = old {
-                take_over(graph, live, old);
+                let dropped = take_over(graph, live, old);
+                self.counters.events_dropped.fetch_add(dropped, Relaxed);
             }
             graph.loads.set_installed();
         }

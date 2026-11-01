@@ -86,9 +86,16 @@ pub struct Switch {
     /// The events of a part of a block the device renders, moved to their
     /// offsets in the part.
     shifted: Vec<NodeEvent>,
-    /// The frame the device stopped on in the block that rendered last, if
-    /// it stopped: the notes it made that still sound end there.
-    stopped_at: Option<usize>,
+    /// The frames the device stopped on in the block that rendered last,
+    /// in order: the notes it made that still sound end at each. A device
+    /// brought back after it stops can stop again in the same block.
+    stops: Vec<usize>,
+    /// Whether the notes the device makes as it renders go somewhere
+    /// ([`Node::makes_notes`]).
+    making: bool,
+    /// The notes the device made in a block it stopped in, on their way
+    /// on, so each stop's ends land among them where it stopped.
+    made: Vec<Routed>,
 }
 
 /// How many switches can be on their way through a device at once. One
@@ -126,7 +133,9 @@ impl Switch {
             fade: 1,
             due: VecDeque::new(),
             shifted: Vec::new(),
-            stopped_at: None,
+            stops: Vec::new(),
+            making: false,
+            made: Vec::new(),
         }
     }
 
@@ -268,7 +277,12 @@ impl Switch {
             if self.leaving() && self.settled() {
                 self.device.stop();
                 self.running = false;
-                self.stopped_at = Some(at);
+                // Room for every stop a block has frames for: each comes
+                // a fade after the device was last brought back.
+                if self.stops.len() == self.stops.capacity() {
+                    self.stops.pop();
+                }
+                self.stops.push(at);
             }
             if at == frames {
                 break;
@@ -322,6 +336,10 @@ impl Node for Switch {
         self.over = if self.to_dry { self.fade } else { 0 };
         self.due = VecDeque::with_capacity(DUE);
         self.shifted = Vec::with_capacity(SHIFTED);
+        self.stops = Vec::with_capacity(config.max_block / self.fade as usize + 2);
+        if self.making {
+            self.made = Vec::with_capacity(Notes::CAPACITY);
+        }
     }
 
     fn latency(&self) -> usize {
@@ -378,7 +396,7 @@ impl Node for Switch {
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
-        self.stopped_at = None;
+        self.stops.clear();
         if self.deactivated {
             self.device.flush(ctx);
             output.clear();
@@ -427,16 +445,46 @@ impl Node for Switch {
         }
     }
 
-    /// What the device made as it rendered, and, if it stopped, the end of
-    /// the notes it made that still sound and of the switches it held on.
+    /// What the device made as it rendered, and, where it stopped, the end
+    /// of the notes it made that still sound and of the switches it held
+    /// on. A device brought back after it stopped in the block made the
+    /// notes after the stop afresh, so they come after the ends, and sound
+    /// on.
     fn made_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
-        self.device.made_notes(ctx, notes);
-        if let Some(at) = self.stopped_at.take() {
-            notes.release_all(at.min(ctx.frames.saturating_sub(1)));
+        let Self {
+            device,
+            stops,
+            made,
+            ..
+        } = self;
+        if stops.is_empty() {
+            device.made_notes(ctx, notes);
+            return;
         }
+        made.clear();
+        let mut buffer = Notes::buffer(made, ctx.frames);
+        device.made_notes(ctx, &mut buffer);
+        notes.drop_more(buffer.dropped());
+        made.sort_unstable_by_key(|r| (r.event.offset, r.order));
+        let last = ctx.frames.saturating_sub(1);
+        let mut made = made.iter().peekable();
+        for &stop in stops.iter() {
+            let stop = stop.min(last);
+            // The device rendered the frames before its stop, and those
+            // after it once it's back.
+            while let Some(r) = made.next_if(|r| r.event.offset < stop) {
+                notes.send_played(r.event.offset, r.event.kind);
+            }
+            notes.release_all(stop);
+        }
+        for r in made {
+            notes.send_played(r.event.offset, r.event.kind);
+        }
+        stops.clear();
     }
 
     fn makes_notes(&mut self) {
+        self.making = true;
         self.device.makes_notes();
     }
 
@@ -507,8 +555,9 @@ pub struct NoteSwitch {
     shifted: Vec<NodeEvent>,
 }
 
-/// How much modulation can wait for a MIDI effect's next block. Beyond it,
-/// more is dropped.
+/// How many of a MIDI effect's parameters, each for every note or for one,
+/// modulation can wait for its next block for. The modulation of more is
+/// dropped.
 const LATE: usize = 256;
 
 /// How many controllers a MIDI effect started afresh can hear before
@@ -633,14 +682,25 @@ impl Node for NoteSwitch {
             self.device.flush(ctx);
             return;
         }
+        // It all comes on the next block's first frame, so the last of each
+        // parameter's is what counts.
         for event in ctx.events {
-            if matches!(event.kind, NodeEventKind::Modulation { .. })
-                && self.late.len() < self.late.capacity()
-            {
-                self.late.push(NodeEvent {
-                    offset: 0,
-                    ..*event
-                });
+            let NodeEventKind::Modulation { param, note, .. } = event.kind else {
+                continue;
+            };
+            let moved = NodeEvent {
+                offset: 0,
+                ..*event
+            };
+            let same = |e: &NodeEvent| {
+                matches!(e.kind, NodeEventKind::Modulation { param: p, note: n, .. }
+                    if (p, n) == (param, note))
+            };
+            let late = &mut self.late;
+            match late.iter().position(same) {
+                Some(waiting) => late[waiting] = moved,
+                None if late.len() < late.capacity() => late.push(moved),
+                None => {}
             }
         }
     }
@@ -1457,6 +1517,97 @@ mod tests {
         }
     }
 
+    /// A device that plays out a note of its own each time it starts
+    /// afresh, held until it stops, a key higher each time.
+    struct Restarts {
+        made: Vec<(u64, NoteEvent)>,
+        fresh: bool,
+        started: u64,
+    }
+
+    impl Node for Restarts {
+        fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            if std::mem::take(&mut self.fresh) {
+                self.started += 1;
+                let key = 59 + self.started as u8;
+                self.made.push((ctx.time, on(self.started, key)));
+            }
+            output.clear();
+        }
+
+        fn reset(&mut self) {
+            self.fresh = true;
+        }
+
+        fn made_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+            for (time, note) in self.made.drain(..) {
+                notes.send((time - ctx.time) as usize, note);
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_brought_back_in_the_block_it_stopped_in_plays_on_until_it_stops_again() {
+        use crate::graph::{Graph, NodeKey};
+        use crate::{AudioRef, Block, ReferenceRenderer, TransportState};
+        let restarts = Restarts {
+            made: Vec::with_capacity(4),
+            fresh: true,
+            started: 0,
+        };
+        let mut g = Graph::new();
+        let switch_node = g.add(NodeKey(0), Switch::new(Box::new(restarts), false));
+        let kept = Kept {
+            notes: Vec::with_capacity(32),
+            controllers: Vec::with_capacity(32),
+        };
+        let kept = g.add(NodeKey(1), kept);
+        g.send_made_notes(switch_node, kept).unwrap();
+        g.set_output(kept).unwrap();
+        let config = EngineConfig {
+            sample_rate: 48_000,
+            max_block: 2048,
+        };
+        let mut graph = g.prepare(&config).unwrap();
+        let tempo = musicable_model::time::TempoMap::default();
+        let mut run = |time, events: &[NodeEvent]| {
+            for &event in events {
+                assert!(graph.route(switch_node, event));
+            }
+            let block = Block {
+                frames: 2048,
+                time,
+                transport: TransportState::default(),
+                tempo: &tempo,
+                input: AudioRef::empty(2048),
+                midi: &[],
+                ahead: false,
+            };
+            crate::rt::scope(|| assert_eq!(graph.run(&mut ReferenceRenderer, &block), 0));
+            kept_by(&mut graph, kept).notes.clone()
+        };
+        let release = musicable_model::clip::Note::RELEASE_VELOCITY;
+        assert_eq!(run(0, &[]), [(0, on(1, 60))]);
+        // Bypassed on frame 0, it stops once the fade is over, on frame 480,
+        // and its note ends there. Brought back on frame 600, it plays a
+        // note afresh, which sounds on. Bypassed again on frame 1000, 400
+        // frames short of its fade back, it fades out from there, stops on
+        // frame 1400, and that note ends there.
+        let events = [switch(0, true), switch(600, false), switch(1000, true)];
+        assert_eq!(
+            run(2048, &events),
+            [
+                (480, off(1, release)),
+                (600, on(2, 61)),
+                (1400, off(2, release))
+            ]
+        );
+        // Brought back and bypassed in the next blocks, it ends the note it
+        // played then too.
+        assert_eq!(run(4096, &[switch(0, false)]), [(0, on(3, 62))]);
+        assert_eq!(run(6144, &[switch(0, true)]), [(480, off(3, release))]);
+    }
+
     #[test]
     fn a_device_s_notes_made_as_it_renders_go_on_and_end_as_it_stops() {
         use crate::graph::{Graph, NodeKey};
@@ -1644,6 +1795,34 @@ mod tests {
         play(&mut graph, nodes, 64, &[], &[]);
         let log = log(&mut graph, nodes[1]);
         assert_eq!(log.changes, [(30, param), (64, modulation)]);
+    }
+
+    #[test]
+    fn a_midi_effect_gets_the_last_of_each_parameters_modulation_a_block_late() {
+        let effect = Octave::boxed();
+        let (mut graph, nodes) = notes_through(NoteSwitch::new(effect, false), Vec::new());
+        let modulation = |param, amount, note| NodeEventKind::Modulation {
+            param: ParamId(param),
+            amount,
+            note,
+        };
+        let at = |offset, kind| NodeEvent { offset, kind };
+        // More of each than it could keep, each moving on every frame.
+        let mut moves = Vec::new();
+        for offset in 0..64 {
+            for param in 0..6 {
+                moves.push(at(offset, modulation(param, offset as f64, None)));
+            }
+            moves.push(at(offset, modulation(2, -(offset as f64), Some(NoteId(9)))));
+        }
+        play(&mut graph, nodes, 0, &[], &moves);
+        play(&mut graph, nodes, 64, &[], &[]);
+        let log = log(&mut graph, nodes[1]);
+        let mut last: Vec<_> = (0..6)
+            .map(|param| (64, modulation(param, 63.0, None)))
+            .collect();
+        last.push((64, modulation(2, -63.0, Some(NoteId(9)))));
+        assert_eq!(log.changes, last);
     }
 
     #[test]

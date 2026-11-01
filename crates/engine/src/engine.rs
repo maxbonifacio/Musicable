@@ -934,7 +934,8 @@ impl Live {
         }
         if !drain && let Some(new) = new.as_deref_mut() {
             if let Some(old) = old.as_deref_mut() {
-                take_over(new, None, old);
+                let dropped = take_over(new, None, old);
+                self.counters.events_dropped.fetch_add(dropped, Relaxed);
             }
             // Its loads have all carried on, for the control thread to read.
             new.loads.set_installed();

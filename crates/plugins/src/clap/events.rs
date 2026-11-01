@@ -322,6 +322,8 @@ pub(crate) struct Output<'a> {
     /// The notes it plays, and the MIDI, as it plays them, where something
     /// takes them, as many as there's room for.
     pub(crate) notes: Option<&'a mut Vec<Event>>,
+    /// How many of those there was no room for.
+    pub(crate) dropped: u64,
 }
 
 /// The list a plugin sends events back on, which puts them in `output`. It
@@ -384,7 +386,10 @@ unsafe extern "C" fn output_try_push(
                     notes.push(event);
                     true
                 }
-                (Some(_), Some(_)) => false,
+                (Some(_), Some(_)) => {
+                    output.dropped += 1;
+                    false
+                }
                 _ => true,
             };
         }
@@ -435,6 +440,7 @@ mod tests {
             queue: &mut producer,
             voices: Some(&mut voices),
             notes: None,
+            dropped: 0,
         };
         let list = output_list(&mut output);
         let begin = clap_event_param_gesture {
@@ -463,6 +469,7 @@ mod tests {
             queue: &mut producer,
             voices: None,
             notes: None,
+            dropped: 0,
         };
         let list = output_list(&mut output);
         // SAFETY: as above.

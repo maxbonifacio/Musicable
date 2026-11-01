@@ -191,10 +191,15 @@ controllers it plays (`kLegacyMIDICCOutEvent`), from its first event
 output, which activating turns on.
 
 - `process::Made` gives each note the plugin plays an id of the engine's
-  own, from 2^63 up, as `midi::MidiNotes` does a MIDI input's, so they
-  can't clash with the notes played into it. It finds the notes the plugin
-  ends or expresses by all it gives of an id, a channel and a key, -1 for
-  any, as CLAP has it. A note with an id of the plugin's own sounds until
+  own, as `midi::MidiNotes` does a MIDI input's, so they can't clash with
+  the notes played into it. Each plugin instance takes a range of ids of
+  its own (`midi::played_notes`), from a count the instances share, apart
+  from the MIDI monitors' and other plugins', whose notes can meet it
+  where it plays. It finds the notes the plugin ends or expresses by all
+  it gives of an id, a channel and a key, -1 for any, as CLAP has it. An
+  end or a change that gives a key and an id no note of the plugin's has
+  is for the note it started without one on that key, as some VST3
+  plugins give an id to a note's end alone. A note with an id of the plugin's own sounds until
   the plugin ends it, whatever starts on its key, as CLAP's voice stacking
   and VST3's note ids allow, so a note repeater's overlapping notes on one
   key each play out. One without an id, and MIDI, play as a keyboard does:
@@ -205,10 +210,15 @@ output, which activating turns on.
   keyboard, until an MPE configuration message sets zones.
 - The notes a plugin was playing end at the start of its first block after
   it's activated again, as for a restart, and are forgotten as it's reset,
-  since its switch ends them as it brings it back.
+  since its switch ends them as it brings it back. They're forgotten too
+  once something takes its notes again after blocks that nothing did
+  (`Made::idle`): what it ended meanwhile wasn't read, and the graph ended
+  those it had sounding as it took its notes away.
 - A plugin can play `Notes::CAPACITY` (512) note events in a block: CLAP's
   output queue says it's full beyond them, and VST3's `addEvent` says
-  `kResultFalse`.
+  `kResultFalse`. Those, and any a plugin played out as it rendered beyond
+  what its node keeps (`process::Kept`), are counted in
+  `Stats::events_dropped`.
 
 **Notes a plugin plays out as it renders.** An instrument or an audio
 effect can have a note output too: a synth that plays its arpeggios out,

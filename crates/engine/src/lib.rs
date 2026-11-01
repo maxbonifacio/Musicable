@@ -70,7 +70,7 @@ pub use event::{
 pub use graph::{Controls, Graph, GraphError, Joint, NodeId, NodeKey, Notes, PreparedGraph};
 pub use load::{Load, LoadKey, NodeLoads};
 pub use meter::{Level, Meter, Meters};
-pub use midi::{MidiMessage, MidiMonitor, MidiNotes, NoteWire, Played};
+pub use midi::{MidiMessage, MidiMonitor, MidiNotes, NoteWire, Played, played_notes};
 pub use output_recording::OutputRecording;
 pub use parallel::{
     AheadWaker, PARTS, ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats, Pipeline,

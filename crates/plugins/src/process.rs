@@ -5,9 +5,10 @@
 
 use std::ops::Range;
 use std::slice;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use musicable_engine::{
-    AudioMut, AudioRef, MidiNotes, NoteEvent, NoteId, Notes, Played, ProcessContext,
+    AudioMut, AudioRef, MidiNotes, NoteEvent, NoteId, Notes, Played, ProcessContext, played_notes,
 };
 use musicable_model::clip::{Dimension, Note};
 use musicable_model::time::{Beats, TimeSignature};
@@ -15,9 +16,21 @@ use musicable_model::time::{Beats, TimeSignature};
 /// How many notes can sound on a plugin at once.
 const SOUNDING_CAPACITY: usize = 512;
 
-/// The ids of the notes a plugin plays count up from here, clear of the
-/// ids of clips' notes, whose clip ids never reach the top bit.
-const MADE_NOTES: u64 = 1 << 63;
+/// The number of the next plugin instance to play notes, for the range of
+/// ids its notes take ([`played_notes`]). 0 is the MIDI monitors'.
+static NEXT_PLAYER: AtomicU32 = AtomicU32::new(1);
+
+/// A number for a plugin instance's notes no other plugin's has, once it
+/// has counted past every number the ids have room for.
+fn next_player() -> u32 {
+    loop {
+        let n = NEXT_PLAYER.fetch_add(1, Ordering::Relaxed);
+        // The monitors' number, as the count goes round.
+        if played_notes(n) != played_notes(0) {
+            return n;
+        }
+    }
+}
 
 /// A parameter change from the main thread, for the next block.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -232,7 +245,10 @@ impl Sounding {
 /// ended, whatever starts on its key, as CLAP's voice stacking and VST3's
 /// note ids allow. One without an id, and MIDI, are read as MIDI is
 /// ([`MidiNotes`]), each channel as a keyboard plays it: a key held again
-/// ends the note on it first. Allocated once.
+/// ends the note on it first. An end or a change that gives an id the
+/// plugin gave no note sounding, and a key, is for the note it started
+/// without one on that key, as some VST3 plugins give an id to a note's
+/// end alone. Allocated once.
 pub(crate) struct Made {
     midi: MidiNotes,
     /// The notes sounding that the plugin gave an id of its own.
@@ -240,6 +256,9 @@ pub(crate) struct Made {
     /// Whether the notes sounding end at the start of the next block, as
     /// the plugin starts again.
     ending: bool,
+    /// Whether the plugin played since without anything taking its notes,
+    /// so what it holds of them is stale.
+    idle: bool,
 }
 
 /// A note sounding that a plugin gave an id of its own.
@@ -264,12 +283,29 @@ impl Own {
 }
 
 impl Made {
+    /// The notes of a plugin instance, under ids of their own, which no
+    /// other instance's notes have.
     pub(crate) fn new() -> Self {
+        Self::numbered(next_player())
+    }
+
+    /// The notes of the plugin with number `n`, for the ids they take
+    /// ([`played_notes`]).
+    fn numbered(n: u32) -> Self {
         Self {
-            midi: MidiNotes::every_channel(MADE_NOTES),
+            midi: MidiNotes::every_channel(played_notes(n)),
             own: Vec::with_capacity(SOUNDING_CAPACITY),
             ending: false,
+            idle: false,
         }
+    }
+
+    /// The plugin played a block whose notes nothing took. Those it ended
+    /// meanwhile weren't read, so once something takes its notes again it
+    /// forgets those it had sounding ([`start_block`](Self::start_block)),
+    /// which ended where they went as the graph took them away.
+    pub(crate) fn idle(&mut self) {
+        self.idle = true;
     }
 
     /// Has the notes sounding end at the start of the next block
@@ -283,6 +319,11 @@ impl Made {
     /// block, as if let go at no particular speed, and lets go of the
     /// switches it held on, such as the sustain pedal.
     pub(crate) fn start_block(&mut self, emit: &mut dyn FnMut(Played)) {
+        if std::mem::take(&mut self.idle) {
+            self.ending = false;
+            self.forget();
+            return;
+        }
         if std::mem::take(&mut self.ending) {
             for own in self.own.drain(..) {
                 emit(Played::Note(NoteEvent::Off {
@@ -348,16 +389,18 @@ impl Made {
         emit: &mut dyn FnMut(Played),
     ) {
         let velocity = (velocity as f32).clamp(0.0, 1.0);
+        let mut ended = false;
         self.own.retain(|own| {
             let named = own.named(id, channel, key);
             if named {
                 let note = own.note;
                 emit(Played::Note(NoteEvent::Off { note, velocity }));
+                ended = true;
             }
             !named
         });
         // A note without an id has none to name it by.
-        if id < 0 {
+        if self.by_key(id, key, ended) {
             let (channels, keys) = keys(channel, key);
             for c in channels {
                 for k in keys.clone() {
@@ -388,10 +431,12 @@ impl Made {
                 value,
             })
         };
+        let mut changed = false;
         for own in self.own.iter().filter(|own| own.named(id, channel, key)) {
             emit(express(own.note));
+            changed = true;
         }
-        if id < 0 {
+        if self.by_key(id, key, changed) {
             let (channels, keys) = keys(channel, key);
             for c in channels {
                 for k in keys.clone() {
@@ -401,6 +446,14 @@ impl Made {
                 }
             }
         }
+    }
+
+    /// Whether an end or a change that names notes with `id` and `key`, and
+    /// found those with ids of the plugin's own if `found`, is for the
+    /// notes started without one too: when it gives no id, or gives one no
+    /// note has, and a key.
+    fn by_key(&self, id: i32, key: i16, found: bool) -> bool {
+        id < 0 || (!found && key >= 0 && !self.own.iter().any(|own| own.id == id))
     }
 
     /// The plugin plays a MIDI message. All Sound Off and All Notes Off end
@@ -446,6 +499,16 @@ impl PlayedTo<'_, '_> {
         !matches!(self, Self::Nowhere)
     }
 
+    /// Counts `count` notes the plugin played as dropped, as there was no
+    /// room for them on their way out of it.
+    pub(crate) fn drop(&mut self, count: u64) {
+        match self {
+            Self::Nowhere => {}
+            Self::Notes(notes) => notes.drop_more(count),
+            Self::Kept(kept) => kept.dropped += count,
+        }
+    }
+
     /// Sends or keeps `played`, `offset` frames into the block from engine
     /// time `time`.
     pub(crate) fn play(&mut self, time: u64, offset: usize, played: Played) {
@@ -462,22 +525,29 @@ impl PlayedTo<'_, '_> {
 /// ([`Node::made_notes`](musicable_engine::Node::made_notes)): each at the
 /// engine time it's on, so the parts of a block its switch has it render
 /// as blocks of their own each land where they were played. As many as a
-/// block can send, [`Notes::CAPACITY`]: more are dropped. Allocated once.
+/// block can send, [`Notes::CAPACITY`]: more are dropped and counted.
+/// Allocated once.
 pub(crate) struct Kept {
     notes: Vec<(u64, Played)>,
+    /// How many notes there was no room for since it last sent them.
+    dropped: u64,
 }
 
 impl Kept {
     pub(crate) fn new() -> Self {
         Self {
             notes: Vec::with_capacity(Notes::CAPACITY),
+            dropped: 0,
         }
     }
 
-    /// Keeps `played`, at engine time `time`, if there's room.
+    /// Keeps `played`, at engine time `time`, if there's room, and counts
+    /// it as dropped if not.
     pub(crate) fn keep(&mut self, time: u64, played: Played) {
         if self.notes.len() < self.notes.capacity() {
             self.notes.push((time, played));
+        } else {
+            self.dropped += 1;
         }
     }
 
@@ -485,6 +555,7 @@ impl Kept {
     /// from engine time `time`, and forgets them. One from before the block
     /// comes on its first frame.
     pub(crate) fn send(&mut self, time: u64, notes: &mut Notes<'_>) {
+        notes.drop_more(std::mem::take(&mut self.dropped));
         for (at, played) in self.notes.drain(..) {
             let offset = usize::try_from(at.saturating_sub(time)).unwrap_or(usize::MAX);
             send(notes, offset, played);
@@ -567,6 +638,9 @@ mod tests {
 
     const RELEASE: f32 = musicable_model::clip::Note::RELEASE_VELOCITY;
 
+    /// The first id of the notes of the plugin the tests number 1.
+    const MADE_NOTES: u64 = played_notes(1);
+
     fn on(n: u64, key: u8, velocity: f32) -> Played {
         Played::Note(NoteEvent::On {
             note: NoteId(MADE_NOTES + n),
@@ -594,8 +668,27 @@ mod tests {
     }
 
     #[test]
+    fn each_plugins_notes_have_ids_no_others_have() {
+        let first = |made: &mut Made| {
+            let started = played(made, |m, emit| m.start(-1, 0, 60, 1.0, &mut *emit));
+            match started[..] {
+                [Played::Note(NoteEvent::On { note, .. })] => note.0,
+                _ => panic!("one note starts: {started:?}"),
+            }
+        };
+        let (a, b) = (first(&mut Made::new()), first(&mut Made::new()));
+        // Clear of each other's, the MIDI monitors' and the note wires'.
+        let range = |id: u64| id & !0xFFFF_FFFF;
+        assert_ne!(range(a), range(b));
+        for id in [a, b] {
+            assert_ne!(range(id), played_notes(0));
+            assert_eq!(id >> 62, 0b10, "{id:#x}");
+        }
+    }
+
+    #[test]
     fn a_plugins_notes_get_ids_of_their_own_and_end_by_its_ids_or_keys() {
-        let mut made = Made::new();
+        let mut made = Made::numbered(1);
         let started = played(&mut made, |m, emit| {
             m.start(7, 0, 60, 0.25, &mut *emit);
             m.start(-1, 1, 64, 1.0, &mut *emit);
@@ -633,7 +726,7 @@ mod tests {
 
     #[test]
     fn notes_a_plugin_gives_ids_of_its_own_sound_together_on_one_key() {
-        let mut made = Made::new();
+        let mut made = Made::numbered(1);
         let started = played(&mut made, |m, emit| {
             m.start(10, 0, 60, 1.0, &mut *emit);
             m.start(11, 0, 60, 0.5, &mut *emit);
@@ -664,8 +757,40 @@ mod tests {
     }
 
     #[test]
+    fn an_end_with_an_id_no_note_has_ends_the_note_started_without_one_on_its_key() {
+        let mut made = Made::numbered(1);
+        played(&mut made, |m, emit| {
+            m.start(-1, 0, 60, 1.0, &mut *emit);
+            m.start(-1, 0, 64, 1.0, &mut *emit);
+            m.start(7, 0, 67, 1.0, &mut *emit);
+        });
+        let pressure = |n: u64| {
+            Played::Note(NoteEvent::Expression {
+                note: NoteId(MADE_NOTES + n),
+                dimension: Dimension::Pressure,
+                value: 0.5,
+            })
+        };
+        // As a VST3 plugin may end a note, or change it, with an id it
+        // gave only then.
+        let ended = played(&mut made, |m, emit| {
+            m.express(5, 0, 60, Dimension::Pressure, 0.5, &mut *emit);
+            m.end(5, 0, 60, 0.5, &mut *emit);
+        });
+        assert_eq!(ended, [pressure(0), off(0, 0.5)]);
+        // Without a key, or with an id a note has, it names no other.
+        let none = played(&mut made, |m, emit| {
+            m.end(5, 0, -1, 0.5, &mut *emit);
+            m.end(7, 0, 64, 0.5, &mut *emit);
+        });
+        assert!(none.is_empty());
+        let ended = played(&mut made, |m, emit| m.end(7, 0, 67, 0.5, &mut *emit));
+        assert_eq!(ended, [off(2, 0.5)]);
+    }
+
+    #[test]
     fn a_plugins_expression_and_midi_play_as_midi_does() {
-        let mut made = Made::new();
+        let mut made = Made::numbered(1);
         let pressure = |n: u64, value: f32| {
             Played::Note(NoteEvent::Expression {
                 note: NoteId(MADE_NOTES + n),
@@ -712,8 +837,35 @@ mod tests {
     }
 
     #[test]
+    fn notes_kept_past_a_blocks_room_are_counted() {
+        let mut kept = Kept::new();
+        for n in 0..Notes::CAPACITY as u64 + 3 {
+            kept.keep(n, on(n, 60, 1.0));
+        }
+        assert_eq!(kept.notes.len(), Notes::CAPACITY);
+        assert_eq!(kept.dropped, 3);
+    }
+
+    #[test]
+    fn a_plugin_whose_notes_nothing_took_forgets_those_it_had() {
+        let mut made = Made::numbered(1);
+        played(&mut made, |m, emit| {
+            m.start(3, 0, 60, 1.0, &mut *emit);
+            m.start(-1, 0, 62, 1.0, &mut *emit);
+        });
+        // Nothing takes them for a while, and then something does: what
+        // it had sounding ended as the graph took its notes away.
+        made.idle();
+        made.end_soon();
+        assert!(played(&mut made, |m, emit| m.start_block(&mut *emit)).is_empty());
+        let ended = played(&mut made, |m, emit| m.end(-1, -1, -1, 0.5, &mut *emit));
+        assert!(ended.is_empty(), "{ended:?}");
+        assert!(made.own.is_empty());
+    }
+
+    #[test]
     fn a_plugin_that_starts_again_ends_its_notes_or_forgets_them() {
-        let mut made = Made::new();
+        let mut made = Made::numbered(1);
         played(&mut made, |m, emit| {
             m.start(1, 0, 60, 1.0, &mut *emit);
             m.midi([0xB0, 64, 127], &mut *emit);

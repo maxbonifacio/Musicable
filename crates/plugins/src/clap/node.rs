@@ -488,6 +488,7 @@ impl Node for ClapNode {
             queue: &mut audio.to_main,
             voices: None,
             notes: None,
+            dropped: 0,
         };
         let out_events = events::output_list(&mut out);
         // SAFETY: active and not processing, on an audio thread, with lists
@@ -602,6 +603,7 @@ fn run(
         queue: &mut audio.to_main,
         voices: Some(&mut audio.voices),
         notes: played_to.takes().then_some(&mut audio.played),
+        dropped: 0,
     };
     let out_events = events::output_list(&mut out);
     let process = clap_process {
@@ -622,11 +624,13 @@ fn run(
         .map_or(CLAP_PROCESS_ERROR, |process_fn| unsafe {
             process_fn(plugin, &process)
         });
+    let dropped = out.dropped;
     audio.steady_time += frames as i64;
     if status == CLAP_PROCESS_ERROR {
         return false;
     }
     if played_to.takes() {
+        played_to.drop(dropped);
         let Audio { played, made, .. } = audio;
         let time = ctx.time;
         made.start_block(&mut |p| played_to.play(time, 0, p));
@@ -635,6 +639,8 @@ fn run(
             event.play(made, &mut |p| played_to.play(time, offset, p));
         }
         played.clear();
+    } else {
+        audio.made.idle();
     }
     let Some(output) = output else {
         return true;
