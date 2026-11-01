@@ -44,6 +44,7 @@ use crate::mouse_file::UserMouse;
 use crate::mouse_page::Asked as MouseAsked;
 use crate::performance::{Figures, LiveMarks};
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
+use crate::plugin_timing::{PluginTimings, TIMINGS_FILE};
 use crate::plugin_windows::PluginWindows;
 use crate::profiles::{self, DEFAULT_PROFILE, Profiles};
 use crate::profiles_page::Asked as ProfilesAsked;
@@ -80,6 +81,8 @@ pub struct App {
     /// their windows before the windows they're in go.
     plugin_windows: PluginWindows,
     plugin_scan: PluginScan,
+    /// Measuring when plugins' notes come, against their latency.
+    plugin_timings: PluginTimings,
     /// The plugins installed, as the browser lists them.
     plugin_entries: Vec<PluginEntry>,
     /// How each plugin device's plugin is doing, as of this frame.
@@ -308,6 +311,7 @@ impl App {
         session.set_capture_seconds(u64::from(settings.recording.capture_minutes) * 60);
         session.set_plugin_kinds(settings.plugins.marks());
         session.set_plugins_never_ahead(settings.plugins.never_ahead());
+        session.set_plugin_note_timings(settings.plugins.note_timings());
         session.set_plugin_waker(waker(ctx));
         // The browser's library, whose file work runs on a queue of its own.
         let queue = Arc::new(Queue::for_this_machine());
@@ -325,6 +329,9 @@ impl App {
             session.command_log_mut().write_to(dir);
         }
         let plugin_scan = PluginScan::new(config_dir.as_ref().map(|dir| dir.join(PLUGINS_FILE)));
+        let plugin_timings =
+            PluginTimings::new(config_dir.as_ref().map(|dir| dir.join(TIMINGS_FILE)));
+        session.set_measured_note_timings(plugin_timings.known());
         let theme_file = UserTheme::new(
             config_dir.as_ref().map(|dir| dir.join(THEMES_FOLDER)),
             Choice::from_name(&profile.appearance.theme),
@@ -336,6 +343,7 @@ impl App {
             session,
             plugin_windows: PluginWindows::default(),
             plugin_scan,
+            plugin_timings,
             plugin_entries: Vec::new(),
             plugin_status: BTreeMap::new(),
             plugin_params: BTreeMap::new(),
@@ -722,10 +730,28 @@ impl App {
                 vendor: plugin.vendor.clone(),
                 kind: session.plugin_kind(plugin),
                 never_ahead: session.plugin_never_ahead(plugin),
+                note_timing: (session.plugin_note_timings())
+                    .get(&(plugin.format, plugin.id.clone()))
+                    .copied(),
             })
             .collect();
         entries.sort_by_cached_key(|entry| (entry.name.to_lowercase(), entry.vendor.clone()));
         self.plugin_entries = entries;
+    }
+
+    /// Measures when the notes of the plugins that loaded come, where it
+    /// matters and nothing has yet, a plugin at a time, and has the devices
+    /// whose note timing nobody chose follow what they said.
+    fn measure_plugins(&mut self, ctx: &egui::Context) {
+        for (plugin, kind) in self.session.take_plugins_to_measure() {
+            self.plugin_timings.request(plugin, kind);
+        }
+        if let Some((key, timing)) = self.plugin_timings.receive() {
+            self.session.measured_note_timing(key, timing);
+        }
+        if let Err(problem) = self.plugin_timings.start(waker(ctx)) {
+            self.messages.push(problem);
+        }
     }
 
     /// Saves the plugins the user marked as other kinds, or set to Render
@@ -734,7 +760,8 @@ impl App {
         if self.session.take_plugin_marks_changed() {
             let session = &self.session;
             let never = session.plugins_never_ahead();
-            self.settings.plugins = PluginsSettings::new(session.plugin_kinds(), never);
+            let timings = session.plugin_note_timings();
+            self.settings.plugins = PluginsSettings::new(session.plugin_kinds(), never, timings);
             self.save_settings();
             self.list_plugins();
         }
@@ -766,12 +793,15 @@ impl App {
                 }
                 None => Arc::default(),
             };
+            let rate = f64::from(self.session.engine_config().sample_rate.max(1));
             let status = PluginStatus {
                 loaded: instance.is_some(),
                 has_window: instance.is_some_and(|i| i.has_window()),
                 window_open: self.plugin_windows.is_open(device.id),
                 problem: self.session.plugin_problem(device.id).map(str::to_owned),
                 params,
+                latency_ms: instance.map_or(0.0, |i| i.latency() as f64 * 1000.0 / rate),
+                note_timing: self.session.plugin_note_timing(device.id),
             };
             self.plugin_status.insert(device.id, status);
         }
@@ -1978,6 +2008,7 @@ impl eframe::App for App {
         }
         self.session.tick();
         self.follow_plugin_marks();
+        self.measure_plugins(ctx);
         self.plugin_windows.tick(&mut self.session);
         self.tick_export();
         self.tick_probe();

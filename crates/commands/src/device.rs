@@ -13,7 +13,7 @@ use std::path::Path;
 use musicable_model::automation::Lane;
 use musicable_model::native::{NativeDevice, NativeKind};
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
+use musicable_model::plugin::{NoteTiming, PluginDevice, PluginKind, PluginSettings};
 use musicable_model::routing::{Tap, Wire};
 use musicable_model::{
     Chain, Device, DeviceId, DeviceKind, Misplaced, PluginFormat, Project, TrackId, TrackKind,
@@ -45,6 +45,9 @@ pub const SET_ACTIVE: CommandId = CommandId::new("device.set_active");
 /// Bypasses the devices selected in the devices panel, or brings them back
 /// if every one is bypassed.
 pub const TOGGLE_BYPASS: CommandId = CommandId::new("device.toggle_bypass");
+/// Sets when the notes a plugin device plays come, against its latency:
+/// with its sound, as it plays them, or as the app finds out of the plugin.
+pub const SET_NOTE_TIMING: CommandId = CommandId::new("device.set_note_timing");
 /// Selects devices in the devices panel, for the edit commands, and gives
 /// the panel the focus.
 pub const SELECT: CommandId = CommandId::new("device.select");
@@ -111,6 +114,10 @@ const KINDS: &str = "eq, compressor, gate, delay, reverb, utility, sampler or sy
 
 /// The kinds of plugin, as `device.add_plugin` takes them.
 pub(crate) const PLUGIN_KINDS: &[&str] = &["instrument", "midi_effect", "audio_effect"];
+
+/// What `device.set_note_timing` takes: Auto, or one of [`NoteTiming`]'s
+/// keys.
+pub(crate) const NOTE_TIMINGS: &[&str] = &["auto", "with_sound", "as_played"];
 
 /// The `format` argument: a plugin's format.
 pub(crate) const FORMAT: Param =
@@ -191,6 +198,9 @@ pub fn register(registry: &mut Registry) {
                 kind,
                 inputs: Vec::new(),
                 note_output: false,
+                // Until the app knows the plugin's own, as it loads.
+                note_timing: NoteTiming::assumed(kind),
+                note_timing_chosen: false,
                 settings: PluginSettings::default(),
             });
             let name = format!("Add {}", kind.name());
@@ -348,6 +358,36 @@ pub fn register(registry: &mut Registry) {
                     tx.set_device_active(device, active);
                 }
             });
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(SET_NOTE_TIMING, "Set Note Timing").with_params(&[
+            DEVICE,
+            Param::required(
+                "timing",
+                Type::Choice(NOTE_TIMINGS),
+                "When the notes a plugin with a latency plays come, which neither CLAP nor \
+                 VST3 says: with_sound, as late as its sound, as a MIDI effect that looks \
+                 ahead or a note detector has them, so the rest of the mix waits for them, or \
+                 as_played, as early as what comes into it, as a synth's arpeggiator plays \
+                 them as it fires. auto takes what Musicable found out of the plugin as it \
+                 loaded, or assumes for its kind.",
+            ),
+        ]),
+        |ctx, args| {
+            let device = args.get("device")?;
+            let plugin = plugin(ctx, device)?;
+            let key: String = args.get("timing")?;
+            let timing = match key.as_str() {
+                "auto" => None,
+                key => Some(NoteTiming::from_key(key).ok_or_else(|| {
+                    CommandError::invalid(format!("there's no note timing {key:?}"))
+                })?),
+            };
+            let name = format!("Set Note Timing of {}", plugin.name);
+            ctx.document
+                .transact(&name, |tx| tx.set_plugin_note_timing(device, timing));
             Ok(Value::None)
         },
     );
@@ -1672,6 +1712,45 @@ mod tests {
         assert_eq!(KINDS, format!("{} or {}", rest.join(", "), last[0]));
     }
 
+    #[test]
+    fn a_plugins_note_timing_is_chosen_or_follows_what_the_app_finds() {
+        let mut project = Project::new();
+        project.add_track("Keys", TrackKind::Midi);
+        let device = project.new_device(synth());
+        let id = device.id;
+        project.tracks[0].devices.push(device);
+        let mut setup = Setup::new(project);
+        let timing = |setup: &Setup| {
+            let (_, _, found) = setup.document.project().find_device(id).unwrap();
+            let plugin = found.kind.plugin().unwrap();
+            (plugin.note_timing, plugin.note_timing_chosen)
+        };
+        let set = |setup: &mut Setup, timing: &str| {
+            let args = Args::new().with("device", id).with("timing", timing);
+            setup.run_with(&SET_NOTE_TIMING, args)
+        };
+        let follow = |setup: &mut Setup, timing| {
+            setup
+                .document
+                .follow("Plugin", |tx| tx.follow_plugin_note_timing(id, timing));
+        };
+        // Until someone chooses, it follows what the app finds.
+        follow(&mut setup, NoteTiming::AsPlayed);
+        assert_eq!(timing(&setup), (NoteTiming::AsPlayed, false));
+        set(&mut setup, "with_sound").unwrap();
+        assert_eq!(setup.document.undo_name(), Some("Set Note Timing of Synth"));
+        follow(&mut setup, NoteTiming::AsPlayed);
+        assert_eq!(timing(&setup), (NoteTiming::WithSound, true));
+        // Auto leaves it as it is, until the app next says.
+        set(&mut setup, "auto").unwrap();
+        assert_eq!(timing(&setup), (NoteTiming::WithSound, false));
+        follow(&mut setup, NoteTiming::AsPlayed);
+        assert_eq!(timing(&setup), (NoteTiming::AsPlayed, false));
+        assert!(setup.document.undo());
+        assert_eq!(timing(&setup), (NoteTiming::WithSound, true));
+        assert!(set(&mut setup, "sometimes").is_err());
+    }
+
     fn synth() -> DeviceKind {
         DeviceKind::Plugin(PluginDevice {
             format: PluginFormat::Clap,
@@ -1680,6 +1759,8 @@ mod tests {
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings {
                 state: Some(musicable_model::plugin::PluginState::new(vec![1, 2])),
                 params: vec![PluginParam { id: 3, value: 0.5 }],

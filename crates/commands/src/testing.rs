@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use musicable_model::clip::ClipId;
-use musicable_model::plugin::{PluginKind, PluginState};
+use musicable_model::plugin::{NoteTiming, PluginKind, PluginState};
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, DeviceKind, PluginFormat, Project, TrackId};
 
@@ -191,6 +191,17 @@ impl Library for StubLibrary {
     ) -> Result<(), String> {
         let render_ahead = if never { "never" } else { "auto" };
         (self.calls).push(format!("render ahead {format:?} {id} {render_ahead}"));
+        Ok(())
+    }
+
+    fn set_plugin_note_timing(
+        &mut self,
+        format: PluginFormat,
+        id: &str,
+        timing: Option<NoteTiming>,
+    ) -> Result<(), String> {
+        let timing = timing.map_or("auto", NoteTiming::key);
+        (self.calls).push(format!("note timing {format:?} {id} {timing}"));
         Ok(())
     }
 }

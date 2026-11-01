@@ -18,7 +18,7 @@ workspace:
 ```json
 {
   "format": "musicable-project",
-  "version": 26,
+  "version": 27,
   "ticks_per_beat": 322560,
   "tempo": {
     "tempos": [
@@ -887,6 +887,8 @@ A **plugin**'s settings say which plugin it is and how it's set:
 | `kind` | string | What it does with notes: `"instrument"`, which plays them, `"midi_effect"`, which plays them on, changed, to the instrument after it, such as an arpeggiator, or `"audio_effect"`, which has none. |
 | `inputs` | array of inputs | The plugin's side inputs, its audio inputs beyond its main one, such as a compressor's sidechain, in the plugin's order, as it said when it last loaded. Empty until it first loads. |
 | `note_output` | boolean | Whether it plays notes out as it renders, as it said when it last loaded: an instrument that plays its arpeggios out, say, or an audio effect that hears the notes in what comes into it. The point after it then carries those notes as well as its sound. It stays `true` while a note wire or a MIDI track's input takes them, if the plugin no longer says so, so they have them again when it does. A MIDI effect's plays its notes on instead, so this says nothing for one. `false` until it first loads. |
+| `note_timing` | string | When the notes it plays come, against the latency it reports: `"with_sound"`, as late as what it puts out, as a MIDI effect that looks ahead holds notes back or a note detector hears them, so the rest of the mix waits for them as for its sound, or `"as_played"`, as early as what comes into it, as a synth's arpeggiator plays a step as it fires. It matters for a MIDI effect, and a plugin with a `note_output`, that has a latency. |
+| `note_timing_chosen` | boolean | Whether someone chose `note_timing` for this device. Until then, the app sets it as it learns of the plugin: as the user marked the plugin, or as the scan measured it, or else as assumed for its kind, `"as_played"` for an instrument and `"with_sound"` for an effect. |
 | `state` | string or `null` | The state the plugin last saved, in its own format, as base64 with padding (RFC 4648). `null` for a plugin as it starts, new. |
 | `params` | array | The values of parameters set after the state was saved, as pairs `[id, value]`: the plugin's id for the parameter, a whole number up to 4,294,967,295, and its value in the plugin's own units, a float. In order of id, at most one for each. |
 
@@ -1202,6 +1204,7 @@ A **port** is an object with one field:
 | 24 | 2026-10-30 | Note wires, which play a MIDI track's notes on another's instrument or MIDI effect, through its `{"notes": id}` port, and every wire's `channel`, a note wire's MIDI channel. Version 23 wires are audio wires, so their channel is `null`. |
 | 25 | 2026-10-30 | Plugins' `note_output`, so the point after a plugin carries the notes it plays out as it renders, for a note wire or a MIDI track's input. Version 24 plugins have none until they next load. |
 | 26 | 2026-10-30 | Tracks' `always_live`, which has a track render live while the rest of the project renders ahead. Version 25 tracks aren't. |
+| 27 | 2026-11-01 | Plugins' `note_timing` and `note_timing_chosen`, when the notes a plugin plays come against its latency, and whether someone chose it. Version 26 plugins take what's assumed for their kind, not chosen. |
 
 ## Changing the format
 

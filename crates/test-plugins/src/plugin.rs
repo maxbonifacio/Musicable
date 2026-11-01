@@ -192,6 +192,7 @@ pub const BYPASS: clap_id = 12;
 pub const LEVEL: clap_id = 20;
 pub const THREADS: clap_id = 21;
 pub const TRANSPOSE: clap_id = 30;
+pub const HOLDS_BACK: clap_id = 31;
 pub const COST: clap_id = 40;
 pub const JITTER: clap_id = 41;
 pub const POSITION: clap_id = 42;
@@ -250,14 +251,34 @@ const SYNTH_PARAMS: [Param; 2] = [
     },
 ];
 
-const ARPEGGIATOR_PARAMS: [Param; 1] = [Param {
-    id: TRANSPOSE,
-    name: "Transpose",
-    min: -24.0,
-    max: 24.0,
-    default: 0.0,
-    flags: CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE,
-}];
+const ARPEGGIATOR_PARAMS: [Param; 3] = [
+    Param {
+        id: TRANSPOSE,
+        name: "Transpose",
+        min: -24.0,
+        max: 24.0,
+        default: 0.0,
+        flags: CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE,
+    },
+    Param {
+        id: LATENCY,
+        name: "Latency",
+        min: 0.0,
+        max: 48_000.0,
+        default: 0.0,
+        flags: CLAP_PARAM_IS_STEPPED,
+    },
+    // Whether it holds its steps back by its latency, so they come with
+    // its sound, as one that looks ahead does, or plays them as they fire.
+    Param {
+        id: HOLDS_BACK,
+        name: "Holds Back",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        flags: CLAP_PARAM_IS_STEPPED,
+    },
+];
 
 const LOAD_PARAMS: [Param; 3] = [
     // Microseconds for each 64 frames of a block.
@@ -960,7 +981,19 @@ impl TestPlugin {
             (Kind::Gain, _) => audio.bypassed = value >= 0.5,
             (Kind::Synth, 0) => audio.level = value,
             (Kind::Synth, _) => audio.threads = value >= 0.5,
-            (Kind::Arpeggiator, _) => audio.arp.transpose = value,
+            (Kind::Arpeggiator, 0) => audio.arp.transpose = value,
+            // It takes its latency, and whether it holds back by it, as it
+            // starts again.
+            (Kind::Arpeggiator, 1) => {
+                if latency_frames(value) != audio.latency {
+                    self.request_restart();
+                }
+            }
+            (Kind::Arpeggiator, _) => {
+                if (value >= 0.5) != (audio.arp.hold_back > 0) {
+                    self.request_restart();
+                }
+            }
             (Kind::Load, 0) => audio.cost = value,
             (Kind::Load, _) => audio.jitter = value,
         }
@@ -1799,8 +1832,8 @@ unsafe extern "C" fn plugin_activate(
     audio.threads = this.value(1) >= 0.5;
     audio.modulation = 0.0;
     audio.latency = match this.kind {
-        Kind::Gain => latency_frames(this.value(1)),
-        Kind::Synth | Kind::Arpeggiator | Kind::Load => 0,
+        Kind::Gain | Kind::Arpeggiator => latency_frames(this.value(1)),
+        Kind::Synth | Kind::Load => 0,
     };
     audio.delay = [vec![0.0; audio.latency], vec![0.0; audio.latency]];
     audio.side_delay = audio.delay.clone();
@@ -1810,6 +1843,9 @@ unsafe extern "C" fn plugin_activate(
     audio.channels = [MidiChannel::DEFAULT; 16];
     audio.sustain = false;
     audio.arp = Arp::new(sample_rate, this.value(0));
+    if this.kind == Kind::Arpeggiator && this.value(2) >= 0.5 {
+        audio.arp.hold_back = audio.latency as u32;
+    }
     audio.cost = this.value(0);
     audio.jitter = this.value(1);
     audio.blocks = 0;
@@ -2034,7 +2070,7 @@ unsafe extern "C" fn plugin_get_extension(
         (&raw const PORTS_ACTIVATION).cast()
     } else if id == CLAP_EXT_GUI {
         (&raw const GUI).cast()
-    } else if id == CLAP_EXT_LATENCY && gain {
+    } else if id == CLAP_EXT_LATENCY && (gain || this.kind == Kind::Arpeggiator) {
         (&raw const LATENCY_EXT).cast()
     } else if id == CLAP_EXT_NOTE_PORTS && notes {
         (&raw const NOTE_PORTS).cast()
@@ -2138,7 +2174,7 @@ unsafe extern "C" fn params_value_to_text(
         COST => format!("{value:.0} us"),
         JITTER => format!("{:.0} %", value * 100.0),
         POSITION => format!("{value:.3} s"),
-        THREADS | BYPASS => if value >= 0.5 { "On" } else { "Off" }.to_owned(),
+        THREADS | BYPASS | HOLDS_BACK => if value >= 0.5 { "On" } else { "Off" }.to_owned(),
         _ => return false,
     };
     // SAFETY: the host passes a buffer of `capacity` bytes.
@@ -2161,7 +2197,7 @@ unsafe extern "C" fn params_text_to_value(
     let parsed = match id {
         GAIN | LATENCY | TRANSPOSE | COST | POSITION => number(),
         LEVEL | JITTER => number().map(|n| n / 100.0),
-        THREADS | BYPASS => match text.as_ref() {
+        THREADS | BYPASS | HOLDS_BACK => match text.as_ref() {
             "On" => Some(1.0),
             "Off" => Some(0.0),
             _ => None,

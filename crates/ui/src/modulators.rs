@@ -1373,6 +1373,8 @@ mod tests {
                     kind: PluginKind::AudioEffect,
                     inputs: Vec::new(),
                     note_output: false,
+                    note_timing: musicable_model::plugin::NoteTiming::WithSound,
+                    note_timing_chosen: false,
                     settings: PluginSettings::default(),
                 }));
                 plugins.push(device.id);

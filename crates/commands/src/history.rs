@@ -352,7 +352,7 @@ mod tests {
     use musicable_model::native::{NativeDevice, NativeKind, sampler};
     use musicable_model::param::{ClipParam, ParamAddress};
     use musicable_model::plugin::{
-        PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
+        NoteTiming, PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
     };
     use musicable_model::routing::{Port, Tap, Wire, WireId};
     use musicable_model::time::{BeatRange, Beats, TempoMap};
@@ -378,6 +378,8 @@ mod tests {
             },
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings {
                 state: Some(PluginState::new(*b"state")),
                 params: vec![PluginParam { id: 1, value: 0.5 }],
@@ -858,6 +860,11 @@ mod tests {
                 from: false,
                 to: true,
             },
+            Edit::PluginNoteTiming {
+                device: effect,
+                from: (NoteTiming::WithSound, false),
+                to: (NoteTiming::AsPlayed, true),
+            },
             Edit::PluginParam {
                 device: effect,
                 param: 7,
@@ -1001,7 +1008,7 @@ mod tests {
     }
 
     /// How many kinds of edit there are.
-    const KINDS: usize = 78;
+    const KINDS: usize = 79;
 
     /// Which kind an edit is. A new kind stops this compiling: give it an
     /// example in `one_of_each` and count it in `KINDS`.
@@ -1085,6 +1092,7 @@ mod tests {
             Edit::WireChannel { .. } => 75,
             Edit::PluginNoteOutput { .. } => 76,
             Edit::TrackAlwaysLive { .. } => 77,
+            Edit::PluginNoteTiming { .. } => 78,
         }
     }
 

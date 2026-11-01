@@ -1055,6 +1055,8 @@ fn a_track_a_plugin_has_render_live_says_so_in_its_live_mark() {
             kind: PluginKind::AudioEffect,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         }));
         let id = device.id;

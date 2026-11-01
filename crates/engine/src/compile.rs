@@ -85,6 +85,7 @@ use std::thread::{self, JoinHandle};
 use musicable_model::mixer::Bus;
 use musicable_model::modulation::{ModulatorKind, Output, Routing, envelope, lfo};
 use musicable_model::param::ParamAddress;
+use musicable_model::plugin::NoteTiming;
 use musicable_model::routing::{self, Tap};
 use musicable_model::time::TempoMap;
 use musicable_model::{
@@ -1447,6 +1448,11 @@ impl Strip<'_> {
         for device in channel.devices() {
             slot(self, Slot::BeforeDevice(device.id));
             let key = keys::device(device.id);
+            // When the notes a plugin plays come, against its latency.
+            let timing = device
+                .kind
+                .plugin()
+                .map_or(NoteTiming::AsPlayed, |p| p.note_timing);
             if device.kind.is_midi_effect() {
                 // No notes reach one after the instrument, or where there
                 // are none.
@@ -1456,7 +1462,9 @@ impl Strip<'_> {
                         self.graph.add(key, NoteSwitch::deactivated(node));
                     }
                     Some(node) => {
-                        let node = self.graph.add(key, NoteSwitch::new(node, device.bypassed));
+                        let switch =
+                            NoteSwitch::new(node, device.bypassed).with_note_timing(timing);
+                        let node = self.graph.add(key, switch);
                         (self.graph.plays_notes(node)).expect("the node was just added");
                         if devices.renders_live(device.id) {
                             (self.graph.set_live(node)).expect("the node was just added");
@@ -1477,7 +1485,10 @@ impl Strip<'_> {
                     self.graph.add(key, Switch::deactivated(node));
                     None
                 }
-                Some(node) => Some(self.push(key, Box::new(Switch::new(node, device.bypassed)))),
+                Some(node) => {
+                    let switch = Switch::new(node, device.bypassed).with_note_timing(timing);
+                    Some(self.push(key, Box::new(switch)))
+                }
                 None => None,
             };
             if let Some(node) = node {
@@ -2243,6 +2254,8 @@ mod tests {
             },
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: Default::default(),
         })
     }
@@ -2402,6 +2415,8 @@ mod tests {
             kind: PluginKind::MidiEffect,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: Default::default(),
         })
     }

@@ -470,6 +470,10 @@ struct PluginDevice {
     inputs: Vec<PluginInput>,
     /// Whether it plays notes out as it renders, as the plugin last said.
     note_output: bool,
+    /// When the notes it plays come, against its latency.
+    note_timing: NoteTiming,
+    /// Whether someone chose `note_timing`, rather than the app.
+    note_timing_chosen: bool,
     /// Base64, or `None` for a plugin as new.
     #[serde(deserialize_with = "Option::deserialize")]
     state: Option<String>,
@@ -518,6 +522,32 @@ impl From<PluginKind> for model::plugin::PluginKind {
             PluginKind::Instrument => Self::Instrument,
             PluginKind::MidiEffect => Self::MidiEffect,
             PluginKind::AudioEffect => Self::AudioEffect,
+        }
+    }
+}
+
+/// When the notes a plugin plays come, against its latency.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoteTiming {
+    WithSound,
+    AsPlayed,
+}
+
+impl From<model::plugin::NoteTiming> for NoteTiming {
+    fn from(timing: model::plugin::NoteTiming) -> Self {
+        match timing {
+            model::plugin::NoteTiming::WithSound => Self::WithSound,
+            model::plugin::NoteTiming::AsPlayed => Self::AsPlayed,
+        }
+    }
+}
+
+impl From<NoteTiming> for model::plugin::NoteTiming {
+    fn from(timing: NoteTiming) -> Self {
+        match timing {
+            NoteTiming::WithSound => Self::WithSound,
+            NoteTiming::AsPlayed => Self::AsPlayed,
         }
     }
 }
@@ -2703,6 +2733,8 @@ impl From<&model::plugin::PluginDevice> for PluginDevice {
             kind,
             inputs,
             note_output,
+            note_timing,
+            note_timing_chosen,
             settings,
         } = plugin;
         let model::plugin::PluginSettings { state, params } = settings;
@@ -2721,6 +2753,8 @@ impl From<&model::plugin::PluginDevice> for PluginDevice {
                 })
                 .collect(),
             note_output: *note_output,
+            note_timing: (*note_timing).into(),
+            note_timing_chosen: *note_timing_chosen,
             state: state.as_ref().map(|state| BASE64.encode(state.bytes())),
             params: params.iter().map(|p| (p.id, p.value)).collect(),
         }
@@ -2736,6 +2770,8 @@ impl PluginDevice {
             kind,
             inputs,
             note_output,
+            note_timing,
+            note_timing_chosen,
             state,
             params,
         } = self;
@@ -2781,6 +2817,8 @@ impl PluginDevice {
                 })
                 .collect(),
             note_output: *note_output,
+            note_timing: (*note_timing).into(),
+            note_timing_chosen: *note_timing_chosen,
             settings: model::plugin::PluginSettings {
                 state,
                 params: checked,

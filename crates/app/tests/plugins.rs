@@ -51,7 +51,8 @@ use musicable_test_plugins::vst3::{
     VST3_ARPEGGIATOR_ID, VST3_GAIN_ID, VST3_SIDECHAIN, VST3_SYNTH_ID,
 };
 use musicable_test_plugins::{
-    ARP_STEP, ARPEGGIATOR_ID, BYPASS, GAIN, GAIN_ID, LATENCY, SIDECHAIN, SYNTH_ID, TRANSPOSE, gui,
+    ARP_STEP, ARPEGGIATOR_ID, BYPASS, GAIN, GAIN_ID, HOLDS_BACK, LATENCY, SIDECHAIN, SYNTH_ID,
+    TRANSPOSE, gui,
 };
 
 #[global_allocator]
@@ -254,6 +255,8 @@ fn plugin(
         kind,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings,
     }))
 }
@@ -1420,4 +1423,34 @@ fn the_app_scans_each_library_in_a_process_of_its_own() {
         let crashed = scanned(&crash);
         assert!(matches!(crashed, Outcome::Crashed(_)), "{crashed:?}");
     }
+}
+
+#[test]
+fn the_mix_waits_for_a_midi_effects_notes_that_come_with_its_sound() {
+    let plugins = TestPlugins::new(PluginFormat::Clap, "note-timing");
+    let mut song = Project::new();
+    let keys = song.add_track("Keys", TrackKind::Midi);
+    // An arpeggiator that holds its steps back by its latency, 960 frames.
+    let mut settings = with_param(LATENCY, 960.0);
+    settings.set_param(HOLDS_BACK, Some(1.0));
+    let arpeggiator = plugins.arpeggiator(&mut song, settings);
+    let synth = plugins.synth(&mut song);
+    song.track_mut(keys).unwrap().devices = vec![arpeggiator.clone(), synth];
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    assert_eq!(rig.session.take_problems(), Vec::<String>::new());
+    rig.render(4_800);
+    // A MIDI effect's notes are taken to come with its sound until someone
+    // says otherwise, so the rest of the mix waits for them.
+    assert_eq!(rig.session.stats().latency, 960);
+    let as_played = Args::new()
+        .with("device", arpeggiator.id)
+        .with("timing", "as_played");
+    rig.session
+        .run_with(&device::SET_NOTE_TIMING, &as_played)
+        .unwrap();
+    rig.render(4_800);
+    assert_eq!(rig.session.stats().latency, 0);
+    drop(rig);
+    plugins.assert_alright();
 }

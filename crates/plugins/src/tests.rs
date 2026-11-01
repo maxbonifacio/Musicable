@@ -1910,3 +1910,32 @@ fn the_scanner_finds_plugins_and_survives_bad_ones() {
         "{refused:?}"
     );
 }
+
+#[test]
+fn playing_a_plugin_says_when_its_notes_come_against_its_latency() {
+    use musicable_model::plugin::{NoteTiming, PluginKind};
+    use musicable_test_plugins::HOLDS_BACK;
+
+    use crate::timing::measure_instance;
+
+    let plugins = TestPlugins::new("timing");
+    // An arpeggiator that holds its steps back by its latency has them
+    // come with its sound, and one that doesn't, as it plays them.
+    for (holds_back, timing) in [(1.0, NoteTiming::WithSound), (0.0, NoteTiming::AsPlayed)] {
+        let mut instance = crate::Instance::Clap(plugins.arpeggiator());
+        instance.set_param(LATENCY, 960.0);
+        instance.set_param(HOLDS_BACK, holds_back);
+        let measured = measure_instance(&mut instance, PluginKind::MidiEffect).unwrap();
+        assert_eq!(measured, Some(timing), "holds back {holds_back}");
+    }
+    // Too short a latency to tell, it says nothing.
+    let mut instance = crate::Instance::Clap(plugins.arpeggiator());
+    instance.set_param(LATENCY, 32.0);
+    instance.set_param(HOLDS_BACK, 1.0);
+    assert_eq!(
+        measure_instance(&mut instance, PluginKind::MidiEffect).unwrap(),
+        None
+    );
+    drop(instance);
+    plugins.assert_alright();
+}

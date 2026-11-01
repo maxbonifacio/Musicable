@@ -1125,8 +1125,13 @@ impl Live {
                 // SAFETY: as above.
                 None => unsafe { queue.play_sound(writer.as_mut(), time, frames, &mut self.tap) },
             }
+            // As early as the notes are late, against the song.
             match live_first(half, None, |half| half.own_record_notes(*key)) {
-                Some(notes) => writer.write_notes(time, frames, notes),
+                Some(notes) => {
+                    let late = live_first(half, None, |h| h.own_record_notes_late(*key));
+                    let at = time.saturating_sub(late.unwrap_or(0));
+                    writer.write_notes(at, frames, notes);
+                }
                 None => queue.play_notes(writer.as_mut(), time, frames, &mut self.notes),
             }
         }
@@ -1206,7 +1211,9 @@ impl Live {
             let tapped = live_first(half, graph, |g| g.own_record(*key, frames));
             writer.write(start, tapped.unwrap_or(AudioRef::empty(frames)));
             let notes = live_first(half, graph, |g| g.own_record_notes(*key));
-            writer.write_notes(start, frames, notes.unwrap_or_default());
+            let late = live_first(half, graph, |g| g.own_record_notes_late(*key));
+            let at = start.saturating_sub(late.unwrap_or(0));
+            writer.write_notes(at, frames, notes.unwrap_or_default());
         }
         self.played(shared, frames);
         frames

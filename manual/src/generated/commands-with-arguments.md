@@ -20,6 +20,7 @@
 | Remove Folder from Library | `browser.remove_folder` |
 | Search the Library | `browser.search` |
 | Set Plugin Kind | `browser.set_plugin_kind` |
+| Set Plugin Note Timing | `browser.set_plugin_note_timing` |
 | Set Plugin Render Ahead | `browser.set_plugin_render_ahead` |
 | Tag Sample | `browser.tag` |
 
@@ -70,6 +71,7 @@
 | Select Devices | `device.select` |
 | Set Device Active | `device.set_active` |
 | Set Device Bypass | `device.set_bypass` |
+| Set Note Timing | `device.set_note_timing` |
 | Set Device Parameter | `device.set_param` |
 | Set Sample | `device.set_sample` |
 | Show Plugin Window | `device.show_window` |

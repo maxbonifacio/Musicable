@@ -448,6 +448,17 @@ fn device_entry(device: &Device) -> Json {
     if !device.active {
         entry["active"] = false.into();
     }
+    // When a plugin's notes come, against its latency, as device.set_note_timing
+    // takes it: "auto" until someone chooses.
+    if let Some(plugin) = device.kind.plugin()
+        && (plugin.makes_notes() || device.kind.is_midi_effect())
+    {
+        let timing = match plugin.note_timing_chosen {
+            true => plugin.note_timing.key(),
+            false => "auto",
+        };
+        entry["note_timing"] = json!({ "timing": timing, "now": plugin.note_timing.key() });
+    }
     entry
 }
 

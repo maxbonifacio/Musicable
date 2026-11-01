@@ -49,10 +49,13 @@ use std::time::{Duration, Instant};
 
 use musicable_engine::{Devices, EngineConfig, NodeMaker};
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::{PluginDevice, PluginInput, PluginKind, PluginSettings, PluginState};
+use musicable_model::plugin::{
+    NoteTiming, PluginDevice, PluginInput, PluginKind, PluginSettings, PluginState,
+};
 use musicable_model::routing::Port;
 use musicable_model::{DeviceId, PluginFormat, Project};
 use musicable_plugins::{Instance, PluginEvent, PluginInfo, Waker};
+pub use musicable_ui::TimingFrom;
 
 /// How long what a plugin reports, after it starts or is given a state or
 /// parameters, counts as it taking that in rather than as someone's change
@@ -101,6 +104,10 @@ pub(crate) enum Change {
     /// Whether the plugin has a note output, as it says now, for its device
     /// to take.
     NoteOutput(bool),
+    /// When the plugin's notes come, against its latency, as the user
+    /// marked it, Musicable measured it, or assumes for its kind, for its
+    /// device to take, unless someone chose the device's.
+    NoteTiming(NoteTiming),
     /// The plugin's window asks to be another size, or closed.
     Window(PluginEvent),
     /// Something went wrong with the plugin.
@@ -144,7 +151,18 @@ pub(crate) struct Plugins {
     /// which render live wherever they are
     /// ([`set_render_ahead`](Self::set_render_ahead)).
     never_ahead: BTreeSet<(PluginFormat, String)>,
-    /// Whether `kinds` or `never_ahead` changed since
+    /// When the user marked plugins' notes as coming, against their
+    /// latency, by format and id ([`set_note_timing`](Self::set_note_timing)).
+    timings: BTreeMap<(PluginFormat, String), NoteTiming>,
+    /// What playing plugins said of when their notes come, by format and
+    /// id: `None` for one that said nothing.
+    measured: BTreeMap<(PluginFormat, String), Option<NoteTiming>>,
+    /// The plugins whose note timing is to be measured, for the app to take
+    /// ([`take_to_measure`](Self::take_to_measure)), and those asked for
+    /// already.
+    to_measure: Vec<(PluginInfo, PluginKind)>,
+    asked: BTreeSet<(PluginFormat, String)>,
+    /// Whether `kinds`, `never_ahead` or `timings` changed since
     /// [`take_marks_changed`](Self::take_marks_changed) last said.
     marks_changed: bool,
     /// Whether a device's plugin was set to render live or ahead since
@@ -177,6 +195,8 @@ struct Hosted {
     note_output: bool,
     /// Whether the plugin must render live, as it last said.
     must_render_live: bool,
+    /// When the plugin's notes come, as last given to its device.
+    note_timing: Option<NoteTiming>,
     /// Each parameter's value in the state the plugin last loaded, or as it
     /// started.
     base: BTreeMap<u32, f64>,
@@ -212,6 +232,10 @@ impl Plugins {
             installed: None,
             kinds: BTreeMap::new(),
             never_ahead: BTreeSet::new(),
+            timings: BTreeMap::new(),
+            measured: BTreeMap::new(),
+            to_measure: Vec::new(),
+            asked: BTreeSet::new(),
             marks_changed: false,
             live_changed: false,
             hosted: BTreeMap::new(),
@@ -312,6 +336,91 @@ impl Plugins {
         let plays = |h: &Hosted| h.instance.info().format == key.0 && h.instance.info().id == key.1;
         self.live_changed |= changed && self.hosted.values().any(plays);
         Ok(())
+    }
+
+    /// When the notes `plugin` plays come, against its latency, and why:
+    /// as the user marked it, as playing it said, or as assumed for its
+    /// kind.
+    pub fn note_timing_of(&self, plugin: &PluginInfo) -> (NoteTiming, TimingFrom) {
+        let key = (plugin.format, plugin.id.clone());
+        if let Some(&timing) = self.timings.get(&key) {
+            return (timing, TimingFrom::Marked);
+        }
+        match self.measured.get(&key) {
+            Some(&Some(timing)) => (timing, TimingFrom::Measured),
+            _ => (
+                NoteTiming::assumed(self.kind_of(plugin)),
+                TimingFrom::Assumed,
+            ),
+        }
+    }
+
+    /// Marks the installed plugin `id` in `format` as having its notes come
+    /// `timing` against its latency, or with `None` takes the mark away. A
+    /// VST3 plugin's class id can come in either case.
+    pub fn set_note_timing(
+        &mut self,
+        format: PluginFormat,
+        id: &str,
+        timing: Option<NoteTiming>,
+    ) -> Result<(), String> {
+        let key = (format, self.find_installed(format, id)?.id.clone());
+        let changed = match timing {
+            Some(timing) => self.timings.insert(key, timing) != Some(timing),
+            None => self.timings.remove(&key).is_some(),
+        };
+        self.marks_changed |= changed;
+        Ok(())
+    }
+
+    /// When the user marked plugins' notes as coming, by format and id.
+    pub fn note_timing_marks(&self) -> &BTreeMap<(PluginFormat, String), NoteTiming> {
+        &self.timings
+    }
+
+    /// Has the plugins' note timing marked as in `timings`, as the settings
+    /// file had them.
+    pub fn set_note_timing_marks(&mut self, timings: BTreeMap<(PluginFormat, String), NoteTiming>) {
+        self.timings = timings;
+    }
+
+    /// Has what playing plugins said of their note timing be `measured`, by
+    /// format and id, as the app keeps it.
+    pub fn set_measured_note_timings(
+        &mut self,
+        measured: BTreeMap<(PluginFormat, String), Option<NoteTiming>>,
+    ) {
+        self.measured = measured;
+    }
+
+    /// Takes what playing the plugin `key` said of its note timing:
+    /// `None` if it said nothing.
+    pub fn measured_note_timing(
+        &mut self,
+        key: (PluginFormat, String),
+        timing: Option<NoteTiming>,
+    ) {
+        self.measured.insert(key, timing);
+    }
+
+    /// When the notes the device `id`'s plugin plays come without anyone
+    /// choosing for the device, and why, if it matters: it's loaded, and a
+    /// MIDI effect or plays notes out, with a latency long enough to tell
+    /// the timings apart.
+    pub fn note_timing(&self, id: DeviceId) -> Option<(NoteTiming, TimingFrom)> {
+        let hosted = self.hosted.get(&id)?;
+        let info = hosted.instance.info();
+        let kind = self.kind_of(info);
+        let notes = kind == PluginKind::MidiEffect || hosted.instance.note_output();
+        let latent = hosted.instance.latency() >= musicable_plugins::timing::SHORTEST;
+        (notes && latent).then(|| self.note_timing_of(info))
+    }
+
+    /// The plugins whose note timing nothing's measured yet, that it
+    /// matters for, as they've loaded: those with a latency that are MIDI
+    /// effects or play notes out, with what they do with notes. Each once.
+    pub fn take_to_measure(&mut self) -> Vec<(PluginInfo, PluginKind)> {
+        std::mem::take(&mut self.to_measure)
     }
 
     /// The plugins the user set to Render Ahead Never, by format and id.
@@ -461,6 +570,7 @@ impl Plugins {
             inputs: plugin.inputs.clone(),
             note_output: plugin.note_output,
             must_render_live: false,
+            note_timing: None,
             fresh,
             automated: BTreeSet::new(),
             bypassed: false,
@@ -523,6 +633,30 @@ impl Plugins {
     /// they made themselves, oldest first, for the project to follow.
     pub fn poll(&mut self) -> Vec<(DeviceId, Change)> {
         let mut changes = Vec::new();
+        // When each plugin's notes come, as it is now: the user's mark, what
+        // it said, or what's assumed. Its device takes it, unless someone
+        // chose the device's.
+        let timings: Vec<(DeviceId, NoteTiming)> = (self.hosted.iter())
+            .map(|(&id, hosted)| (id, self.note_timing_of(hosted.instance.info()).0))
+            .collect();
+        for (id, timing) in timings {
+            let Some(hosted) = self.hosted.get_mut(&id) else {
+                continue;
+            };
+            if hosted.note_timing.replace(timing) != Some(timing) {
+                changes.push((id, Change::NoteTiming(timing)));
+            }
+            // Measured where it matters, once.
+            let info = hosted.instance.info();
+            let kind = self.kinds.get(&(info.format, info.id.clone())).copied();
+            let kind = kind.unwrap_or_else(|| info.kind());
+            let notes = kind == PluginKind::MidiEffect || hosted.instance.note_output();
+            let key = (info.format, info.id.clone());
+            let latent = hosted.instance.latency() >= musicable_plugins::timing::SHORTEST;
+            if notes && latent && !self.measured.contains_key(&key) && self.asked.insert(key) {
+                self.to_measure.push((info.clone(), kind));
+            }
+        }
         for (&id, hosted) in &mut self.hosted {
             for change in hosted.poll() {
                 changes.push((id, change));

@@ -398,12 +398,29 @@ late its output is: `Node::latency`, read once the node is prepared.
   does, needs a new graph, and the new graph compensates for the new
   latency.
 
-Two things aren't delayed. Notes sent with `Graph::send_notes` or
-`send_side_notes` arrive at an instrument when they're due, so its sound
-lines up as long as nothing latent comes before it on its track, which is
-the usual chain. And meters measure
-where they are, before the delays at the buses, so a latent track's meter
-moves later than a dry one's.
+Notes can be late too. A node's notes are as late as those that come to
+it, and as the node's own notes latency (`Node::notes_latency`): a plugin's
+latency, for a MIDI effect or a plugin that plays notes out whose notes
+come with its sound (`NoteTiming::WithSound`, [plugins.md](plugins.md#note-timing)),
+and nothing for the rest. A node that makes notes as it renders makes them
+as late as what comes into it, and its notes latency.
+
+- A node is as late as the latest of its audio and the notes that come to
+  it, plus its latency, so what plays a latent MIDI effect's notes, and
+  the rest of the mix after it, wait for them. `prepare` works it out
+  stage by stage, as made notes have the graph in stages: each stage's
+  players first, each after those whose notes it gets, then its nodes.
+- Notes themselves aren't delayed: the audio that comes with them waits
+  for them. Notes that come earlier than the audio they meet arrive when
+  they're due, so an instrument's sound lines up as long as nothing latent
+  comes before it on its track, which is the usual chain.
+- A note record says how late its notes are
+  (`PreparedGraph::record_notes_late`), and the engine hands them to its
+  writer that much earlier, so a recording puts them where they belong
+  ([Record taps](#time-and-events)).
+
+And meters measure where they are, before the delays at the buses, so a
+latent track's meter moves later than a dry one's.
 
 ## Bypassing devices
 
@@ -1254,7 +1271,9 @@ no sound, and none goes through it.
   renders, after the notes have played, so the switch keeps it for the
   device's next block, which takes it at its first frame: the last value
   of each parameter, for every note or for one (256 of them at most).
-- Bypassing (`Switch::BYPASS`) passes the notes on unchanged instead, and
+- Bypassing (`Switch::BYPASS`) passes the notes on unchanged instead,
+  held back by the device's latency if its notes come with its sound
+  (`NoteSwitch::with_note_timing`), as a bypassed device's dry copy is, and
   stops the device, which takes its events through `flush`, until it
   comes back afresh (`Node::reset`). Either way, the switch ends the notes
   sounding where it lands, and lets go of the switches held on there, such

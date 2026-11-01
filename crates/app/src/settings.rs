@@ -55,6 +55,9 @@
 //! [plugins.render_ahead]
 //! "clap:com.example.hardware-synth" = "never"
 //!
+//! [plugins.note_timing]
+//! "clap:com.example.humanizer" = "with_sound"
+//!
 //! [recording]
 //! capture_minutes = 5
 //!
@@ -83,7 +86,7 @@ use musicable_audio::{Api, Mode, StreamInfo, StreamRequest};
 use musicable_commands::editor::Behaviour;
 use musicable_engine::Lead;
 use musicable_model::PluginFormat;
-use musicable_model::plugin::PluginKind;
+use musicable_model::plugin::{NoteTiming, PluginKind};
 use musicable_ui::{Base, DEFAULT_WORKSPACE, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME};
 use serde::{Deserialize, Serialize};
 
@@ -342,6 +345,11 @@ pub struct PluginsSettings {
     /// `never`. The others are at Auto.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub render_ahead: BTreeMap<String, String>,
+    /// Each plugin marked as to when its notes come, against its latency,
+    /// by its format and its id: `with_sound` or `as_played`. The others
+    /// are as Musicable measured them, or assumes for their kind.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub note_timing: BTreeMap<String, String>,
 }
 
 /// What the settings call the plugin `id` in `format`: `"clap:org.example.arp"`.
@@ -368,7 +376,7 @@ fn parse_plugin_key(key: &str) -> Option<(PluginFormat, String)> {
 impl PluginsSettings {
     /// Whether no plugin is marked or set.
     pub fn is_empty(&self) -> bool {
-        self.kinds.is_empty() && self.render_ahead.is_empty()
+        self.kinds.is_empty() && self.render_ahead.is_empty() && self.note_timing.is_empty()
     }
 
     /// The marks, by format and id, leaving out those the file has wrong.
@@ -389,11 +397,23 @@ impl PluginsSettings {
             .collect()
     }
 
-    /// The settings that hold `marks` and the plugins set to Render Ahead
-    /// Never, `never`.
+    /// The plugins marked as to when their notes come, by format and id,
+    /// leaving out those the file has wrong.
+    pub fn note_timings(&self) -> BTreeMap<(PluginFormat, String), NoteTiming> {
+        (self.note_timing.iter())
+            .filter_map(|(plugin, timing)| {
+                Some((parse_plugin_key(plugin)?, NoteTiming::from_key(timing)?))
+            })
+            .collect()
+    }
+
+    /// The settings that hold `marks`, the plugins set to Render Ahead
+    /// Never, `never`, and the plugins marked as to when their notes come,
+    /// `timings`.
     pub fn new(
         marks: &BTreeMap<(PluginFormat, String), PluginKind>,
         never: &BTreeSet<(PluginFormat, String)>,
+        timings: &BTreeMap<(PluginFormat, String), NoteTiming>,
     ) -> Self {
         let kinds = (marks.iter())
             .map(|((format, id), kind)| (plugin_key(*format, id), kind.key().to_owned()))
@@ -401,9 +421,13 @@ impl PluginsSettings {
         let render_ahead = (never.iter())
             .map(|(format, id)| (plugin_key(*format, id), "never".to_owned()))
             .collect();
+        let note_timing = (timings.iter())
+            .map(|((format, id), timing)| (plugin_key(*format, id), timing.key().to_owned()))
+            .collect();
         Self {
             kinds,
             render_ahead,
+            note_timing,
         }
     }
 }
@@ -799,6 +823,10 @@ mod tests {
                     "clap:com.example.hardware-synth".to_owned(),
                     "never".to_owned(),
                 )]),
+                note_timing: BTreeMap::from([(
+                    "clap:com.example.humanizer".to_owned(),
+                    "with_sound".to_owned(),
+                )]),
             },
         };
         let text = settings.to_toml();
@@ -879,7 +907,7 @@ mod tests {
             ),
         ]);
         assert_eq!(marks, expected);
-        let kept = PluginsSettings::new(&marks, &BTreeSet::new());
+        let kept = PluginsSettings::new(&marks, &BTreeSet::new(), &BTreeMap::new());
         assert_eq!(kept.marks(), marks);
         assert_eq!(kept.kinds.len(), 2);
         // None at first, and none written.
@@ -896,7 +924,7 @@ mod tests {
         let never = plugins.never_ahead();
         let hardware = (PluginFormat::Clap, "com.example.hardware".to_owned());
         assert_eq!(never, BTreeSet::from([hardware]));
-        let kept = PluginsSettings::new(&BTreeMap::new(), &never);
+        let kept = PluginsSettings::new(&BTreeMap::new(), &never, &BTreeMap::new());
         assert_eq!(kept.never_ahead(), never);
         let text = Settings {
             plugins: kept,
@@ -905,6 +933,30 @@ mod tests {
         .to_toml();
         assert!(text.contains("[plugins.render_ahead]\n\"clap:com.example.hardware\" = \"never\""));
         assert!(!text.contains("[plugins.kinds]"));
+    }
+
+    #[test]
+    fn plugins_marked_as_to_when_their_notes_come_go_by_format_and_id() {
+        let text = "[plugins.note_timing]\n\
+                    \"clap:com.example.humanizer\" = \"with_sound\"\n\
+                    \"vst3:ABCD\" = \"as_played\"\n\
+                    \"clap:com.example.wrong\" = \"whenever\"\n";
+        let plugins = Settings::parse(text).unwrap().plugins;
+        let timings = plugins.note_timings();
+        let expected = BTreeMap::from([
+            (
+                (PluginFormat::Clap, "com.example.humanizer".to_owned()),
+                NoteTiming::WithSound,
+            ),
+            (
+                (PluginFormat::Vst3, "ABCD".to_owned()),
+                NoteTiming::AsPlayed,
+            ),
+        ]);
+        assert_eq!(timings, expected);
+        let kept = PluginsSettings::new(&BTreeMap::new(), &BTreeSet::new(), &timings);
+        assert_eq!(kept.note_timings(), timings);
+        assert!(!kept.is_empty());
     }
 
     #[test]

@@ -27,7 +27,7 @@ use musicable_library::Busy;
 use musicable_model::clip::ClipContent;
 use musicable_model::modulation::Routing;
 use musicable_model::param::ParamAddress;
-use musicable_model::plugin::PluginKind;
+use musicable_model::plugin::{NoteTiming, PluginKind};
 use musicable_model::routing::Tap;
 use musicable_model::time::{Beats, TempoMap};
 use musicable_model::warp::WarpMode;
@@ -38,7 +38,7 @@ use crate::command_log::{CommandLog, Ran};
 use crate::library::{Library, LibraryLink, ToEngine};
 use crate::media::{MediaPool, follows_pitch};
 use crate::output_recorder::OutputRecorder;
-use crate::plugins::{Change, Plugins};
+use crate::plugins::{Change, Plugins, TimingFrom};
 use crate::recorder::{
     self, Armed, Buffers, Place, Recorder, Recording, Report, TapInput, TapNotes, Taps,
 };
@@ -1032,6 +1032,52 @@ impl Session {
         self.plugins.set_kinds(kinds);
     }
 
+    /// When the user marked plugins' notes as coming, against their
+    /// latency, by format and id.
+    pub fn plugin_note_timings(&self) -> &BTreeMap<(PluginFormat, String), NoteTiming> {
+        self.plugins.note_timing_marks()
+    }
+
+    /// Has the plugins' note timing marked as in `timings`, as the settings
+    /// file has them.
+    pub fn set_plugin_note_timings(
+        &mut self,
+        timings: BTreeMap<(PluginFormat, String), NoteTiming>,
+    ) {
+        self.plugins.set_note_timing_marks(timings);
+    }
+
+    /// When the notes the device `device`'s plugin plays come without
+    /// anyone choosing for the device, and why, where it matters.
+    pub fn plugin_note_timing(&self, device: DeviceId) -> Option<(NoteTiming, TimingFrom)> {
+        self.plugins.note_timing(device)
+    }
+
+    /// Has what playing plugins said of their note timing be `measured`, as
+    /// the app keeps it.
+    pub fn set_measured_note_timings(
+        &mut self,
+        measured: BTreeMap<(PluginFormat, String), Option<NoteTiming>>,
+    ) {
+        self.plugins.set_measured_note_timings(measured);
+    }
+
+    /// Takes what playing the plugin `key` said of its note timing, for the
+    /// devices of it whose timing nobody chose to follow.
+    pub fn measured_note_timing(
+        &mut self,
+        key: (PluginFormat, String),
+        timing: Option<NoteTiming>,
+    ) {
+        self.plugins.measured_note_timing(key, timing);
+    }
+
+    /// The plugins that loaded whose note timing is to be measured, with
+    /// what they do with notes.
+    pub fn take_plugins_to_measure(&mut self) -> Vec<(PluginInfo, PluginKind)> {
+        self.plugins.take_to_measure()
+    }
+
     /// Whether `plugin` is set to Render Ahead Never
     /// ([`browser::SET_PLUGIN_RENDER_AHEAD`]), so it renders live wherever
     /// it is.
@@ -1296,6 +1342,9 @@ impl Session {
                 Change::NoteOutput(on) => self.document.follow(&name, |tx| {
                     tx.set_plugin_note_output(device, on);
                 }),
+                Change::NoteTiming(timing) => self.document.follow(&name, |tx| {
+                    tx.follow_plugin_note_timing(device, timing);
+                }),
                 Change::Window(event) => self.window_events.push((device, event)),
                 Change::Failed(problem) => self.problems.push(problem),
             }
@@ -1519,6 +1568,9 @@ impl Session {
                         recompile |= project.wires.iter().any(|w| w.from == tap)
                             || (project.tracks.iter()).any(|t| t.input == Some(Input::Tap(tap)));
                     }
+                    // When a plugin's notes come says how late what plays
+                    // them is, for delay compensation.
+                    Edit::PluginNoteTiming { from, to, .. } => recompile |= from.0 != to.0,
                     // So is automation, and the plugins leave what it moves
                     // to the engine.
                     Edit::AddLane { .. }

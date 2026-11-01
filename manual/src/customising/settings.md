@@ -191,6 +191,9 @@ enabled = true
 
 [plugins.render_ahead]
 "clap:com.example.outboard" = "never"
+
+[plugins.note_timing]
+"clap:com.example.humanizer" = "with_sound"
 ```
 
 Every setting can be left out:
@@ -226,9 +229,10 @@ Every setting can be left out:
 | `agents.enabled` | Whether agents can control Musicable. | `false` |
 | `plugins.kinds` | The plugins marked as another kind than the scan found, in the browser ([Plugins](../using/plugins.md#finding-them)): each by its format and id, as `"clap:org.example.arp"`, and what it's marked as, `instrument`, `midi_effect` or `audio_effect`. It's not one of a profile's settings. | None |
 | `plugins.render_ahead` | The plugins set to render live wherever they are, in the browser or the devices panel ([Plugins](../using/plugins.md#rendering-ahead)): each by its format and id, as `"clap:com.example.outboard"`, at `never`. The plugins at Auto aren't here. It's not one of a profile's settings. | None |
+| `plugins.note_timing` | The plugins marked as to when the notes they play come, against their latency, in the browser ([Plugins](../using/plugins.md#notes-timing-and-latency)): each by its format and id, at `with_sound` or `as_played`. The plugins at Auto aren't here. It's not one of a profile's settings. | None |
 
 The Settings window has a control for every setting but the export
 window's, which that window keeps as it was last used, and the plugins'
-kinds and Render Ahead, which the browser sets. Settings this
+kinds, Render Ahead and Notes' Timing, which the browser sets. Settings this
 version doesn't know are ignored, so a file from a later version still
 opens. A file that can't be read leaves the default settings, and says why.

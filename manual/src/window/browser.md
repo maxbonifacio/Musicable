@@ -98,6 +98,10 @@ folder from then on, and adds it as that kind
 ([Plugins](../using/plugins.md#finding-them)). It has its **Render Ahead**
 too: **Never** has it render live wherever it is, for one that
 misbehaves rendered ahead ([Plugins](../using/plugins.md#rendering-ahead)).
+Its **Notes' Timing** marks when the notes the plugin plays come, against
+its latency, for its devices on Auto, in every project: **With Its
+Sound**, **As It Plays Them**, or **Auto**, which takes the mark away
+([Plugins](../using/plugins.md#notes-timing-and-latency)).
 
 Double-click a device to put it at the end of the selected track's devices,
 or the master's while the master track is selected. Or drag it: into the

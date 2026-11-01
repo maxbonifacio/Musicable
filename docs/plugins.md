@@ -563,6 +563,44 @@ the folders below. A `.vst3` bundle is a library everywhere, and so is a
 `.clap`, as Debian installs some plugins in, is searched like any other, as
 CLAP asks.
 
+## Note timing
+
+A plugin's latency says how late its sound is, and neither CLAP nor VST3
+says whether the notes it plays, as a MIDI effect or out as it renders,
+are as late (`NoteTiming::WithSound`, as a MIDI effect that looks ahead
+holds them back, or a note detector hears them) or as early as what came
+in (`NoteTiming::AsPlayed`, as a synth's arpeggiator fires). Hosts differ:
+REAPER lets a JSFX say with `pdc_midi`, and Ardour delays MIDI with audio
+along a route. Each plugin device has one (`PluginDevice::note_timing`),
+and the engine carries the plugin's latency along the notes' way for
+`WithSound`, as it does along its sound ([engine.md](engine.md#delay-compensation)).
+
+- `timing::measure` finds out. It makes and activates the plugin, and
+  gives up unless it's a MIDI effect or has a note output, with a latency
+  of `timing::SHORTEST` (128 frames) or more. It plays it, in the switch
+  the engine puts it in, in a graph of its own on an engine of its own,
+  with the transport playing: a MIDI effect or an instrument a held note
+  from the first frame, and an audio effect a tone from a tenth of a
+  second in. The first note it plays decides: about its latency after
+  what made it is `WithSound`, about at once `AsPlayed`, within a quarter
+  of the latency or 32 frames, and anything else nothing.
+- The app measures in a process of its own, as the scan does:
+  `musicable time-plugin-notes FORMAT LIBRARY ID KIND` (`timing::child`,
+  `timing::measure_isolated`), a plugin at a time on a thread
+  (`plugin_timing::PluginTimings`). It measures a plugin once it has
+  loaded, where it matters and nothing has yet, and keeps what it found in
+  `note-timings.json` in the config folder, by plugin and its library's
+  fingerprint (`scan::fingerprint`), so it measures it again once the
+  library changes.
+- A device takes its plugin's timing as the user marked the plugin
+  (`[plugins.note_timing]`), or as it measured, or else as assumed for its
+  kind (`NoteTiming::assumed`: an instrument's `AsPlayed`, an effect's
+  `WithSound`), with no undo step (`Change::NoteTiming`,
+  `Transaction::follow_plugin_note_timing`), until someone chooses for the
+  device (`device.set_note_timing`, `PluginDevice::note_timing_chosen`).
+- The test arpeggiator has a Latency and a Holds Back switch, which holds
+  its steps back by its latency, so a test can play it both ways.
+
 ## Limits
 
 | What | Limit | When it's reached |

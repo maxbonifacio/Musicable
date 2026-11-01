@@ -38,6 +38,9 @@ pub(crate) struct Arp {
     next_id: i32,
     /// Semitones, rounded.
     pub(crate) transpose: f64,
+    /// How many frames it holds its first step back, as an arpeggiator
+    /// that looks ahead does, by the latency it reports.
+    pub(crate) hold_back: u32,
 }
 
 impl Arp {
@@ -51,6 +54,7 @@ impl Arp {
             last: None,
             next_id: 0,
             transpose,
+            hold_back: 0,
         }
     }
 
@@ -83,7 +87,10 @@ impl Arp {
         }
         if self.left.is_none() {
             self.last = None;
-            self.play_step(time, emit);
+            match self.hold_back {
+                0 => self.play_step(time, emit),
+                late => self.left = Some(late),
+            }
         }
     }
 

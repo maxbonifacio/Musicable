@@ -82,8 +82,9 @@ pub struct Graph {
     /// keys, with their numbers.
     records: Vec<(NodeKey, usize)>,
     /// The nodes whose notes [`add_note_record`](Graph::add_note_record)
-    /// records, by their writers' keys.
-    note_records: Vec<(NodeKey, NodeId)>,
+    /// records, by their writers' keys, and how late those notes are, as
+    /// [`prepare`](Graph::prepare) works it out.
+    note_records: Vec<(NodeKey, NodeId, usize)>,
     /// Which nodes' notes go to which, and whether to its side input for
     /// notes, from [`send_notes`](Graph::send_notes) and
     /// [`send_side_notes`](Graph::send_side_notes).
@@ -454,8 +455,8 @@ impl Graph {
     /// same node's: a record with a key that has one already isn't added.
     pub fn add_note_record(&mut self, key: NodeKey, node: NodeId) -> Result<(), GraphError> {
         self.check(node)?;
-        if !self.note_records.iter().any(|&(k, _)| k == key) {
-            self.note_records.push((key, node));
+        if !self.note_records.iter().any(|&(k, ..)| k == key) {
+            self.note_records.push((key, node, 0));
         }
         Ok(())
     }
@@ -838,9 +839,9 @@ impl Graph {
             let [ahead, live_half] = halves;
             if live[n.0] { live_half } else { ahead }
         }
-        for (key, node) in note_records {
+        for (key, node, late) in note_records {
             let graph = half_of(live, [ahead, live_half], node);
-            graph.note_records.push((key, place[node.0]));
+            graph.note_records.push((key, place[node.0], late));
         }
         for node in playing {
             half_of(live, [ahead, live_half], node)
@@ -1014,7 +1015,7 @@ impl Graph {
         // of a node that plays and makes no notes stays empty.
         let mut note_records: Vec<NoteRecord> = Vec::new();
         let note_keys: Vec<(NodeKey, usize)> = (self.note_records.iter())
-            .map(|&(key, node)| {
+            .map(|&(key, node, late)| {
                 let i = (note_records.iter().position(|r| r.node == node)).unwrap_or_else(|| {
                     let i = note_records.len();
                     let lists = ordered.iter_mut().chain(makers.iter_mut());
@@ -1024,6 +1025,7 @@ impl Graph {
                     note_records.push(NoteRecord {
                         node,
                         notes: Vec::with_capacity(Notes::CAPACITY),
+                        late: late as u64,
                     });
                     i
                 });
@@ -1214,14 +1216,55 @@ impl Graph {
         config: &EngineConfig,
         output: &mut NodeId,
     ) -> (Vec<(Joint, NodeId)>, usize) {
-        // How late each node's output is.
-        let mut late = vec![0usize; self.nodes.len()];
-        let mut delays = Vec::new();
-        for node in self.topological_order() {
+        // How late each node's output is, and the notes it plays and makes.
+        let len = self.nodes.len();
+        let mut late = vec![0usize; len];
+        let mut notes_late = vec![0usize; len];
+        let mut made_late = vec![0usize; len];
+        // The notes that come to each node: from which node, and whether
+        // it made them as it rendered.
+        let mut notes_into: Vec<Vec<(usize, bool)>> = vec![Vec::new(); len];
+        for &(from, to, _) in &self.note_routes {
+            notes_into[to.0].push((from.0, false));
+        }
+        for &(from, to, _) in &self.made_routes {
+            notes_into[to.0].push((from.0, true));
+        }
+        let notes_in = |node: usize, notes_late: &[usize], made_late: &[usize]| {
+            let late_of = |&(from, made): &(usize, bool)| match made {
+                true => made_late[from],
+                false => notes_late[from],
+            };
+            notes_into[node].iter().map(late_of).max().unwrap_or(0)
+        };
+        // Stage by stage, as notes made while rendering have it: the notes
+        // made in a stage are as late as what made them. A graph whose
+        // routes loop has no stages, and doesn't prepare.
+        let stage_of = self.stages().unwrap_or_else(|_| vec![0; len]);
+        let mut order = self.topological_order();
+        order.sort_by_key(|n| stage_of[n.0]);
+        let players = self.player_order(&stage_of);
+        let (mut player, mut delays) = (0, Vec::new());
+        for node in order {
+            // The stage's players first, each after those it gets notes
+            // from: their notes are as late as those that come to them,
+            // and the player's own notes latency.
+            while let Some(&p) = players.get(player)
+                && stage_of[p.0] <= stage_of[node.0]
+            {
+                let into = notes_in(p.0, &notes_late, &made_late);
+                let own = self.nodes[p.0].notes_latency();
+                notes_late[p.0] = into.saturating_add(own).min(Self::MAX_LATENCY);
+                player += 1;
+            }
             let inputs = &self.inputs[node.0];
-            let arrival = inputs.iter().map(|i| late[i.0]).max().unwrap_or(0);
+            let sound = inputs.iter().map(|i| late[i.0]).max().unwrap_or(0);
+            // Notes can't wait, so what comes with them waits for them.
+            let arrival = sound.max(notes_in(node.0, &notes_late, &made_late));
             let latency = self.nodes[node.0].latency();
             late[node.0] = arrival.saturating_add(latency).min(Self::MAX_LATENCY);
+            let made = arrival.saturating_add(self.nodes[node.0].notes_latency());
+            made_late[node.0] = made.min(Self::MAX_LATENCY);
             for slot in 0..self.inputs[node.0].len() {
                 let from = self.inputs[node.0][slot];
                 let early = arrival - late[from.0];
@@ -1245,6 +1288,10 @@ impl Graph {
                 self.outputs[delay.0].push(node);
                 delays.push((joint, delay));
             }
+        }
+        // What each note record records is as late as the notes it records.
+        for (_, node, record_late) in &mut self.note_records {
+            *record_late = notes_late[node.0].max(made_late[node.0]);
         }
         let cue_late = self.cue.map_or(0, |cue| late[cue.0]);
         let taps_late = self.taps.iter().flatten().map(|tap| late[tap.0]).max();
@@ -1695,6 +1742,11 @@ fn switches_on(switches: Switches) -> impl Iterator<Item = (Controller, Option<u
 struct NoteRecord {
     node: NodeId,
     notes: Vec<NodeEvent>,
+    /// How many frames late the notes are, against the song: as late as
+    /// the plugins before them whose notes come with their sound
+    /// ([`Node::notes_latency`]) hold them, so a recording puts them that
+    /// much earlier.
+    late: u64,
 }
 
 /// Where a stage's nodes are in [`PreparedGraph::order`], and its players,
@@ -2079,6 +2131,22 @@ impl PreparedGraph {
     pub(crate) fn own_record_notes(&self, key: NodeKey) -> Option<&[NodeEvent]> {
         let &(_, i) = self.note_keys.iter().find(|&&(k, _)| k == key)?;
         Some(&self.note_records[i].notes)
+    }
+
+    /// How many frames late the notes the record for the writer with `key`
+    /// has are, against the song, if the graph has it: as late as plugins
+    /// whose notes come with their sound hold them before the node it
+    /// records ([`Node::notes_latency`]). The engine hands them to the
+    /// writer that much earlier.
+    pub fn record_notes_late(&self, key: NodeKey) -> Option<u64> {
+        (self.own_record_notes_late(key))
+            .or_else(|| self.live_half.as_ref()?.record_notes_late(key))
+    }
+
+    /// The same, if the node recorded is in this half.
+    pub(crate) fn own_record_notes_late(&self, key: NodeKey) -> Option<u64> {
+        let &(_, i) = self.note_keys.iter().find(|&&(k, _)| k == key)?;
+        Some(self.note_records[i].late)
     }
 
     /// The keys of the writers the graph has note records for: those of

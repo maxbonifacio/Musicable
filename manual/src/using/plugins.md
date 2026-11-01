@@ -114,6 +114,50 @@ and then the point after it carries those notes as well as its sound.
   missing. If a later version has none, the track still has it as its
   input, and gets notes again once the plugin plays them.
 
+## Notes' timing and latency
+
+A plugin with a latency, such as one that looks ahead or oversamples,
+puts out its sound that long after what came into it, and Musicable has
+the rest of the mix wait for it. The notes it plays can come one of two
+ways, which neither CLAP nor VST3 says, so plugins differ:
+
+- **With Its Sound**: as late as its sound. A MIDI effect that looks ahead,
+  such as a humanizer that can move notes early, holds its notes back by
+  its latency, and a pitch tracker or a drum trigger can only say a note
+  has started once it's heard more of it. The rest of the mix waits for
+  these notes as it does for the plugin's sound, so what plays them lines
+  up with it.
+- **As It Plays Them**: as early as what comes into it. A synth's
+  arpeggiator plays a step as it fires, and its sound for the step comes
+  its latency after.
+
+It matters for a MIDI effect, and for a plugin that plays its notes out
+([above](#notes-a-plugin-plays-out)), with a latency of more than about
+3 ms. For one of those, its menu in the devices panel has **Notes'
+Timing**, with the latency, and three choices:
+
+- **Auto**, at first, says which the device has, and why. As soon as such
+  a plugin loads, Musicable plays it a note, or a tone for an effect,
+  away from the song, in a process of its own, and sees when its first
+  note comes: its latency later, or at once. If that says nothing, as
+  when it plays nothing for a held note, it's taken to be With Its Sound
+  for an effect and As It Plays Them for an instrument.
+- **With Its Sound** or **As It Plays Them** chooses for this device,
+  whatever Musicable found out.
+
+If what plays a plugin's notes, on another track, or after a MIDI effect,
+is about the plugin's latency late or early, try the other. The project
+keeps each device's, so it plays the same on another computer.
+
+The plugin's menu in the browser has **Notes' Timing** too, which marks
+the plugin, for every project: its devices on Auto follow the mark. Auto
+there takes the mark away.
+
+Bypassed, a MIDI effect whose notes come with its sound holds back the
+notes it passes on by as long, as a bypassed effect's sound waits for its
+latency, so nothing moves as it's bypassed. A recording of the notes a
+plugin plays puts them as much earlier as they're late.
+
 ## Multi-timbral instruments
 
 A multi-timbral instrument, such as a sampler with a part on each MIDI

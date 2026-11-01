@@ -32,6 +32,15 @@ pub struct PluginDevice {
     /// while something takes them, if the plugin no longer had one then.
     /// Off until it first loads.
     pub note_output: bool,
+    /// When the notes it plays come, against its latency: with its sound,
+    /// or as it plays them. It matters for a MIDI effect, and for a plugin
+    /// that plays notes out as it renders ([`makes_notes`](Self::makes_notes)),
+    /// that has a latency.
+    pub note_timing: NoteTiming,
+    /// Whether someone chose [`note_timing`](Self::note_timing) for this
+    /// device. Until then, it follows what the app finds out of the plugin
+    /// as it loads ([`NoteTiming::assumed`] until it knows better).
+    pub note_timing_chosen: bool,
     pub settings: PluginSettings,
 }
 
@@ -89,6 +98,58 @@ impl PluginKind {
             Self::Instrument => "Instrument",
             Self::MidiEffect => "MIDI Effect",
             Self::AudioEffect => "Audio Effect",
+        }
+    }
+}
+
+/// When the notes a plugin plays come, against the latency it reports: see
+/// [`PluginDevice::note_timing`]. Neither CLAP nor VST3 says, and plugins
+/// differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NoteTiming {
+    /// With its sound, its latency late: a note the plugin plays goes with
+    /// what it puts out then, as a MIDI effect that looks ahead holds notes
+    /// back, or a note detector hears a note only once it's heard more. The
+    /// rest of the mix waits for them, as it does for the plugin's sound.
+    WithSound,
+    /// As it plays them, on its own clock: a note goes with what comes into
+    /// the plugin then, as a synth's arpeggiator plays a step as it fires,
+    /// its sound coming its latency after.
+    AsPlayed,
+}
+
+impl NoteTiming {
+    pub const ALL: [Self; 2] = [Self::WithSound, Self::AsPlayed];
+
+    /// What files and commands call it: `"with_sound"` or `"as_played"`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::WithSound => "with_sound",
+            Self::AsPlayed => "as_played",
+        }
+    }
+
+    /// The timing whose key is `key`.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|timing| timing.key() == key)
+    }
+
+    /// What menus call it: "With Its Sound" or "As It Plays Them".
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::WithSound => "With Its Sound",
+            Self::AsPlayed => "As It Plays Them",
+        }
+    }
+
+    /// What a plugin of `kind` is taken to do until something says
+    /// otherwise: an effect's notes come with its sound, as most effects
+    /// with a latency and notes look ahead or listen, and an instrument's as
+    /// it plays them, as its arpeggiator fires.
+    pub fn assumed(kind: PluginKind) -> Self {
+        match kind {
+            PluginKind::Instrument => Self::AsPlayed,
+            PluginKind::MidiEffect | PluginKind::AudioEffect => Self::WithSound,
         }
     }
 }

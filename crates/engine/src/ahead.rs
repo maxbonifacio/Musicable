@@ -309,8 +309,9 @@ pub(crate) struct WriterRing {
 }
 
 /// A note a writer's note record played, with the engine time it played
-/// at.
-type TimedNote = (u64, NodeEventKind);
+/// at and how late its record's notes are
+/// ([`PreparedGraph::record_notes_late`]).
+type TimedNote = (u64, u64, NodeEventKind);
 
 /// The ahead side's end of a writer's queues.
 pub(crate) struct CoreWriter {
@@ -323,6 +324,8 @@ pub(crate) struct CoreWriter {
 pub(crate) struct LiveQueue {
     ring: Arc<WriterRing>,
     notes: Consumer<TimedNote>,
+    /// How late the notes it last played were.
+    late: u64,
 }
 
 /// The two ends of the queues for the writer with `key`, for an engine with
@@ -342,6 +345,7 @@ pub(crate) fn writer_queues(key: NodeKey, config: EngineConfig) -> (CoreWriter, 
     let live = LiveQueue {
         ring,
         notes: notes_rx,
+        late: 0,
     };
     (core, live)
 }
@@ -388,7 +392,8 @@ impl LiveQueue {
 
     /// Hands `writer` the notes the ahead side's note record played in the
     /// same frames, after [`play_sound`](Self::play_sound), using `notes`
-    /// for room: [`NOTES`](Self::NOTES) of them.
+    /// for room: [`NOTES`](Self::NOTES) of them. They go as early as they're
+    /// late, as the live side hands its own.
     pub(crate) fn play_notes(
         &mut self,
         writer: &mut dyn crate::TapWriter,
@@ -398,16 +403,21 @@ impl LiveQueue {
     ) {
         let end = time + frames as u64;
         notes.clear();
-        while let Ok(&(at, kind)) = self.notes.peek()
+        while let Ok(&(at, late, kind)) = self.notes.peek()
             && at < end
         {
             let _ = self.notes.pop();
+            // A graph that took over with another lateness has it from its
+            // first note on.
+            if notes.is_empty() {
+                self.late = late;
+            }
             if notes.len() < notes.capacity() {
                 let offset = at.saturating_sub(time) as usize;
                 notes.push(NodeEvent { offset, kind });
             }
         }
-        writer.write_notes(time, frames, notes);
+        writer.write_notes(time.saturating_sub(self.late), frames, notes);
     }
 }
 
@@ -1338,9 +1348,10 @@ fn keep(
     }
     let mut dropped = 0;
     for writer in writers {
+        let late = graph.own_record_notes_late(writer.key).unwrap_or(0);
         for note in graph.own_record_notes(writer.key).unwrap_or_default() {
             let at = start + note.offset as u64;
-            if writer.notes.push((at, note.kind)).is_err() {
+            if writer.notes.push((at, late, note.kind)).is_err() {
                 dropped += 1;
             }
         }

@@ -120,6 +120,8 @@ fn song(dir: &Path, input: impl FnOnce(TrackId) -> Option<Input>) -> (Project, [
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings,
     }));
     let track = p.track_mut(bass).unwrap();
@@ -423,6 +425,8 @@ fn a_midi_track_records_what_an_arpeggiator_plays() {
         kind: PluginKind::MidiEffect,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     }));
     let id = arpeggiator.id;
@@ -477,6 +481,8 @@ fn a_midi_track_records_what_a_synth_plays_out() {
         inputs: Vec::new(),
         // As the project was saved, once the plugin had said it has one.
         note_output: true,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     }));
     let id = synth.id;
