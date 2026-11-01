@@ -66,6 +66,14 @@ impl OutputRecorder {
     /// Starts recording what the engine `handle` drives plays to `file`, a
     /// WAV file. Says why it can't.
     pub(crate) fn start(handle: &mut EngineHandle, file: &Path) -> Result<Self, String> {
+        if let Some(folder) = file
+            .parent()
+            .filter(|folder| !folder.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(folder).map_err(|error| {
+                format!("The folder {} can't be made: {error}", folder.display())
+            })?;
+        }
         let out = File::create(file)
             .map_err(|error| format!("{} can't be written: {error}", file.display()))?;
         let reader = handle

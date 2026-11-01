@@ -115,7 +115,8 @@ pub struct Command {
     pub agents: bool,
     /// Whether it runs on its own only, never among others as one step of
     /// the undo history ([`Registry::run_batch`]): it opens, saves or
-    /// replaces the project, or steps through the undo history.
+    /// replaces the project, steps through the undo history, or asks for
+    /// something whose outcome is its answer ([`Request::answers`]).
     pub alone: bool,
     /// Whether it needs at least one of its arguments, though each of them
     /// is optional: see [`needs_arguments`](Self::needs_arguments).
@@ -539,6 +540,35 @@ pub struct AudioDevice {
 }
 
 impl Request {
+    /// Whether, asked for by an agent's command, its outcome is the
+    /// command's answer: a file opened, saved, imported or exported, a
+    /// setting changed, a recording or a blind test made. A command that
+    /// asks for one runs on its own ([`Command::alone`]), as a batch has
+    /// no answer of its own to give each of its commands.
+    pub fn answers(&self) -> bool {
+        matches!(
+            self,
+            Request::New
+                | Request::NewDemo
+                | Request::Open(_)
+                | Request::Save
+                | Request::SaveAs(_)
+                | Request::ImportAudio { .. }
+                | Request::ExportAudio { .. }
+                | Request::SetSetting { .. }
+                | Request::SetAudioDevice(_)
+                | Request::SetKeys { .. }
+                | Request::ResetKeys(_)
+                | Request::SaveWorkspaceAs(_)
+                | Request::RenameWorkspace(_)
+                | Request::RecordOutput(_)
+                | Request::StopRecordingOutput
+                | Request::MeasureResponse(_)
+                | Request::MakeBlindTest(_)
+                | Request::OpenBlindTest(_)
+        )
+    }
+
     /// Whether an agent can ask for it. Agents can't see a window, or
     /// answer a question in one, so the requests that only show a window
     /// or ask the user for something are the user's, and so is quitting.

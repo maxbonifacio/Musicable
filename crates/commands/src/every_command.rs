@@ -2907,6 +2907,14 @@ fn agents_run_each_command_as_the_ui_does() {
         assert_eq!(args, same, "{what} gets ready the same way twice");
         let command = ui.registry.get(what).expect("it has an example").clone();
         let ran = ui.run_with(what, args.clone());
+        // A command whose outcome is its answer runs on its own: a batch
+        // has no answer to give it.
+        if let Some(request) = ui.requests.iter().find(|request| request.answers()) {
+            assert!(
+                command.alone,
+                "{what} asks for {request:?}, so it runs alone"
+            );
+        }
         // What only the user can see or answer is the user's.
         if ui.requests.iter().any(|request| !request.for_agents()) {
             let asked = &ui.requests;
