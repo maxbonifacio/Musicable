@@ -513,7 +513,7 @@ fn agents_read_the_plugins_the_layout_and_the_meters() {
         entry("Surge", "Surge", PluginKind::Instrument),
         PluginEntry {
             never_ahead: true,
-            note_timing: None,
+            note_timing: Some(musicable_model::plugin::NoteTiming::AsPlayed),
             ..entry("Delay", "Acme", PluginKind::AudioEffect)
         },
     ];
@@ -530,6 +530,7 @@ fn agents_read_the_plugins_the_layout_and_the_meters() {
             "vendor": "Acme",
             "kind": "audio_effect",
             "render_ahead": "never",
+            "note_timing": "as_played",
         }])
     );
 

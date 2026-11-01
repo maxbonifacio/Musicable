@@ -59,13 +59,17 @@ pub trait TapWriter: Send {
     fn write(&mut self, time: u64, audio: AudioRef<'_>);
 
     /// Takes the notes the node the note record records played in the
-    /// block of `frames` frames the engine played from engine time `time`
-    /// on, in order, each at its offset into the block: none where the
-    /// graph hasn't the record, or there's no graph yet. It comes after
-    /// [`write`](Self::write), for every block. A writer of a tap of sound
-    /// can pass over it.
-    fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent]) {
-        let _ = (time, frames, notes);
+    /// stretch of `frames` frames the engine played from engine time `time`
+    /// on, in order, each at its offset into the stretch: none where the
+    /// graph hasn't the record, or there's no graph yet. They come `late`
+    /// frames after what played them, as a plugin's notes that come with
+    /// its sound ([`PreparedGraph::record_notes_late`]): a writer that
+    /// keeps them as they were played puts them that much earlier. It
+    /// comes after [`write`](Self::write), for every block, in stretches
+    /// that follow each other: more than one where the lateness changes in
+    /// the block. A writer of a tap of sound can pass over it.
+    fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent], late: u64) {
+        let _ = (time, frames, notes, late);
     }
 }
 
@@ -1125,12 +1129,10 @@ impl Live {
                 // SAFETY: as above.
                 None => unsafe { queue.play_sound(writer.as_mut(), time, frames, &mut self.tap) },
             }
-            // As early as the notes are late, against the song.
             match live_first(half, None, |half| half.own_record_notes(*key)) {
                 Some(notes) => {
                     let late = live_first(half, None, |h| h.own_record_notes_late(*key));
-                    let at = time.saturating_sub(late.unwrap_or(0));
-                    writer.write_notes(at, frames, notes);
+                    writer.write_notes(time, frames, notes, late.unwrap_or(0));
                 }
                 None => queue.play_notes(writer.as_mut(), time, frames, &mut self.notes),
             }
@@ -1212,8 +1214,7 @@ impl Live {
             writer.write(start, tapped.unwrap_or(AudioRef::empty(frames)));
             let notes = live_first(half, graph, |g| g.own_record_notes(*key));
             let late = live_first(half, graph, |g| g.own_record_notes_late(*key));
-            let at = start.saturating_sub(late.unwrap_or(0));
-            writer.write_notes(at, frames, notes.unwrap_or_default());
+            writer.write_notes(start, frames, notes.unwrap_or_default(), late.unwrap_or(0));
         }
         self.played(shared, frames);
         frames

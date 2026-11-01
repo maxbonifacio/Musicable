@@ -1050,26 +1050,31 @@ impl Session {
     /// When the notes the device `device`'s plugin plays come without
     /// anyone choosing for the device, and why, where it matters.
     pub fn plugin_note_timing(&self, device: DeviceId) -> Option<(NoteTiming, TimingFrom)> {
-        self.plugins.note_timing(device)
+        let chosen = (self.document.project().find_device(device))
+            .and_then(|(_, _, found)| found.kind.plugin())
+            .is_some_and(|plugin| plugin.note_timing_chosen);
+        self.plugins.note_timing(device, chosen)
     }
 
     /// Has what playing plugins said of their note timing be `measured`, as
     /// the app keeps it.
     pub fn set_measured_note_timings(
         &mut self,
-        measured: BTreeMap<(PluginFormat, String), Option<NoteTiming>>,
+        measured: BTreeMap<(PluginFormat, String), (PluginKind, Option<NoteTiming>)>,
     ) {
         self.plugins.set_measured_note_timings(measured);
     }
 
-    /// Takes what playing the plugin `key` said of its note timing, for the
-    /// devices of it whose timing nobody chose to follow.
+    /// Takes what playing the plugin `key`, taken to do `kind` with notes,
+    /// said of its note timing, for the devices of it whose timing nobody
+    /// chose to follow.
     pub fn measured_note_timing(
         &mut self,
         key: (PluginFormat, String),
+        kind: PluginKind,
         timing: Option<NoteTiming>,
     ) {
-        self.plugins.measured_note_timing(key, timing);
+        self.plugins.measured_note_timing(key, kind, timing);
     }
 
     /// The plugins that loaded whose note timing is to be measured, with
@@ -1570,7 +1575,14 @@ impl Session {
                     }
                     // When a plugin's notes come says how late what plays
                     // them is, for delay compensation.
-                    Edit::PluginNoteTiming { from, to, .. } => recompile |= from.0 != to.0,
+                    // A device back on Auto takes its plugin's timing as it
+                    // is now, from the next poll, whatever it was given last.
+                    Edit::PluginNoteTiming { device, from, to } => {
+                        recompile |= from.0 != to.0;
+                        if !to.1 {
+                            self.plugins.forget_note_timing(device);
+                        }
+                    }
                     // So is automation, and the plugins leave what it moves
                     // to the engine.
                     Edit::AddLane { .. }

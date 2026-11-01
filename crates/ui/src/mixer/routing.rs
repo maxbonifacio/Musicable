@@ -128,6 +128,7 @@ impl RoutingPanel {
             inputs: Choices {
                 audio: view.inputs,
                 midi: view.midi_inputs,
+                plugins: Some(view.plugins.status),
             },
             playhead: view.playback.playhead,
             levels: view.levels,

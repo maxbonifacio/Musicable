@@ -40,6 +40,12 @@ struct Entry {
     path: PathBuf,
     modified: u64,
     size: u64,
+    /// What it was taken to do with notes as it played, as a plugin
+    /// kind's key: once it's marked as another kind, it's measured again,
+    /// as that kind is played another thing. An entry without one is
+    /// measured again too.
+    #[serde(default)]
+    kind: Option<String>,
     /// `"with_sound"`, `"as_played"`, or `None` where playing it said
     /// nothing.
     timing: Option<String>,
@@ -64,7 +70,7 @@ pub(crate) struct PluginTimings {
     waiting: VecDeque<(PluginInfo, PluginKind)>,
     /// The measurement running, if one is: of which plugin, and what it
     /// will say.
-    running: Option<(PluginInfo, mpsc::Receiver<Measured>)>,
+    running: Option<(PluginInfo, PluginKind, mpsc::Receiver<Measured>)>,
 }
 
 impl PluginTimings {
@@ -82,15 +88,17 @@ impl PluginTimings {
         }
     }
 
-    /// What was measured of each plugin whose library is as it was then:
-    /// `None` for one that playing said nothing of.
-    pub fn known(&self) -> BTreeMap<PluginKey, Option<NoteTiming>> {
+    /// What was measured of each plugin whose library is as it was then,
+    /// with what it was taken to do with notes as it played: `None` for one
+    /// that playing said nothing of.
+    pub fn known(&self) -> BTreeMap<PluginKey, (PluginKind, Option<NoteTiming>)> {
         (self.kept.plugins.iter())
             .filter(|entry| scan::fingerprint(&entry.path) == (entry.modified, entry.size))
             .filter_map(|entry| {
                 let format = musicable_plugins::format_name::parse(&entry.format)?;
+                let kind = PluginKind::from_key(entry.kind.as_deref()?)?;
                 let timing = entry.timing.as_deref().and_then(NoteTiming::from_key);
-                Some(((format, entry.id.clone()), timing))
+                Some(((format, entry.id.clone()), (kind, timing)))
             })
             .collect()
     }
@@ -99,8 +107,11 @@ impl PluginTimings {
     /// waiting are done, unless it's waiting or running already.
     pub fn request(&mut self, plugin: PluginInfo, kind: PluginKind) {
         let same = |other: &PluginInfo| other.format == plugin.format && other.id == plugin.id;
-        let running = self.running.as_ref().is_some_and(|(p, _)| same(p));
-        if !running && !self.waiting.iter().any(|(p, _)| same(p)) {
+        let running = self
+            .running
+            .as_ref()
+            .is_some_and(|(p, of, _)| same(p) && *of == kind);
+        if !running && !self.waiting.iter().any(|(p, of)| same(p) && *of == kind) {
             self.waiting.push_back((plugin, kind));
         }
     }
@@ -126,15 +137,16 @@ impl PluginTimings {
                 wake();
             })
             .map_err(|e| format!("Musicable couldn't start measuring a plugin: {e}"))?;
-        self.running = Some((plugin, receive));
+        self.running = Some((plugin, kind, receive));
         Ok(())
     }
 
-    /// What the measurement running found, once it's done: the plugin, and
-    /// its timing, if playing it said, which is kept from now on. A plugin
-    /// that didn't load, crashed or hung counts as saying nothing.
-    pub fn receive(&mut self) -> Option<(PluginKey, Option<NoteTiming>)> {
-        let (plugin, receive) = self.running.as_ref()?;
+    /// What the measurement running found, once it's done: the plugin, what
+    /// it was taken to do with notes, and its timing, if playing it said,
+    /// which is kept from now on. A plugin that didn't load, crashed or hung
+    /// counts as saying nothing.
+    pub fn receive(&mut self) -> Option<(PluginKey, PluginKind, Option<NoteTiming>)> {
+        let (plugin, _, receive) = self.running.as_ref()?;
         let timing = match receive.try_recv() {
             Ok(Ok(timing)) => timing,
             Ok(Err(why)) => {
@@ -144,13 +156,13 @@ impl PluginTimings {
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => None,
         };
-        let (plugin, _) = self.running.take()?;
-        self.keep(&plugin, timing);
-        Some(((plugin.format, plugin.id), timing))
+        let (plugin, kind, _) = self.running.take()?;
+        self.keep(&plugin, kind, timing);
+        Some(((plugin.format, plugin.id), kind, timing))
     }
 
     /// Keeps what was measured of `plugin`, and saves it.
-    fn keep(&mut self, plugin: &PluginInfo, timing: Option<NoteTiming>) {
+    fn keep(&mut self, plugin: &PluginInfo, kind: PluginKind, timing: Option<NoteTiming>) {
         let (modified, size) = scan::fingerprint(&plugin.path);
         let format = musicable_plugins::format_name::name(plugin.format).to_owned();
         let entries = &mut self.kept.plugins;
@@ -161,6 +173,7 @@ impl PluginTimings {
             path: plugin.path.clone(),
             modified,
             size,
+            kind: Some(kind.key().to_owned()),
             timing: timing.map(|timing| timing.key().to_owned()),
         });
         if let Some(file) = &self.file
@@ -228,9 +241,10 @@ mod tests {
             path: library.clone(),
         };
         let mut timings = PluginTimings::new(Some(file.clone()));
-        timings.keep(&plugin, Some(NoteTiming::WithSound));
+        timings.keep(&plugin, PluginKind::MidiEffect, Some(NoteTiming::WithSound));
         let key = (PluginFormat::Clap, "org.example.arp".to_owned());
-        let measured = BTreeMap::from([(key.clone(), Some(NoteTiming::WithSound))]);
+        let midi_effect = (PluginKind::MidiEffect, Some(NoteTiming::WithSound));
+        let measured = BTreeMap::from([(key.clone(), midi_effect)]);
         assert_eq!(PluginTimings::new(Some(file.clone())).known(), measured);
         // Measured again once its library changes.
         std::fs::write(&library, b"a new version of the library").unwrap();

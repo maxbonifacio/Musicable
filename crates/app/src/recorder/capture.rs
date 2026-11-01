@@ -23,7 +23,7 @@ use musicable_model::{AudioInput, Input, MidiInput};
 
 use super::{
     Armed, CHUNK, MidiTape, NoteBuffer, NoteReader, NoteWriter, PATIENCE_SECONDS, Report, Running,
-    Tape, TrackTape, find_audio,
+    Tape, TrackTape, find_audio, notes_patience,
 };
 
 /// The most memory the held inputs take together, in bytes.
@@ -449,7 +449,9 @@ impl Tape {
     }
 
     /// Whether the held inputs of the tracks Capture takes have what was
-    /// heard as engine time `at` played, or have stopped, or stalled.
+    /// heard as engine time `at` played, or have stopped, or stalled: the
+    /// notes of another track, which can come late, as a plugin's that
+    /// come with its sound, after waiting longer.
     fn held_up_to(&self, at: u64) -> bool {
         let stalled = self.until.saturating_sub(at) > u64::from(self.rate) * PATIENCE_SECONDS;
         let latency = (self.held.segments.iter().rev())
@@ -457,12 +459,14 @@ impl Tape {
             .map_or(0, |segment| segment.latency);
         let heard = |track: &Armed| i128::from(at) + i128::from(latency) + i128::from(track.offset);
         let has = |track: &Armed| {
-            // Another track's notes are there as the engine played them.
+            // Another track's notes are there as they were played, as late
+            // as they come.
             if track.notes_tap().is_some() {
                 let held = self.held.notes_of(track);
+                let waited = self.until.saturating_sub(at) > notes_patience(self.rate);
                 return held.is_none_or(|held| match (&held.source, &held.held) {
                     (Some((source, _)), Some((buffer, _))) => {
-                        source.has_ended() || buffer.settled() >= at
+                        source.has_ended() || buffer.settled() >= at || waited
                     }
                     _ => true,
                 });
@@ -486,7 +490,9 @@ impl Tape {
                     }),
             }
         };
-        stalled || self.held.tracks.iter().all(has)
+        // Another track's notes wait as long as they can be late.
+        let waits = |track: &Armed| !stalled || track.notes_tap().is_some();
+        (self.held.tracks.iter()).all(|track| !waits(track) || has(track))
     }
 
     /// Records what the held inputs of the tracks Capture takes played over

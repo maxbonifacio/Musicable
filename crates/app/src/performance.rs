@@ -329,7 +329,9 @@ impl Places {
             (LoadKey::Node(_), Some(Owner::Modulators(chain))) => Row::Modulators(chain),
             (LoadKey::Node(_), Some(Owner::Metronome)) => Row::Metronome,
             (LoadKey::Node(_), Some(owner)) => mixer(owner),
-            // No node the graphs are made of has a key without an owner.
+            // No node the graphs are made of has a key without an owner,
+            // but the note delays the graph adds of itself, which take
+            // next to nothing.
             (_, None) => Row::Mixer(Chain::Master),
         }
     }

@@ -1,5 +1,6 @@
 //! Built-in nodes.
 
+use std::collections::VecDeque;
 use std::f64::consts::TAU;
 use std::ops::Range;
 use std::sync::Arc;
@@ -15,8 +16,94 @@ use crate::automation::Param;
 use crate::meter::Meter;
 use crate::{
     AudioMut, AudioRef, Automation, EngineConfig, Inputs, Node, NodeEvent, NodeEventKind,
-    NoteEvent, NoteId, ParamId, ProcessContext, TransportState,
+    NoteEvent, NoteId, Notes, ParamId, ProcessContext, TransportState,
 };
+
+/// Plays the notes and controller moves that come to it on, `frames`
+/// later: what delay compensation puts on a route of notes that come to a
+/// node earlier than others do, so they all come as late as the latest
+/// ([`Graph::prepare`](crate::Graph::prepare)). It plays silence.
+///
+/// Taking over from another in a swap, it carries on with what that one
+/// held back, as late as it holds back now, so no note that went in fails
+/// to come out, nor its end. It holds back [`NoteDelay::HELD`] at once,
+/// and drops what comes beyond them, and what it has no room to play in a
+/// block waits for the next.
+#[derive(Debug, Clone)]
+pub struct NoteDelay {
+    frames: usize,
+    /// What it holds back, with the engine time it goes on at, in order.
+    held: VecDeque<(u64, NodeEventKind)>,
+}
+
+impl NoteDelay {
+    /// How many notes and moves it holds back at once.
+    pub const HELD: usize = 4 * Notes::CAPACITY;
+
+    /// Holds notes back by `frames`.
+    pub fn new(frames: usize) -> Self {
+        Self {
+            frames,
+            held: VecDeque::new(),
+        }
+    }
+
+    /// How many frames late it plays what comes in.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+}
+
+impl Node for NoteDelay {
+    fn channels(&self) -> usize {
+        1
+    }
+
+    fn prepare(&mut self, _config: &EngineConfig) {
+        self.held = VecDeque::with_capacity(Self::HELD);
+    }
+
+    fn notes_latency(&self) -> usize {
+        self.frames
+    }
+
+    fn adopt(&mut self, previous: &mut dyn Node) {
+        let Some(previous) = previous.downcast_mut::<NoteDelay>() else {
+            return;
+        };
+        std::mem::swap(&mut self.held, &mut previous.held);
+        for (due, _) in &mut self.held {
+            *due = (*due - previous.frames as u64) + self.frames as u64;
+        }
+    }
+
+    fn reset(&mut self) {
+        self.held.clear();
+    }
+
+    fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+    }
+
+    fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+        for event in ctx.events.iter().filter(|e| e.kind.is_played()) {
+            let due = ctx.time + (event.offset + self.frames) as u64;
+            match self.held.len() < self.held.capacity() {
+                true => self.held.push_back((due, event.kind)),
+                false => notes.drop_more(1),
+            }
+        }
+        let end = ctx.time + ctx.frames as u64;
+        while let Some(&(due, kind)) = self.held.front()
+            && due < end
+            && notes.room() > 0
+        {
+            self.held.pop_front();
+            // One a delay it took over from held back may be late.
+            notes.send_played(due.saturating_sub(ctx.time) as usize, kind);
+        }
+    }
+}
 
 /// Sums its inputs. Used for buses and the master.
 #[derive(Debug, Clone)]

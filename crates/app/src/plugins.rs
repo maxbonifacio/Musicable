@@ -155,13 +155,14 @@ pub(crate) struct Plugins {
     /// latency, by format and id ([`set_note_timing`](Self::set_note_timing)).
     timings: BTreeMap<(PluginFormat, String), NoteTiming>,
     /// What playing plugins said of when their notes come, by format and
-    /// id: `None` for one that said nothing.
-    measured: BTreeMap<(PluginFormat, String), Option<NoteTiming>>,
+    /// id, with what they were taken to do with notes as they played:
+    /// `None` for one that said nothing.
+    measured: BTreeMap<(PluginFormat, String), (PluginKind, Option<NoteTiming>)>,
     /// The plugins whose note timing is to be measured, for the app to take
     /// ([`take_to_measure`](Self::take_to_measure)), and those asked for
     /// already.
     to_measure: Vec<(PluginInfo, PluginKind)>,
-    asked: BTreeSet<(PluginFormat, String)>,
+    asked: BTreeSet<(PluginFormat, String, &'static str)>,
     /// Whether `kinds`, `never_ahead` or `timings` changed since
     /// [`take_marks_changed`](Self::take_marks_changed) last said.
     marks_changed: bool,
@@ -346,12 +347,12 @@ impl Plugins {
         if let Some(&timing) = self.timings.get(&key) {
             return (timing, TimingFrom::Marked);
         }
+        // What it said as what it does with notes now: a plugin marked as
+        // another kind since played something else.
+        let kind = self.kind_of(plugin);
         match self.measured.get(&key) {
-            Some(&Some(timing)) => (timing, TimingFrom::Measured),
-            _ => (
-                NoteTiming::assumed(self.kind_of(plugin)),
-                TimingFrom::Assumed,
-            ),
+            Some(&(measured, Some(timing))) if measured == kind => (timing, TimingFrom::Measured),
+            _ => (NoteTiming::assumed(kind), TimingFrom::Assumed),
         }
     }
 
@@ -388,32 +389,43 @@ impl Plugins {
     /// format and id, as the app keeps it.
     pub fn set_measured_note_timings(
         &mut self,
-        measured: BTreeMap<(PluginFormat, String), Option<NoteTiming>>,
+        measured: BTreeMap<(PluginFormat, String), (PluginKind, Option<NoteTiming>)>,
     ) {
         self.measured = measured;
     }
 
-    /// Takes what playing the plugin `key` said of its note timing:
-    /// `None` if it said nothing.
+    /// Takes what playing the plugin `key`, taken to do `kind` with notes,
+    /// said of its note timing: `None` if it said nothing.
     pub fn measured_note_timing(
         &mut self,
         key: (PluginFormat, String),
+        kind: PluginKind,
         timing: Option<NoteTiming>,
     ) {
-        self.measured.insert(key, timing);
+        self.measured.insert(key, (kind, timing));
     }
 
     /// When the notes the device `id`'s plugin plays come without anyone
     /// choosing for the device, and why, if it matters: it's loaded, and a
-    /// MIDI effect or plays notes out, with a latency long enough to tell
-    /// the timings apart.
-    pub fn note_timing(&self, id: DeviceId) -> Option<(NoteTiming, TimingFrom)> {
+    /// MIDI effect or plays notes out, with a latency, which the engine
+    /// makes up for whatever its length, or someone chose for the device,
+    /// `chosen`, so they can take the choice back.
+    pub fn note_timing(&self, id: DeviceId, chosen: bool) -> Option<(NoteTiming, TimingFrom)> {
         let hosted = self.hosted.get(&id)?;
         let info = hosted.instance.info();
         let kind = self.kind_of(info);
         let notes = kind == PluginKind::MidiEffect || hosted.instance.note_output();
-        let latent = hosted.instance.latency() >= musicable_plugins::timing::SHORTEST;
-        (notes && latent).then(|| self.note_timing_of(info))
+        let latent = hosted.instance.latency() > 0;
+        (notes && (latent || chosen)).then(|| self.note_timing_of(info))
+    }
+
+    /// Forgets which note timing the device `id` was last given, so the next
+    /// [`poll`](Self::poll) gives it its plugin's again: for a device back on
+    /// Auto, which may have had another while someone chose.
+    pub fn forget_note_timing(&mut self, id: DeviceId) {
+        if let Some(hosted) = self.hosted.get_mut(&id) {
+            hosted.note_timing = None;
+        }
     }
 
     /// The plugins whose note timing nothing's measured yet, that it
@@ -652,8 +664,13 @@ impl Plugins {
             let kind = kind.unwrap_or_else(|| info.kind());
             let notes = kind == PluginKind::MidiEffect || hosted.instance.note_output();
             let key = (info.format, info.id.clone());
+            // Measured once a latency is long enough to tell, and again as
+            // another kind: a VST3 MIDI effect marked as one after it played
+            // as an audio effect heard a tone, and said nothing.
             let latent = hosted.instance.latency() >= musicable_plugins::timing::SHORTEST;
-            if notes && latent && !self.measured.contains_key(&key) && self.asked.insert(key) {
+            let measured = self.measured.get(&key).is_some_and(|&(of, _)| of == kind);
+            let asked = (key.0, key.1.clone(), kind.key());
+            if notes && latent && !measured && self.asked.insert(asked) {
                 self.to_measure.push((info.clone(), kind));
             }
         }

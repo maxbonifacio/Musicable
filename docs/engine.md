@@ -200,7 +200,13 @@ MIDI track's Post FX can have both, and writers of two taps that come to
 the same node, such as Pre FX and Post FX on a track without MIDI effects,
 share its notes. The engine hands them to the writer's `write_notes` after
 its frames, each at its offset into the block, the
-block's notes empty where the graph hasn't the record. A note played at
+block's notes empty where the graph hasn't the record, with how late they
+are (`PreparedGraph::record_notes_late`): a plugin's that come with its
+sound come its latency after what played them. What was rendered ahead
+comes from the writer's queue, which says how late the notes are whenever
+that changes, even in a block without notes, so a writer that settles its
+buffer as far as the notes still to come were played never settles past
+one. The writer puts each note as early as it's late, as `TapNotes` does. A note played at
 `t` left the clips then, so it belongs at `p`, without the latency: the
 notes of the other track's clips land on them, and those played live on it
 where the engine played them, later than that track's own take has them by
@@ -410,14 +416,25 @@ as late as what comes into it, and its notes latency.
   the rest of the mix after it, wait for them. `prepare` works it out
   stage by stage, as made notes have the graph in stages: each stage's
   players first, each after those whose notes it gets, then its nodes.
-- Notes themselves aren't delayed: the audio that comes with them waits
+- Where notes of different lateness meet at a node, such as two MIDI
+  tracks' at one instrument when only one has a latent MIDI effect, the
+  earlier ones go through a `nodes::NoteDelay` that holds them back by the
+  difference (`Graph::delay_notes`), so they all come as late as the
+  latest. A note delay is a node like any other that plays notes, with a
+  key the graph makes from the keys of the nodes at either end of the
+  route, with the top bit set, so the delay on the same route in the graph
+  that takes over carries on with what it held back, as late as it holds
+  back now, and one that goes ends what it had sounding there, as any
+  player does. It holds back four blocks' worth of notes at most, and what
+  it has no room to play in a block waits for the next.
+- Otherwise notes aren't delayed: the audio that comes with them waits
   for them. Notes that come earlier than the audio they meet arrive when
   they're due, so an instrument's sound lines up as long as nothing latent
   comes before it on its track, which is the usual chain.
 - A note record says how late its notes are
-  (`PreparedGraph::record_notes_late`), and the engine hands them to its
-  writer that much earlier, so a recording puts them where they belong
-  ([Record taps](#time-and-events)).
+  (`PreparedGraph::record_notes_late`), and the engine hands its writer
+  that with them, which puts each that much earlier, so a recording puts
+  them where they belong ([Recording](#recording)).
 
 And meters measure where they are, before the delays at the buses, so a
 latent track's meter moves later than a dry one's.

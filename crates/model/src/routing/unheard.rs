@@ -13,7 +13,10 @@ use crate::{Chain, DeviceId, Project, TrackKind};
 /// the modulators would have to move it before it made them. The engine
 /// leaves out the whole way they'd come, so the modulators hear none of
 /// what comes that way, not even the notes on it made by nothing they
-/// move. See [`Project::unheard_notes`].
+/// move. Or the loop goes through another channel's modulators, which
+/// hear notes too: the modulators move what plays the notes those hear,
+/// and those move what plays these, so the channel first in order hears
+/// its notes and the other doesn't. See [`Project::unheard_notes`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnheardNotes {
     /// The channel whose modulators don't hear them.
@@ -24,8 +27,12 @@ pub struct UnheardNotes {
     pub wire: Option<WireId>,
     /// The plugin that plays them out as it renders
     /// ([`DeviceKind::makes_notes`](crate::DeviceKind::makes_notes)): the
-    /// modulators move it, or something before it.
+    /// modulators move it, or something before it, or the notes it makes
+    /// lie on the loop through `through`.
     pub maker: DeviceId,
+    /// The other channel whose modulators the loop goes through, hearing
+    /// notes that come to them, if it does.
+    pub through: Option<Chain>,
 }
 
 /// A place notes, sound or modulation pass through, as the engine has
@@ -45,8 +52,10 @@ impl Project {
     /// Notes a plugin plays out as it renders
     /// ([`DeviceKind::makes_notes`](crate::DeviceKind::makes_notes)) can't
     /// reach the modulators that move it, or anything before it, as they'd
-    /// have to move it before it made them. In channel order, then wire
-    /// order.
+    /// have to move it before it made them, and nor can a way close a
+    /// loop through other channels' modulators that hear notes: the
+    /// channel first in order hears its notes, and the later one doesn't.
+    /// In channel order, then wire order.
     ///
     /// It follows the engine's graph point by point, as the loop checks
     /// do: the modulators reach what they move, and what that reaches. It
@@ -67,11 +76,15 @@ impl Project {
     /// [`unheard_notes`](Self::unheard_notes), for `only` channel if it's
     /// given.
     fn unheard(&self, only: Option<Chain>) -> Vec<UnheardNotes> {
-        let hearing: Vec<Chain> = (self.modulations())
-            .filter(|&(chain, _)| only.is_none_or(|only| only == chain))
+        if only.is_some_and(|only| !self.modulators_hear_notes(only)) {
+            return Vec::new();
+        }
+        // In channel order, as the engine joins them to its graph.
+        let mut hearing: Vec<Chain> = (self.modulations())
             .filter(|(_, modulation)| modulation.modulators.iter().any(|m| self.hears_notes(m)))
             .map(|(chain, _)| chain)
             .collect();
+        hearing.sort_unstable();
         if hearing.is_empty() {
             return Vec::new();
         }
@@ -81,7 +94,7 @@ impl Project {
             _ => None,
         };
         // Each way on, and the plugin whose made notes take it, if they do.
-        let mut next: HashMap<Node, Vec<(Node, Option<DeviceId>)>> = HashMap::new();
+        let mut next: Next = HashMap::new();
         let mut add = |from: Node, to: Node, made: Option<DeviceId>| {
             next.entry(from).or_default().push((to, made));
         };
@@ -120,16 +133,58 @@ impl Project {
                 }
             }
         }
+        // Each way on its own first, as nothing else hears notes yet, then
+        // the ways that pass that, channel by channel, each with the ways
+        // the channels before it hear.
+        let ways: Vec<_> = (hearing.iter())
+            .flat_map(|&chain| {
+                let heard = self.notes_heard(chain, &live.wires).into_iter();
+                heard.map(move |(wire, from, made)| (chain, wire, from, made))
+            })
+            .collect();
+        let mut alone = Vec::with_capacity(ways.len());
+        for &(chain, wire, from, made) in &ways {
+            let loops = made_on_way(&next, Node::Modulators(chain), Node::At(from))
+                .map(|(maker, _)| maker)
+                .or(made.filter(|_| reaches(&next, chain, from)));
+            alone.push(loops.map(|maker| UnheardNotes {
+                chain,
+                wire,
+                maker,
+                through: None,
+            }));
+        }
         let mut unheard = Vec::new();
-        for chain in hearing {
-            for (wire, from, made) in self.notes_heard(chain, &live.wires) {
-                let maker = made_on_way(&next, Node::Modulators(chain), Node::At(from));
-                if let Some(maker) = maker.or(made.filter(|_| reaches(&next, chain, from))) {
-                    unheard.push(UnheardNotes { chain, wire, maker });
-                }
+        let mut joined = next.clone();
+        for (&(chain, wire, from, made), alone) in ways.iter().zip(alone) {
+            let refused = alone.or_else(|| {
+                let way = made_on_way(&joined, Node::Modulators(chain), Node::At(from));
+                let (maker, through) = way.or_else(|| {
+                    let maker = made?;
+                    reaches_through(&joined, chain, from).map(|through| (maker, through))
+                })?;
+                Some(UnheardNotes {
+                    chain,
+                    wire,
+                    maker,
+                    through,
+                })
+            });
+            match refused {
+                Some(refused) => unheard.push(refused),
+                None => (joined.entry(Node::At(from)).or_default())
+                    .push((Node::Modulators(chain), made)),
             }
         }
+        unheard.retain(|u| only.is_none_or(|only| only == u.chain));
         unheard
+    }
+
+    /// Whether any of `chain`'s modulators hears notes, as
+    /// [`unheard_notes`](Self::unheard_notes) has it: an LFO that notes
+    /// start, or an Envelope that notes gate.
+    pub fn modulators_hear_notes(&self, chain: Chain) -> bool {
+        (self.modulation(chain)).is_some_and(|m| m.modulators.iter().any(|m| self.hears_notes(m)))
     }
 
     /// The ways notes reach `chain`'s modulators, as they reach its first
@@ -224,44 +279,61 @@ impl Project {
     }
 }
 
+/// Each way on from a node, and the plugin whose made notes take it, if
+/// they do.
+type Next = HashMap<Node, Vec<(Node, Option<DeviceId>)>>;
+
 /// The plugin whose made notes lie on a way from `start` to `target`, if
-/// one does: the first such way found.
-fn made_on_way(
-    next: &HashMap<Node, Vec<(Node, Option<DeviceId>)>>,
-    start: Node,
-    target: Node,
-) -> Option<DeviceId> {
+/// one does: the first such way found, with the first other channel whose
+/// modulators it reaches hearing notes, if it does.
+fn made_on_way(next: &Next, start: Node, target: Node) -> Option<(DeviceId, Option<Chain>)> {
     let mut seen = HashSet::new();
-    let mut queue = VecDeque::from([(start, None)]);
-    while let Some((node, made)) = queue.pop_front() {
-        if node == target && made.is_some() {
-            return made;
+    let mut queue = VecDeque::from([(start, None, None)]);
+    while let Some((node, made, through)) = queue.pop_front() {
+        if node == target
+            && let Some(made) = made
+        {
+            return Some((made, through));
         }
         if !seen.insert((node, made.is_some())) {
             continue;
         }
         for &(to, on) in next.get(&node).into_iter().flatten() {
-            queue.push_back((to, made.or(on)));
+            queue.push_back((to, made.or(on), through.or(heard_at(node, to))));
         }
     }
     None
 }
 
+/// The channel whose modulators hear notes from `from` on the way to `to`,
+/// if they do: no other way goes from a point to modulators.
+fn heard_at(from: Node, to: Node) -> Option<Chain> {
+    match (from, to) {
+        (Node::At(_), Node::Modulators(chain)) => Some(chain),
+        _ => None,
+    }
+}
+
 /// Whether anything passes from `chain`'s modulators to `point`.
-fn reaches(
-    next: &HashMap<Node, Vec<(Node, Option<DeviceId>)>>,
-    chain: Chain,
-    point: Point,
-) -> bool {
+fn reaches(next: &Next, chain: Chain, point: Point) -> bool {
+    reaches_through(next, chain, point).is_some()
+}
+
+/// Whether anything passes from `chain`'s modulators to `point`, with the
+/// first other channel whose modulators it reaches hearing notes on the
+/// way, if it does.
+fn reaches_through(next: &Next, chain: Chain, point: Point) -> Option<Option<Chain>> {
     let mut seen = HashSet::new();
-    let mut stack = vec![Node::Modulators(chain)];
-    while let Some(node) = stack.pop() {
+    let mut stack = vec![(Node::Modulators(chain), None)];
+    while let Some((node, through)) = stack.pop() {
         if node == Node::At(point) {
-            return true;
+            return Some(through);
         }
         if seen.insert(node) {
-            stack.extend(next.get(&node).into_iter().flatten().map(|&(to, _)| to));
+            for &(to, _) in next.get(&node).into_iter().flatten() {
+                stack.push((to, through.or(heard_at(node, to))));
+            }
         }
     }
-    false
+    None
 }

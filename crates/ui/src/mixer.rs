@@ -96,6 +96,10 @@ pub struct MidiChoice {
 pub(crate) struct Choices<'a> {
     pub audio: &'a [InputChoice],
     pub midi: &'a [MidiChoice],
+    /// How each plugin device's plugin is doing, for what a MIDI track
+    /// taking a plugin's notes says of them.
+    pub plugins:
+        Option<&'a std::collections::BTreeMap<musicable_model::DeviceId, crate::PluginStatus>>,
 }
 
 /// The readings of the project's meters, as the engine last measured them,
@@ -1085,16 +1089,28 @@ impl Mixer<'_> {
                     .to_owned()
             }
             (Some(_), Some((device, plugin))) => {
-                let timing = match plugin.note_timing {
-                    NoteTiming::WithSound => "with its sound, its latency late",
-                    NoteTiming::AsPlayed => "as it plays them",
-                };
-                format!(
-                    "Where the track records from: the notes {} plays, which come {timing}. If \
-                     they're early or late, its Notes' Timing, in its menu in the devices \
-                     panel, changes that",
-                    device.kind.name()
-                )
+                // Its latency matters only where its menu has Notes' Timing.
+                let status = self
+                    .inputs
+                    .plugins
+                    .and_then(|status| status.get(&device.id));
+                let name = device.kind.name();
+                match status.filter(|status| status.note_timing.is_some()) {
+                    Some(status) => {
+                        let timing = match plugin.note_timing {
+                            NoteTiming::WithSound => "with its sound",
+                            NoteTiming::AsPlayed => "as it plays them",
+                        };
+                        let latency = status.latency_ms;
+                        format!(
+                            "Where the track records from: the notes {name} plays, which come \
+                             {timing}, against its latency of {latency:.1} ms. If they're early \
+                             or late, its Notes' Timing, in its menu in the devices panel, \
+                             changes that"
+                        )
+                    }
+                    None => format!("Where the track records from: the notes {name} plays"),
+                }
             }
             (Some(_), None) => {
                 "Where the track records from: another track's notes, which it plays".to_owned()
@@ -2320,6 +2336,7 @@ mod tests {
                 let inputs = Choices {
                     audio: &state.inputs,
                     midi: &state.midi,
+                    plugins: None,
                 };
                 show(
                     ui,

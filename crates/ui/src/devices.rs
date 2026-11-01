@@ -1278,10 +1278,17 @@ fn unheard_text(project: &Project, unheard: UnheardNotes) -> String {
         Some(tap) => format!("the notes from {tap}"),
         None => "the notes from this track's input".to_owned(),
     };
-    format!(
-        "The modulators don't hear {notes}: {maker} plays them out, and they move it, or \
-         something before it."
-    )
+    match unheard.through {
+        Some(through) => format!(
+            "The modulators don't hear {notes}: they'd make a loop with {}'s modulators, which \
+             hear notes too, through the notes {maker} plays out.",
+            modulators::channel_name(project, through)
+        ),
+        None => format!(
+            "The modulators don't hear {notes}: {maker} plays them out, and they move it, or \
+             something before it."
+        ),
+    }
 }
 
 #[cfg(test)]

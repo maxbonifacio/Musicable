@@ -12,7 +12,7 @@ use crate::automation::Feed;
 use crate::buffer::{AudioBuffer, AudioRef, InputPort};
 use crate::engine::EVENT_CAPACITY;
 use crate::load::{self, LoadKey, NodeLoads};
-use crate::nodes::Delay;
+use crate::nodes::{Delay, NoteDelay};
 use crate::parallel::Schedule;
 use crate::queue;
 use crate::{
@@ -25,7 +25,8 @@ use crate::{
 ///
 /// When a new graph replaces the running one, each node takes over the state
 /// of the old node with the same key, and parameter events find their node by
-/// key.
+/// key. Keys with the top bit set are the graph's own, for the note delays
+/// [`Graph::prepare`] adds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeKey(pub u64);
 
@@ -471,9 +472,14 @@ impl Graph {
     /// output gets one to line it up with the output, or the output with it,
     /// so the metronome clicks in time with what plays, and so do taps.
     /// [`PreparedGraph::latency`] says how late the output is in the end,
-    /// at most [`MAX_LATENCY`](Graph::MAX_LATENCY). Notes sent with
-    /// [`send_notes`](Graph::send_notes) aren't delayed, so an instrument's
-    /// sound lines up as long as nothing latent comes before it.
+    /// at most [`MAX_LATENCY`](Graph::MAX_LATENCY). Notes are as late as
+    /// those that come to the node that plays them, and its own
+    /// [notes latency](Node::notes_latency). Where notes of different
+    /// lateness meet at a node, the earlier ones go through a
+    /// [`NoteDelay`] that lines them up with the latest, with a key of the
+    /// graph's own, so it carries on in the graph that takes over. Notes
+    /// aren't delayed to meet audio, so an instrument's sound lines up as
+    /// long as nothing latent comes before it.
     ///
     /// **Two halves.** A graph with a live source ([`Node::live`]), or a
     /// node set live ([`set_live`](Graph::set_live)), comes in two halves:
@@ -534,6 +540,7 @@ impl Graph {
             }
         }
         self.sort_ports();
+        self.delay_notes(config);
         let (delays, latency) = self.compensate(config, &mut output);
         self.output = Some(output);
         // Whose each node is: its key's, or a delay's, by where it is.
@@ -1206,8 +1213,126 @@ impl Graph {
         }
     }
 
+    /// How late each node's output is, the notes it plays and those it
+    /// makes, and what comes to it, once the nodes are prepared, as
+    /// [`prepare`](Graph::prepare) describes, with the order it works them
+    /// out in.
+    fn lateness(&self) -> Lateness {
+        let len = self.nodes.len();
+        let mut late = vec![0usize; len];
+        let mut notes_late = vec![0usize; len];
+        let mut made_late = vec![0usize; len];
+        let mut arrival = vec![0usize; len];
+        let notes_into = self.notes_into();
+        // Stage by stage, as notes made while rendering have it: the notes
+        // made in a stage are as late as what made them. A graph whose
+        // routes loop has no stages, and doesn't prepare.
+        let stage_of = self.stages().unwrap_or_else(|_| vec![0; len]);
+        let mut order = self.topological_order();
+        order.sort_by_key(|n| stage_of[n.0]);
+        let players = self.player_order(&stage_of);
+        let mut player = 0;
+        for &node in &order {
+            // The stage's players first, each after those it gets notes
+            // from: their notes are as late as those that come to them,
+            // and the player's own notes latency.
+            while let Some(&p) = players.get(player)
+                && stage_of[p.0] <= stage_of[node.0]
+            {
+                let into = latest(&notes_into[p.0], &notes_late, &made_late);
+                let own = self.nodes[p.0].notes_latency();
+                notes_late[p.0] = into.saturating_add(own).min(Self::MAX_LATENCY);
+                player += 1;
+            }
+            let inputs = &self.inputs[node.0];
+            let sound = inputs.iter().map(|i| late[i.0]).max().unwrap_or(0);
+            // Notes can't wait, so what comes with them waits for them.
+            let notes = latest(&notes_into[node.0], &notes_late, &made_late);
+            arrival[node.0] = sound.max(notes);
+            let latency = self.nodes[node.0].latency();
+            late[node.0] = arrival[node.0]
+                .saturating_add(latency)
+                .min(Self::MAX_LATENCY);
+            let made = arrival[node.0].saturating_add(self.nodes[node.0].notes_latency());
+            made_late[node.0] = made.min(Self::MAX_LATENCY);
+        }
+        Lateness {
+            order,
+            late,
+            notes_late,
+            made_late,
+            arrival,
+        }
+    }
+
+    /// The notes that come to each node: from which node, and whether it
+    /// made them as it rendered.
+    fn notes_into(&self) -> Vec<Vec<(usize, bool)>> {
+        let mut notes_into: Vec<Vec<(usize, bool)>> = vec![Vec::new(); self.nodes.len()];
+        for &(from, to, _) in &self.note_routes {
+            notes_into[to.0].push((from.0, false));
+        }
+        for &(from, to, _) in &self.made_routes {
+            notes_into[to.0].push((from.0, true));
+        }
+        notes_into
+    }
+
+    /// Lines up the notes that come to a node by routes of different
+    /// lateness, once the nodes are prepared: each route earlier than the
+    /// latest goes through a [`NoteDelay`] that holds its notes back as
+    /// long, with a key of the graph's own, from the keys of the nodes at
+    /// its ends ([`note_delay_key`]), so the delay on the same route in the
+    /// graph that takes over carries on from it.
+    fn delay_notes(&mut self, config: &EngineConfig) {
+        if self.note_routes.len() + self.made_routes.len() < 2 {
+            return;
+        }
+        let Lateness {
+            notes_late,
+            made_late,
+            ..
+        } = self.lateness();
+        let notes_into = self.notes_into();
+        let late_of = |from: NodeId, made: bool| match made {
+            true => made_late[from.0],
+            false => notes_late[from.0],
+        };
+        let mut early = Vec::new();
+        for made in [false, true] {
+            let routes = if made {
+                &self.made_routes
+            } else {
+                &self.note_routes
+            };
+            for (n, &(from, to, side)) in routes.iter().enumerate() {
+                let latest = latest(&notes_into[to.0], &notes_late, &made_late);
+                let by = latest - late_of(from, made);
+                if by > 0 {
+                    early.push((made, n, (from, to, side), by));
+                }
+            }
+        }
+        for (made, n, (from, to, side), by) in early {
+            let key = note_delay_key(self.keys[from.0], self.keys[to.0], side, made);
+            // Two routes whose keys meet stay as they are.
+            if self.find(key).is_some() {
+                continue;
+            }
+            let mut delay = NoteDelay::new(by);
+            delay.prepare(config);
+            let delay = self.add_boxed(key, Box::new(delay));
+            match made {
+                true => self.made_routes[n] = (from, delay, false),
+                false => self.note_routes[n] = (from, delay, false),
+            }
+            self.note_routes.push((delay, to, side));
+        }
+    }
+
     /// Lines up the paths through the graph, as [`prepare`](Graph::prepare)
-    /// describes, once the nodes are prepared. Returns the delays it added,
+    /// describes, once the nodes are prepared and the notes lined up
+    /// ([`delay_notes`](Graph::delay_notes)). Returns the delays it added,
     /// with where they are, and how late the output is. `output` becomes the
     /// delay after the output, if it needs one, and so do the cue output and
     /// each tap.
@@ -1216,58 +1341,18 @@ impl Graph {
         config: &EngineConfig,
         output: &mut NodeId,
     ) -> (Vec<(Joint, NodeId)>, usize) {
-        // How late each node's output is, and the notes it plays and makes.
-        let len = self.nodes.len();
-        let mut late = vec![0usize; len];
-        let mut notes_late = vec![0usize; len];
-        let mut made_late = vec![0usize; len];
-        // The notes that come to each node: from which node, and whether
-        // it made them as it rendered.
-        let mut notes_into: Vec<Vec<(usize, bool)>> = vec![Vec::new(); len];
-        for &(from, to, _) in &self.note_routes {
-            notes_into[to.0].push((from.0, false));
-        }
-        for &(from, to, _) in &self.made_routes {
-            notes_into[to.0].push((from.0, true));
-        }
-        let notes_in = |node: usize, notes_late: &[usize], made_late: &[usize]| {
-            let late_of = |&(from, made): &(usize, bool)| match made {
-                true => made_late[from],
-                false => notes_late[from],
-            };
-            notes_into[node].iter().map(late_of).max().unwrap_or(0)
-        };
-        // Stage by stage, as notes made while rendering have it: the notes
-        // made in a stage are as late as what made them. A graph whose
-        // routes loop has no stages, and doesn't prepare.
-        let stage_of = self.stages().unwrap_or_else(|_| vec![0; len]);
-        let mut order = self.topological_order();
-        order.sort_by_key(|n| stage_of[n.0]);
-        let players = self.player_order(&stage_of);
-        let (mut player, mut delays) = (0, Vec::new());
+        let Lateness {
+            order,
+            late,
+            notes_late,
+            made_late,
+            arrival,
+        } = self.lateness();
+        let mut delays = Vec::new();
         for node in order {
-            // The stage's players first, each after those it gets notes
-            // from: their notes are as late as those that come to them,
-            // and the player's own notes latency.
-            while let Some(&p) = players.get(player)
-                && stage_of[p.0] <= stage_of[node.0]
-            {
-                let into = notes_in(p.0, &notes_late, &made_late);
-                let own = self.nodes[p.0].notes_latency();
-                notes_late[p.0] = into.saturating_add(own).min(Self::MAX_LATENCY);
-                player += 1;
-            }
-            let inputs = &self.inputs[node.0];
-            let sound = inputs.iter().map(|i| late[i.0]).max().unwrap_or(0);
-            // Notes can't wait, so what comes with them waits for them.
-            let arrival = sound.max(notes_in(node.0, &notes_late, &made_late));
-            let latency = self.nodes[node.0].latency();
-            late[node.0] = arrival.saturating_add(latency).min(Self::MAX_LATENCY);
-            let made = arrival.saturating_add(self.nodes[node.0].notes_latency());
-            made_late[node.0] = made.min(Self::MAX_LATENCY);
             for slot in 0..self.inputs[node.0].len() {
                 let from = self.inputs[node.0][slot];
-                let early = arrival - late[from.0];
+                let early = arrival[node.0] - late[from.0];
                 if early == 0 {
                     continue;
                 }
@@ -1639,6 +1724,53 @@ pub(crate) struct Routed {
     pub rank: u32,
     pub order: u32,
     pub event: NodeEvent,
+}
+
+/// What [`Graph::lateness`] works out, by node, in frames.
+struct Lateness {
+    /// The nodes in the order it worked them out in: stage by stage, each
+    /// after what comes to it.
+    order: Vec<NodeId>,
+    /// How late its output is.
+    late: Vec<usize>,
+    /// How late the notes it plays are.
+    notes_late: Vec<usize>,
+    /// How late the notes it makes as it renders are.
+    made_late: Vec<usize>,
+    /// How late what comes to it is: its sound and its notes, the latest.
+    arrival: Vec<usize>,
+}
+
+/// How late the latest of the notes that come `into` a node are, from
+/// which node and whether it made them, by how late the notes each node
+/// plays and makes are.
+fn latest(into: &[(usize, bool)], notes_late: &[usize], made_late: &[usize]) -> usize {
+    let late_of = |&(from, made): &(usize, bool)| match made {
+        true => made_late[from],
+        false => notes_late[from],
+    };
+    into.iter().map(late_of).max().unwrap_or(0)
+}
+
+/// The key of the [`NoteDelay`] [`Graph::prepare`] puts on the route of
+/// notes from the node with key `from` to the one with `to`, to its side
+/// input for notes if `side`, of the notes `from` makes as it renders if
+/// `made`: the same for the same route in every graph, with the top bit
+/// set, which no other node's key has.
+fn note_delay_key(from: NodeKey, to: NodeKey, side: bool, made: bool) -> NodeKey {
+    // SplitMix64's mixing, over each part in turn.
+    let mix = |mut x: u64| {
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^ (x >> 31)
+    };
+    let ends = u64::from(side) | u64::from(made) << 1;
+    let hash = [from.0, to.0, ends]
+        .into_iter()
+        .fold(0x9e37_79b9_7f4a_7c15, |h, part| {
+            mix(h ^ part).wrapping_add(0x9e37_79b9_7f4a_7c15)
+        });
+    NodeKey(1 << 63 | hash >> 1)
 }
 
 /// A node that plays notes, the nodes its notes go to, and whether to their
@@ -2801,7 +2933,7 @@ mod tests {
     use musicable_model::time::TempoMap;
 
     use super::*;
-    use crate::nodes::{Constant, Gain, Impulse, Latent, Sum};
+    use crate::nodes::{Constant, Gain, Impulse, Latent, NoteDelay, Sum};
     use crate::{
         AudioMut, Inputs, NoteId, ParallelOptions, ParallelRenderer, ProcessContext,
         ReferenceRenderer, Renderer, TransportState, rt,
@@ -3327,6 +3459,73 @@ mod tests {
         assert_eq!(played, [(0, off(0)), (0, up), (10, started)]);
         assert!(!sounding.releasing);
         assert_eq!(sounding.notes, [NoteId(2)]);
+    }
+
+    #[test]
+    fn notes_that_come_to_a_node_earlier_than_others_wait_for_them() {
+        // A player's note goes to a node at once, and through a node that
+        // plays it on `late` frames later.
+        let build = |late: Option<usize>| {
+            let mut g = Graph::new();
+            let holds = g.add(NodeKey(0), Holds::new());
+            let keep = g.add(NodeKey(2), KeepAll(Vec::with_capacity(8)));
+            g.send_notes(holds, keep).unwrap();
+            if let Some(late) = late {
+                let later = g.add(NodeKey(1), NoteDelay::new(late));
+                g.send_notes(holds, later).unwrap();
+                g.send_notes(later, keep).unwrap();
+            }
+            g.set_output(keep).unwrap();
+            (g.prepare(&CONFIG).unwrap(), keep)
+        };
+        // What it kept, leaving it its room to keep more.
+        let kept = |graph: &mut PreparedGraph, keep| {
+            let kept = &mut node::<KeepAll>(graph, keep).0;
+            let got = kept.clone();
+            kept.clear();
+            got
+        };
+        let swap = |old: &mut PreparedGraph, late, time| {
+            let (mut new, keep) = build(late);
+            rt::scope(|| new.adopt_from(old));
+            node::<Holds>(&mut new, NodeId(0)).started = true;
+            render_block(&mut new, time);
+            let got = kept(&mut new, keep);
+            (new, got)
+        };
+        let on = NodeEventKind::Note(NoteEvent::On {
+            note: NoteId(7),
+            key: 60,
+            velocity: 1.0,
+            channel: None,
+        });
+        let off = NodeEventKind::Note(NoteEvent::Off {
+            note: NoteId(7),
+            velocity: Note::RELEASE_VELOCITY,
+        });
+        // The one that comes at once waits for the one that comes later,
+        // and the graph is as late as they are.
+        let (mut first, keep) = build(Some(100));
+        assert_eq!(first.latency(), 100);
+        assert_eq!(first.nodes.len(), 4, "a delay on the way at once");
+        render_block(&mut first, 0);
+        assert_eq!(kept(&mut first, keep), []);
+        render_block(&mut first, 64);
+        assert_eq!(kept(&mut first, keep), [(36, on), (36, on)]);
+        // Where they ended, they end when that way goes, its delay with it.
+        let (_, got) = swap(&mut first, None, 128);
+        assert_eq!(got, [(0, off), (0, off)]);
+        // With less to wait for, what the delay held back comes as late as
+        // it holds back now: on the next block's first frame, late.
+        let (mut first, keep) = build(Some(100));
+        render_block(&mut first, 0);
+        assert_eq!(kept(&mut first, keep), []);
+        let (second, got) = swap(&mut first, Some(50), 64);
+        assert_eq!(second.latency(), 50);
+        assert_eq!(got, [(0, on), (0, on)]);
+        // Nothing waits where the notes come as late.
+        let (none, _) = build(None);
+        assert_eq!((none.latency(), none.nodes.len()), (0, 2));
     }
 
     #[test]

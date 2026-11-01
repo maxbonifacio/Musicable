@@ -1262,18 +1262,23 @@ fn modulate(
     // directly or along the way: they'd have to move it before it made
     // them, so they don't hear those, nor anything else that comes the
     // same way (`Project::unheard_notes`). Each way is judged against the
-    // graph before any of them joins it, in channel order, so it's the
-    // same whatever order they come in.
-    let mut heard: Vec<(Chain, NodeId, NodeId)> = (instrument_notes.iter())
+    // graph before any of them joins it, then they join in channel order,
+    // so it's the same whatever order they come in: those of channels whose
+    // modulators hear notes first, so a channel whose modulators don't
+    // takes nothing from one whose do.
+    let mut heard: Vec<(bool, Chain, NodeId, NodeId)> = (instrument_notes.iter())
         .filter_map(|(&chain, notes)| Some((chain, notes, node_of(chain)?)))
-        .flat_map(|(chain, notes, node)| notes.iter().map(move |&notes| (chain, notes, node)))
+        .flat_map(|(chain, notes, node)| {
+            let deaf = !project.modulators_hear_notes(chain);
+            notes.iter().map(move |&notes| (deaf, chain, notes, node))
+        })
         .collect();
     heard.sort_unstable();
-    heard.retain(|&(_, notes, node)| !graph.notes_would_loop(notes, node));
-    for (_, notes, node) in heard {
+    heard.retain(|&(_, _, notes, node)| !graph.notes_would_loop(notes, node));
+    for (_, _, notes, node) in heard {
         match graph.send_notes(notes, node) {
             // Two channels' modulators each moving what makes the notes
-            // the other's hear.
+            // the other's hear: the later one doesn't hear them.
             Ok(()) | Err(GraphError::Cycle) => {}
             Err(e) => panic!("notes go from the channels to their nodes: {e}"),
         }
@@ -2900,6 +2905,7 @@ mod tests {
             chain: Chain::Master,
             wire: Some(wire.id),
             maker: echo,
+            through: None,
         };
         assert_eq!(p.unheard_notes(), [unheard]);
         // Nor what it moves before it, the Keys' track's fader aside.
@@ -2960,6 +2966,7 @@ mod tests {
             chain: Chain::Master,
             wire: Some(wire.id),
             maker: echo,
+            through: None,
         };
         assert_eq!(p.unheard_notes(), [unheard]);
         // An Envelope that notes don't gate hears nothing to miss.
@@ -2967,6 +2974,83 @@ mod tests {
         let trigger = envelope::NOTE_TRIGGER as u32;
         let modulator = p.modulator_mut(id).unwrap();
         modulator.set(trigger, never as u8 as f64).unwrap();
+        assert_eq!(p.unheard_notes(), []);
+    }
+
+    #[test]
+    fn two_channels_modulators_dont_hear_notes_made_by_what_the_others_move() {
+        // The Keys and the Other each play their note on an instrument
+        // that plays it out, and a note wire takes it to an instrument on
+        // the group the Other feeds, or the master. Each channel's Envelope
+        // hears the notes there, and moves what makes the other's.
+        let mut p = note_through(vec![echoing()]);
+        let echo = p.tracks[0].devices[0].id;
+        let other = p.add_track("Other", TrackKind::Midi);
+        let mut notes = musicable_model::clip::MidiClip::default();
+        notes.add_note(Beats::ZERO, Beats::new(1), 72, 1.0);
+        let range = BeatRange::new(Beats::ZERO, Beats::new(1));
+        let clip = p.new_clip("Own", range, ClipContent::Midi(notes));
+        let other_echo = p.new_device(echoing());
+        let other_echo_id = other_echo.id;
+        let group = p.add_track("Group", TrackKind::Group);
+        let t = p.track_mut(other).unwrap();
+        t.clips.push(clip);
+        t.devices.push(other_echo);
+        t.output = Bus::Group(group);
+        let (group_synth, master_synth) = (p.new_device(plugin(true)), p.new_device(plugin(true)));
+        let (group_synth_id, master_synth_id) = (group_synth.id, master_synth.id);
+        p.track_mut(group).unwrap().devices.push(group_synth);
+        p.master.devices.push(master_synth);
+        let to_group = p.new_wire(Tap::Device(echo), Port::Notes(group_synth_id));
+        let to_master = p.new_wire(Tap::Device(other_echo_id), Port::Notes(master_synth_id));
+        p.wires.extend([to_group, to_master]);
+        let group_chain = Chain::Track(group);
+        for (chain, moved) in [(group_chain, other_echo_id), (Chain::Master, echo)] {
+            let envelope = p.new_modulator(ModulatorKind::Envelope, "Envelope 1");
+            let output = Output::new(envelope.id, 0);
+            let routing = p.new_routing(output, ParamAddress::Device(moved, 3), 0.5);
+            let modulation = p.modulation_mut(chain).unwrap();
+            modulation.modulators.push(envelope);
+            modulation.routings.push(routing);
+        }
+        let devices = || {
+            let mut devices = Devices::new();
+            devices.insert(echo, Echoes::new(12));
+            devices.insert(other_echo_id, Echoes::new(12));
+            for synth in [group_synth_id, master_synth_id] {
+                devices.insert(synth, Arc::new(Arc::new(Parts::default())));
+            }
+            devices
+        };
+        let heard = |p: &Project| {
+            let graph = compile_with_devices(p, &Meters::new(), &Media::new(), &devices());
+            [(to_group, group_chain), (to_master, Chain::Master)].map(|(wire, chain)| {
+                let from = graph.find(keys::wire(wire.id)).unwrap();
+                let to = graph.find(keys::modulation(chain)).unwrap();
+                graph.sends_notes(from, to)
+            })
+        };
+        // Each would hear its notes alone, but together they'd make a loop,
+        // so the group's do, as it comes first, and the master's don't. The
+        // project says so.
+        assert_eq!(heard(&p), [true, false]);
+        let unheard = musicable_model::routing::UnheardNotes {
+            chain: Chain::Master,
+            wire: Some(to_master.id),
+            maker: echo,
+            through: Some(group_chain),
+        };
+        assert_eq!(p.unheard_notes(), [unheard]);
+        assert_eq!(p.unheard_notes_of(Chain::Master), [unheard]);
+        assert_eq!(p.unheard_notes_of(group_chain), []);
+        // With modulators that hear no notes, the group takes nothing from
+        // the master.
+        let group_envelope = p.modulation(group_chain).unwrap().modulators[0].id;
+        let never = musicable_model::modulation::NoteTrigger::Never;
+        let trigger = envelope::NOTE_TRIGGER as u32;
+        let modulator = p.modulator_mut(group_envelope).unwrap();
+        modulator.set(trigger, never as u8 as f64).unwrap();
+        assert!(heard(&p)[1]);
         assert_eq!(p.unheard_notes(), []);
     }
 
@@ -4256,7 +4340,8 @@ mod tests {
         assert!(render(graph, 256).iter().all(|&s| s == 0.0));
     }
 
-    /// Hands on the notes a note record carries, at their engine times.
+    /// Hands on the notes a note record carries, at the engine times they
+    /// were played at: as early as they're late.
     struct KeptNotes(rtrb::Producer<(u64, NodeEventKind)>);
 
     impl crate::TapWriter for KeptNotes {
@@ -4264,10 +4349,10 @@ mod tests {
             assert_eq!(audio.channels(), 0, "a note record has no sound");
         }
 
-        fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent]) {
+        fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent], late: u64) {
             for event in notes {
                 assert!(event.offset < frames);
-                let at = time + event.offset as u64;
+                let at = (time + event.offset as u64).saturating_sub(late);
                 self.0.push((at, event.kind)).unwrap();
             }
         }

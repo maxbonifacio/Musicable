@@ -1439,6 +1439,7 @@ fn the_mix_waits_for_a_midi_effects_notes_that_come_with_its_sound() {
     let mut rig = Rig::new(song, None);
     rig.install(&plugins);
     assert_eq!(rig.session.take_problems(), Vec::<String>::new());
+    rig.session.wait_for_graph();
     rig.render(4_800);
     // A MIDI effect's notes are taken to come with its sound until someone
     // says otherwise, so the rest of the mix waits for them.
@@ -1449,8 +1450,103 @@ fn the_mix_waits_for_a_midi_effects_notes_that_come_with_its_sound() {
     rig.session
         .run_with(&device::SET_NOTE_TIMING, &as_played)
         .unwrap();
+    rig.session.wait_for_graph();
     rig.render(4_800);
     assert_eq!(rig.session.stats().latency, 0);
+    // Back on Auto, it takes the plugin's again, as it does undoing the
+    // choice, and redoing it chooses again.
+    let auto = Args::new()
+        .with("device", arpeggiator.id)
+        .with("timing", "auto");
+    rig.session
+        .run_with(&device::SET_NOTE_TIMING, &auto)
+        .unwrap();
+    rig.session.wait_for_graph();
+    rig.render(4_800);
+    assert_eq!(rig.session.stats().latency, 960);
+    rig.session.run(&edit::UNDO).unwrap();
+    rig.session.wait_for_graph();
+    rig.render(4_800);
+    assert_eq!(rig.session.stats().latency, 0);
+    rig.session.run(&edit::UNDO).unwrap();
+    rig.session.wait_for_graph();
+    rig.render(4_800);
+    assert_eq!(rig.session.stats().latency, 960);
+    rig.session.run(&edit::REDO).unwrap();
+    rig.session.wait_for_graph();
+    rig.render(4_800);
+    assert_eq!(rig.session.stats().latency, 0);
+    drop(rig);
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_plugins_note_timing_shows_where_it_matters_and_is_measured_as_its_kind() {
+    use musicable_model::plugin::NoteTiming;
+    use musicable_ui::TimingFrom;
+
+    let plugins = TestPlugins::new(PluginFormat::Clap, "timing-where");
+    let mut song = Project::new();
+    let keys = song.add_track("Keys", TrackKind::Midi);
+    // Latency too short to measure, but the engine makes up for it.
+    let short = plugins.arpeggiator(&mut song, with_param(LATENCY, 32.0));
+    let none = plugins.arpeggiator(&mut song, PluginSettings::default());
+    let long = plugins.arpeggiator(&mut song, with_param(LATENCY, 960.0));
+    let synth = plugins.synth(&mut song);
+    song.track_mut(keys).unwrap().devices = vec![short.clone(), none.clone(), long, synth];
+    let mut rig = Rig::new(song, None);
+    rig.install(&plugins);
+    rig.render(480);
+    let assumed = Some((NoteTiming::WithSound, TimingFrom::Assumed));
+    assert_eq!(rig.session.plugin_note_timing(short.id), assumed);
+    // Without a latency it doesn't matter, until someone chooses for it.
+    assert_eq!(rig.session.plugin_note_timing(none.id), None);
+    let as_played = Args::new()
+        .with("device", none.id)
+        .with("timing", "as_played");
+    rig.session
+        .run_with(&device::SET_NOTE_TIMING, &as_played)
+        .unwrap();
+    assert_eq!(rig.session.plugin_note_timing(none.id), assumed);
+
+    // Only the long latency is measured, as a MIDI effect, and once.
+    let measure = rig.session.take_plugins_to_measure();
+    let kinds: Vec<_> = measure
+        .iter()
+        .map(|(plugin, kind)| (plugin.name.clone(), *kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        [("Test Arpeggiator".to_owned(), PluginKind::MidiEffect)]
+    );
+    let key = (
+        PluginFormat::Clap,
+        ARPEGGIATOR_ID.to_str().unwrap().to_owned(),
+    );
+    rig.session.measured_note_timing(
+        key.clone(),
+        PluginKind::MidiEffect,
+        Some(NoteTiming::AsPlayed),
+    );
+    rig.render(480);
+    let measured = Some((NoteTiming::AsPlayed, TimingFrom::Measured));
+    assert_eq!(rig.session.plugin_note_timing(short.id), measured);
+    assert!(rig.session.take_plugins_to_measure().is_empty());
+    // Marked as another kind, it plays something else, so it's measured
+    // again, and until then, it's what's assumed.
+    let mark = Args::new()
+        .with("format", "clap")
+        .with("plugin", ARPEGGIATOR_ID.to_str().unwrap())
+        .with("kind", "audio_effect");
+    rig.session
+        .run_with(&browser::SET_PLUGIN_KIND, &mark)
+        .unwrap();
+    rig.render(480);
+    let measure = rig.session.take_plugins_to_measure();
+    let kinds: Vec<_> = measure.into_iter().map(|(_, kind)| kind).collect();
+    assert_eq!(kinds, [PluginKind::AudioEffect]);
+    let assumed = Some((NoteTiming::WithSound, TimingFrom::Assumed));
+    assert_eq!(rig.session.plugin_note_timing(short.id), assumed);
     drop(rig);
     plugins.assert_alright();
 }

@@ -191,6 +191,10 @@ pub fn register(registry: &mut Registry) {
             let kind = (args.opt::<String>("kind")?)
                 .and_then(|key| PluginKind::from_key(&key))
                 .unwrap_or_default();
+            // As the plugin's marked or was measured, or else as assumed,
+            // until the app knows better as it loads.
+            let note_timing = (ctx.library.plugin_note_timing(format, &id, kind))
+                .unwrap_or(NoteTiming::assumed(kind));
             let kind = DeviceKind::Plugin(PluginDevice {
                 format,
                 id,
@@ -198,8 +202,7 @@ pub fn register(registry: &mut Registry) {
                 kind,
                 inputs: Vec::new(),
                 note_output: false,
-                // Until the app knows the plugin's own, as it loads.
-                note_timing: NoteTiming::assumed(kind),
+                note_timing,
                 note_timing_chosen: false,
                 settings: PluginSettings::default(),
             });

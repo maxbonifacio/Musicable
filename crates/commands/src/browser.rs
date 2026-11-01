@@ -124,6 +124,18 @@ pub trait Library {
     ) -> Result<(), String> {
         Err(NO_LIBRARY.to_owned())
     }
+    /// When the notes the installed plugin `id` in `format`, of `kind`,
+    /// plays come, against its latency, as the user marked it or the app
+    /// measured it, for a device of it as it's added: `None` where the app
+    /// knows nothing of it, when it's taken to be as assumed for its kind.
+    fn plugin_note_timing(
+        &self,
+        _format: PluginFormat,
+        _id: &str,
+        _kind: PluginKind,
+    ) -> Option<NoteTiming> {
+        None
+    }
     /// Marks when the notes the installed plugin `id` in `format` plays
     /// come, against its latency, as `timing`, for good, or with `None`
     /// takes the mark away, so it's what the app measured, or assumes.

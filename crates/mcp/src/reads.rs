@@ -340,7 +340,13 @@ fn add_modulation(entry: &mut Json, project: &Project, chain: Chain, modulation:
     // The ways notes come that the modulators can't hear, as they're made
     // after something the modulators move.
     let unheard: Vec<Json> = (project.unheard_notes_of(chain).into_iter())
-        .map(|unheard| json!({ "wire": unheard.wire.map(|w| w.0), "maker": unheard.maker.0 }))
+        .map(|unheard| {
+            let mut entry = json!({ "wire": unheard.wire.map(|w| w.0), "maker": unheard.maker.0 });
+            if let Some(through) = unheard.through {
+                entry["through"] = chain_entry(through);
+            }
+            entry
+        })
         .collect();
     if !unheard.is_empty() {
         entry["unheard_notes"] = unheard.into();

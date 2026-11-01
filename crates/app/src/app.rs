@@ -754,8 +754,8 @@ impl App {
         for (plugin, kind) in self.session.take_plugins_to_measure() {
             self.plugin_timings.request(plugin, kind);
         }
-        if let Some((key, timing)) = self.plugin_timings.receive() {
-            self.session.measured_note_timing(key, timing);
+        if let Some((key, kind, timing)) = self.plugin_timings.receive() {
+            self.session.measured_note_timing(key, kind, timing);
         }
         if let Err(problem) = self.plugin_timings.start(waker(ctx)) {
             self.messages.push(problem);

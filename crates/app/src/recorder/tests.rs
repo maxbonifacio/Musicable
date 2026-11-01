@@ -1420,16 +1420,28 @@ fn double() -> Armed {
 /// The engine playing `notes` at a note tap from engine time `from` to
 /// `to`, in blocks of 128 frames: each with its engine time.
 fn play_notes(tap: &mut TapNotes, from: u64, to: u64, notes: &[(u64, NodeEventKind)]) {
+    play_late_notes(tap, from, to, notes, 0);
+}
+
+/// The same, with the notes `late` frames late, as a plugin's that come
+/// with its sound: each comes that long after the engine time it has.
+fn play_late_notes(
+    tap: &mut TapNotes,
+    from: u64,
+    to: u64,
+    notes: &[(u64, NodeEventKind)],
+    late: u64,
+) {
     for time in (from..to).step_by(128) {
         let block: Vec<NodeEvent> = (notes.iter())
-            .filter(|&&(at, _)| (time..time + 128).contains(&at))
+            .filter(|&&(at, _)| (time..time + 128).contains(&(at + late)))
             .map(|&(at, kind)| NodeEvent {
-                offset: (at - time) as usize,
+                offset: (at + late - time) as usize,
                 kind,
             })
             .collect();
         tap.write(time, AudioRef::empty(128));
-        tap.write_notes(time, 128, &block);
+        tap.write_notes(time, 128, &block, late);
     }
 }
 
@@ -1559,6 +1571,49 @@ fn a_midi_track_records_the_notes_it_takes_where_they_played() {
     };
     assert_eq!(recorded, doubled(vec![pass]));
     assert!(files.is_empty());
+}
+
+#[test]
+fn a_midi_track_records_notes_that_come_late_where_they_were_played() {
+    let (buffer, mut tap) = TapNotes::new();
+    let mut tape = midi_tape(&MidiBuffer::new(1).0, vec![double()]);
+    tape.set_taps(notes(lead_notes(), buffer.clone()));
+    // As in the last test, but each note comes three seconds after it was
+    // played, longer than an input stalls in, as a plugin's that come with
+    // its sound. A block's notes go as early as they're late, a note
+    // played before engine time 0 at 0.
+    let late = 3 * u64::from(RATE);
+    let pedal = NodeEventKind::Controller {
+        controller: Controller::SUSTAIN,
+        value: 1.0,
+        channel: None,
+    };
+    let notes = [
+        (500, started(1, 48)),
+        (600, ended(1)),
+        (900, pedal),
+        (1100, started(2, 60)),
+        (1500, ended(2)),
+        (2000, started(3, 64)),
+    ];
+    play_late_notes(&mut tap, 0, 1280 + late, &notes, late);
+    assert_eq!(buffer.settled(), 1280);
+    let segments = [
+        stopped(0, 0),
+        recording(1000, 5000, 64),
+        stopped(3000, 7000),
+    ];
+    // The engine has played on past where the recording stops, but the
+    // notes played there haven't come yet: it waits for them.
+    assert!(run(&mut tape, &segments, 3100 + late).is_empty());
+    play_late_notes(&mut tap, 1280 + late, 3200 + late, &notes, late);
+    let (recorded, _) = finished(run(&mut tape, &[], 3200 + late));
+    let notes = vec![taken_note(5100, 5500, 60), held(taken_note(6000, 7000, 64))];
+    let pass = NotePass {
+        controllers: vec![(5000, Controller::SUSTAIN, 1.0)],
+        ..pass(5000, 2000, notes)
+    };
+    assert_eq!(recorded, doubled(vec![pass]));
 }
 
 #[test]

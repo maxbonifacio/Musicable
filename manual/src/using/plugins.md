@@ -155,7 +155,10 @@ there takes the mark away.
 
 Bypassed, a MIDI effect whose notes come with its sound holds back the
 notes it passes on by as long, as a bypassed effect's sound waits for its
-latency, so nothing moves as it's bypassed. A recording of the notes a
+latency, so nothing moves as it's bypassed. Notes that come to an
+instrument both from such an effect and from somewhere without one, such as
+two MIDI tracks' notes when only one has the effect, wait for each other,
+so they all play as late as the effect's. A recording of the notes a
 plugin plays puts them as much earlier as they're late.
 
 ## Multi-timbral instruments
