@@ -70,6 +70,11 @@ const MENUS: [MenuSpec; 8] = [
             Some(track::DELETE),
             None,
             Some(track::TOGGLE_ALWAYS_LIVE),
+            None,
+            Some(view::FIT_TRACK_HEIGHTS),
+            Some(view::TRACKS_TALLER),
+            Some(view::TRACKS_SHORTER),
+            Some(view::RESET_TRACK_HEIGHT),
         ],
     ),
     (
@@ -138,6 +143,7 @@ const MENUS: [MenuSpec; 8] = [
             Some(transport::PLAY),
             Some(transport::STOP),
             Some(transport::GO_TO_START),
+            Some(transport::GO_TO_END),
             None,
             Some(transport::RECORD),
             Some(transport::CAPTURE),
@@ -191,7 +197,11 @@ const LAST_MENUS: [MenuSpec; 5] = [
             Some(view::ZOOM_IN),
             Some(view::ZOOM_OUT),
             Some(view::ZOOM_TO_SELECTION),
+            Some(view::FIT_SONG_WIDTH),
+            Some(view::ZOOM_BACK),
+            Some(view::ZOOM_FORWARD),
             Some(view::TOGGLE_FOLLOW),
+            Some(view::SCROLL_TO_PLAYHEAD),
             Some(view::TOGGLE_TAKE_LANES),
             None,
             Some(view::NARROW_GRID),
@@ -266,7 +276,6 @@ pub(crate) struct Menu<'a> {
 pub(crate) fn menus(commands: &Registry) -> Vec<Menu<'_>> {
     let specs = || MENUS.iter().chain(&LAST_MENUS);
     let listed = |area: &str| specs().any(|m| m.1 == area);
-    let in_a_menu = |id: &CommandId| specs().any(|m| m.2.contains(&Some(id.clone())));
     let offered = || commands.iter().filter(|c| !c.needs_arguments());
     let mut others: Vec<&str> = offered()
         .filter(|c| !in_a_menu(&c.id))
@@ -290,6 +299,11 @@ pub(crate) fn menus(commands: &Registry) -> Vec<Menu<'_>> {
         .collect()
 }
 
+/// Whether a menu lists the command `id`, in its own area's or another's.
+fn in_a_menu(id: &CommandId) -> bool {
+    (MENUS.iter().chain(&LAST_MENUS)).any(|m| m.2.contains(&Some(id.clone())))
+}
+
 fn menu<'a>(commands: &'a Registry, &(title, area, items): &MenuSpec) -> Menu<'a> {
     let mut listed: Vec<_> = items
         .iter()
@@ -298,9 +312,9 @@ fn menu<'a>(commands: &'a Registry, &(title, area, items): &MenuSpec) -> Menu<'a
             None => Some(None),
         })
         .collect();
-    let rest = commands.iter().filter(|c| {
-        area_of(&c.id) == area && !c.needs_arguments() && !items.contains(&Some(c.id.clone()))
-    });
+    let rest = commands
+        .iter()
+        .filter(|c| area_of(&c.id) == area && !c.needs_arguments() && !in_a_menu(&c.id));
     listed.push(None);
     listed.extend(rest.map(Some));
     // No separator first, last, or after another.

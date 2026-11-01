@@ -923,6 +923,7 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Request::CommandPalette => self.shell.open_palette(),
+            Request::Notice(notice) => self.messages.push(notice),
             Request::Settings => self.settings_window.open(None),
             Request::AudioSettings => self.settings_window.open(Some(settings_window::AUDIO)),
             Request::KeyboardShortcuts => self.settings_window.open(Some(settings_window::KEYS)),

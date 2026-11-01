@@ -40,6 +40,10 @@
 | New Group Track |  | `track.new_group_track` |
 | Delete Tracks |  | `track.delete` |
 | Always Live |  | `track.toggle_always_live` |
+| Fit Track Heights | H | `view.fit_track_heights` |
+| Make Tracks Taller | Alt+Equals | `view.tracks_taller` |
+| Make Tracks Shorter | Alt+Minus | `view.tracks_shorter` |
+| Reset Track Height |  | `view.reset_track_height` |
 
 ### Clip
 
@@ -99,6 +103,7 @@
 | Play | Shift+Space | `transport.play` |
 | Stop | Ctrl+Period | `transport.stop` |
 | Go to Start | Home | `transport.go_to_start` |
+| Go to End | End | `transport.go_to_end` |
 | Record | F9 | `transport.record` |
 | Capture | Ctrl+Shift+C | `transport.capture` |
 | Toggle Punch In |  | `transport.toggle_punch_in` |
@@ -146,7 +151,11 @@
 | Zoom In | Equals, NumpadAdd | `view.zoom_in` |
 | Zoom Out | Minus, NumpadSubtract | `view.zoom_out` |
 | Zoom to Selection | Z | `view.zoom_to_selection` |
+| Fit Song Width | W | `view.fit_song_width` |
+| Zoom Back | X | `view.zoom_back` |
+| Zoom Forward | Shift+X | `view.zoom_forward` |
 | Follow | Ctrl+Shift+F | `view.toggle_follow` |
+| Scroll to Playhead |  | `view.scroll_to_playhead` |
 | Show/Hide Take Lanes | Ctrl+Alt+U | `view.toggle_take_lanes` |
 | Narrow Grid | Ctrl+1 | `view.narrow_grid` |
 | Widen Grid | Ctrl+2 | `view.widen_grid` |

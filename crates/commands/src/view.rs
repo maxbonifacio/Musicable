@@ -11,9 +11,10 @@ use musicable_model::time::Beats;
 use musicable_model::{Chain, TrackId};
 
 use crate::editor::{Editor, Focus, PianoRoll, Step, Viewport};
+use crate::navigation::{Panel, Record, song_range};
 use crate::panel;
 use crate::{
-    Command, CommandError, CommandId, Context, Param, Registry, Request, Type, Value, When,
+    Args, Command, CommandError, CommandId, Context, Param, Registry, Request, Type, Value, When,
 };
 
 /// Shows the command palette, which finds any command by name and runs it.
@@ -63,6 +64,33 @@ pub const ZOOM_OUT: CommandId = CommandId::new("view.zoom_out");
 /// Zooms the arrangement to show the selection across it, the piano roll to
 /// show its selected notes, or the Sample Editor its selected warp markers.
 pub const ZOOM_TO_SELECTION: CommandId = CommandId::new("view.zoom_to_selection");
+/// Goes back to the view before the last zoom or scroll of the view with
+/// the focus: Live's Zoom Back.
+pub const ZOOM_BACK: CommandId = CommandId::new("view.zoom_back");
+/// Goes forward again to the view Zoom Back went back from.
+pub const ZOOM_FORWARD: CommandId = CommandId::new("view.zoom_forward");
+/// Zooms and scrolls the arrangement to show the whole song across it, or
+/// the piano roll or the Sample Editor their whole clip, while they have
+/// the focus. It leaves the tracks' heights alone.
+pub const FIT_SONG_WIDTH: CommandId = CommandId::new("view.fit_song_width");
+/// Makes the arrangement's tracks fill its height together, and scrolls to
+/// the top. It leaves the zoom alone.
+pub const FIT_TRACK_HEIGHTS: CommandId = CommandId::new("view.fit_track_heights");
+/// Makes the selected tracks, or the track the panels show, the next size
+/// taller.
+pub const TRACKS_TALLER: CommandId = CommandId::new("view.tracks_taller");
+/// Makes the selected tracks, or the track the panels show, the next size
+/// shorter.
+pub const TRACKS_SHORTER: CommandId = CommandId::new("view.tracks_shorter");
+/// Gives tracks their default height back: the selected tracks, or the
+/// track the panels show.
+pub const RESET_TRACK_HEIGHT: CommandId = CommandId::new("view.reset_track_height");
+/// Scrolls the view with the focus to the playhead, and lets Follow follow
+/// it again.
+pub const SCROLL_TO_PLAYHEAD: CommandId = CommandId::new("view.scroll_to_playhead");
+/// Tells the commands the sizes the arrangement draws its lanes at, for
+/// fitting tracks to its height.
+pub const SET_LANE_SIZES: CommandId = CommandId::new("view.set_lane_sizes");
 /// Turns on or off scrolling the arrangement to keep the playhead in sight.
 pub const TOGGLE_FOLLOW: CommandId = CommandId::new("view.toggle_follow");
 /// Shows the selected tracks' takes in lanes under them, or hides them.
@@ -99,7 +127,7 @@ type Handler = fn(&mut Context<'_>);
 
 /// The view commands that take no arguments, with their titles, when they
 /// apply and what they run.
-const COMMANDS: [(CommandId, &str, When, Handler); 11] = [
+const COMMANDS: [(CommandId, &str, When, Handler); 18] = [
     (ZOOM_IN, "Zoom In", When::Always, |ctx| zoom(ctx, ZOOM_STEP)),
     (ZOOM_OUT, "Zoom Out", When::Always, |ctx| {
         zoom(ctx, 1.0 / ZOOM_STEP)
@@ -110,9 +138,38 @@ const COMMANDS: [(CommandId, &str, When, Handler); 11] = [
         When::CanZoomToSelection,
         zoom_to_selection,
     ),
+    (ZOOM_BACK, "Zoom Back", When::CanZoomBack, |ctx| {
+        step_view(ctx, false)
+    }),
+    (ZOOM_FORWARD, "Zoom Forward", When::CanZoomForward, |ctx| {
+        step_view(ctx, true)
+    }),
+    (FIT_SONG_WIDTH, "Fit Song Width", When::Always, fit_width),
+    (
+        FIT_TRACK_HEIGHTS,
+        "Fit Track Heights",
+        When::Always,
+        fit_heights,
+    ),
+    (TRACKS_TALLER, "Make Tracks Taller", When::Always, |ctx| {
+        step_heights(ctx, true)
+    }),
+    (TRACKS_SHORTER, "Make Tracks Shorter", When::Always, |ctx| {
+        step_heights(ctx, false)
+    }),
+    (
+        SCROLL_TO_PLAYHEAD,
+        "Scroll to Playhead",
+        When::Always,
+        scroll_to_playhead,
+    ),
     (TOGGLE_FOLLOW, "Follow", When::Always, |ctx| {
         let editor = ctx.document.editor_mut();
         editor.follow = !editor.follow;
+        // Turned on, it follows the playhead from the next frame.
+        if editor.follow {
+            editor.navigation.resume_all();
+        }
     }),
     (NARROW_GRID, "Narrow Grid", When::Always, |ctx| {
         widen_grid(ctx.document.editor_mut(), -1)
@@ -187,6 +244,25 @@ const REQUESTS: [(CommandId, &str, Request); 11] = [
     ),
 ];
 
+/// The `history` argument the view-setting commands take: how the change
+/// counts in the view's history and for Follow.
+const HISTORY: Param = Param::optional(
+    "history",
+    Type::Choice(Record::NAMES),
+    "How it counts: \"step\", a step of the view's history, which Zoom Back goes back over, \
+     as without it; \"gesture\", part of a gesture going on, which is a step once a call \
+     without it ends the gesture; \"follow\", Follow moving it; or \"none\", movement the \
+     user didn't make.",
+);
+
+/// How the view-setting command run with `args` counts.
+fn record(args: &Args) -> Result<Record, CommandError> {
+    let name: Option<String> = args.opt("history")?;
+    Ok(name
+        .map_or(Some(Record::Step), |name| Record::from_name(&name))
+        .unwrap_or_default())
+}
+
 /// Registers the view commands.
 pub fn register(registry: &mut Registry) {
     crate::register_requests(registry, &REQUESTS);
@@ -206,22 +282,11 @@ pub fn register(registry: &mut Registry) {
                 Type::Number,
                 "How wide the timeline is, in points.",
             ),
+            HISTORY,
         ]),
         |ctx, args| {
-            let zoom: f64 = args.get("zoom")?;
-            let top: f64 = args.get("top")?;
-            let width: f64 = args.get("width")?;
-            if zoom <= 0.0 || width < 0.0 {
-                return Err(CommandError::invalid(
-                    "the zoom and the width can't be negative",
-                ));
-            }
-            ctx.document.editor_mut().viewport = Viewport {
-                start: Beats::max(args.get("start")?, Beats::ZERO),
-                zoom: zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
-                top: top.max(0.0) as f32,
-                width: width as f32,
-            };
+            let playing = ctx.transport.is_playing();
+            set_viewport(ctx.document.editor_mut(), args, playing)?;
             Ok(Value::None)
         },
     );
@@ -275,31 +340,11 @@ pub fn register(registry: &mut Registry) {
                 "How tall the rows of keys are on screen together, in points.",
             ),
             Param::optional("key_height", Type::Number, "How tall each key's row is."),
+            HISTORY,
         ]),
         |ctx, args| {
-            let zoom: f64 = args.get("zoom")?;
-            let top: f64 = args.get("top")?;
-            let width: f64 = args.get("width")?;
-            let height: f64 = args.get("height")?;
-            let key_height: Option<f64> = args.opt("key_height")?;
-            if zoom <= 0.0 || width < 0.0 || height < 0.0 {
-                return Err(CommandError::invalid(
-                    "the zoom, the width and the height can't be negative",
-                ));
-            }
-            let roll = &mut ctx.document.editor_mut().piano_roll;
-            if let Some(key_height) = key_height {
-                let (min, max) = (PianoRoll::MIN_KEY_HEIGHT, PianoRoll::MAX_KEY_HEIGHT);
-                roll.key_height = (key_height as f32).clamp(min, max);
-            }
-            roll.height = height as f32;
-            let rows = roll.key_height * (f32::from(musicable_model::clip::Note::MAX_KEY) + 1.0);
-            roll.viewport = Viewport {
-                start: Beats::max(args.get("start")?, Beats::ZERO),
-                zoom: zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
-                top: (top as f32).clamp(0.0, (rows - roll.height).max(0.0)),
-                width: width as f32,
-            };
+            let playing = ctx.transport.is_playing();
+            set_piano_roll_viewport(ctx.document.editor_mut(), args, playing)?;
             Ok(Value::None)
         },
     );
@@ -312,6 +357,7 @@ pub fn register(registry: &mut Registry) {
                 Type::Number,
                 "How wide the waveform is shown, in points.",
             ),
+            HISTORY,
         ]),
         |ctx, args| {
             let zoom: f64 = args.get("zoom")?;
@@ -321,12 +367,18 @@ pub fn register(registry: &mut Registry) {
                     "the zoom and the width can't be negative",
                 ));
             }
-            ctx.document.editor_mut().sample_editor.viewport = Viewport {
-                start: Beats::max(args.get("start")?, Beats::ZERO),
-                zoom: zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
-                top: 0.0,
-                width: width as f32,
-            };
+            let start = Beats::max(args.get("start")?, Beats::ZERO);
+            let record = record(args)?;
+            let playing = ctx.transport.is_playing();
+            let editor = ctx.document.editor_mut();
+            editor.navigate(Panel::SampleEditor, record, playing, |editor| {
+                editor.sample_editor.viewport = Viewport {
+                    start,
+                    zoom: zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
+                    top: 0.0,
+                    width: width as f32,
+                };
+            });
             Ok(Value::None)
         },
     );
@@ -359,68 +411,322 @@ pub fn register(registry: &mut Registry) {
                 "The track: the one the panels show without it.",
             ),
             Param::optional("master", Type::Bool, "The master's row instead."),
+            Param::optional(
+                "all",
+                Type::Bool,
+                "Every track instead, as Alt-dragging an edge does.",
+            ),
             Param::required("height", Type::Number, "Its height, in points."),
+            HISTORY,
         ]),
         |ctx, args| {
             let height: f64 = args.get("height")?;
-            let (project, editor) = ctx.document.parts();
-            let chain = match (args.opt::<TrackId>("track")?, args.opt("master")?) {
-                (_, Some(true)) => Chain::Master,
-                (Some(track), _) => Chain::Track(track),
-                (None, _) => (editor.selected_track)
-                    .ok_or_else(|| CommandError::invalid("no track is selected"))?,
-            };
-            if let Chain::Track(track) = chain
-                && project.track(track).is_none()
-            {
-                return Err(CommandError::invalid(format!(
-                    "there's no track {}",
-                    track.0
-                )));
-            }
             let height = (height as f32).clamp(MIN_TRACK_HEIGHT, MAX_TRACK_HEIGHT);
-            editor.track_heights.insert(chain, height);
+            let chains = chains(ctx, args, false)?;
+            let record = record(args)?;
+            let playing = ctx.transport.is_playing();
+            let editor = ctx.document.editor_mut();
+            editor.navigate(Panel::Arrangement, record, playing, |editor| {
+                for chain in chains {
+                    editor.track_heights.insert(chain, height);
+                }
+            });
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(RESET_TRACK_HEIGHT, "Reset Track Height").with_params(&[
+            Param::optional(
+                "track",
+                Type::Track,
+                "The track: the selected tracks, or the one the panels show, without it.",
+            ),
+            Param::optional("master", Type::Bool, "The master's row instead."),
+            Param::optional("all", Type::Bool, "Every track instead."),
+        ]),
+        |ctx, args| {
+            let chains = chains(ctx, args, true)?;
+            let playing = ctx.transport.is_playing();
+            let editor = ctx.document.editor_mut();
+            editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+                for chain in chains {
+                    editor.track_heights.remove(&chain);
+                }
+            });
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(SET_LANE_SIZES, "Set Lane Sizes").with_params(&[
+            Param::required(
+                "height",
+                Type::Number,
+                "How tall the tracks' part of the arrangement is, over the master's, in points.",
+            ),
+            Param::optional(
+                "track",
+                Type::Number,
+                "A track's height where it hasn't one of its own.",
+            ),
+            Param::optional("take", Type::Number, "A take lane's height."),
+            Param::optional("automation", Type::Number, "An automation lane's height."),
+        ]),
+        |ctx, args| {
+            let size = |name| -> Result<Option<f32>, CommandError> {
+                match args.opt::<f64>(name)? {
+                    Some(size) if size < 0.0 || !size.is_finite() => {
+                        Err(CommandError::invalid("the sizes can't be negative"))
+                    }
+                    size => Ok(size.map(|size| size as f32)),
+                }
+            };
+            let height = size("height")?.unwrap_or_default();
+            let (track, take, automation) = (size("track")?, size("take")?, size("automation")?);
+            let lanes = &mut ctx.document.editor_mut().lanes;
+            lanes.height = height;
+            lanes.track = track.unwrap_or(lanes.track);
+            lanes.take = take.unwrap_or(lanes.take);
+            lanes.automation = automation.unwrap_or(lanes.automation);
             Ok(Value::None)
         },
     );
 }
 
-/// Zooms the view with the focus by `factor` around the start marker, or
-/// the middle of the view if the start marker is out of sight.
+/// Sets the arrangement's viewport as [`SET_VIEWPORT`] does with `args`,
+/// while the song plays or not.
+pub fn set_viewport(editor: &mut Editor, args: &Args, playing: bool) -> Result<(), CommandError> {
+    let zoom: f64 = args.get("zoom")?;
+    let top: f64 = args.get("top")?;
+    let width: f64 = args.get("width")?;
+    if zoom <= 0.0 || width < 0.0 {
+        return Err(CommandError::invalid(
+            "the zoom and the width can't be negative",
+        ));
+    }
+    let start = Beats::max(args.get("start")?, Beats::ZERO);
+    let record = record(args)?;
+    editor.navigate(Panel::Arrangement, record, playing, |editor| {
+        editor.viewport = Viewport {
+            start,
+            zoom: zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
+            top: top.max(0.0) as f32,
+            width: width as f32,
+        };
+    });
+    Ok(())
+}
+
+/// Sets the piano roll's viewport as [`SET_PIANO_ROLL_VIEWPORT`] does with
+/// `args`, while the song plays or not.
+pub fn set_piano_roll_viewport(
+    editor: &mut Editor,
+    args: &Args,
+    playing: bool,
+) -> Result<(), CommandError> {
+    let zoom: f64 = args.get("zoom")?;
+    let top: f64 = args.get("top")?;
+    let width: f64 = args.get("width")?;
+    let height: f64 = args.get("height")?;
+    let key_height: Option<f64> = args.opt("key_height")?;
+    if zoom <= 0.0 || width < 0.0 || height < 0.0 {
+        return Err(CommandError::invalid(
+            "the zoom, the width and the height can't be negative",
+        ));
+    }
+    let start = Beats::max(args.get("start")?, Beats::ZERO);
+    let record = record(args)?;
+    editor.navigate(Panel::PianoRoll, record, playing, |editor| {
+        let roll = &mut editor.piano_roll;
+        if let Some(key_height) = key_height {
+            let (min, max) = (PianoRoll::MIN_KEY_HEIGHT, PianoRoll::MAX_KEY_HEIGHT);
+            roll.key_height = (key_height as f32).clamp(min, max);
+        }
+        roll.height = height as f32;
+        let rows = roll.key_height * (f32::from(musicable_model::clip::Note::MAX_KEY) + 1.0);
+        roll.viewport = Viewport {
+            start,
+            zoom: zoom.clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM),
+            top: (top as f32).clamp(0.0, (rows - roll.height).max(0.0)),
+            width: width as f32,
+        };
+    });
+    Ok(())
+}
+
+/// The rows the height commands run with `args` change: the track or the
+/// master's row they name, every track, or else the track the panels show,
+/// or, if `selected`, the selected tracks before it.
+fn chains(ctx: &Context<'_>, args: &Args, selected: bool) -> Result<Vec<Chain>, CommandError> {
+    let project = ctx.document.project();
+    let editor = ctx.document.editor();
+    if args.opt("all")? == Some(true) {
+        return Ok(project.tracks.iter().map(|t| Chain::Track(t.id)).collect());
+    }
+    if args.opt("master")? == Some(true) {
+        return Ok(vec![Chain::Master]);
+    }
+    if let Some(track) = args.opt::<TrackId>("track")? {
+        if project.track(track).is_none() {
+            return Err(CommandError::invalid(format!(
+                "there's no track {}",
+                track.0
+            )));
+        }
+        return Ok(vec![Chain::Track(track)]);
+    }
+    let chosen = match selected {
+        true => chosen_rows(editor),
+        false => editor.selected_track.into_iter().collect(),
+    };
+    match chosen.is_empty() {
+        true => Err(CommandError::invalid("no track is selected")),
+        false => Ok(chosen),
+    }
+}
+
+/// The rows the height keys change: the selected tracks, or else the track
+/// the panels show, which can be the master.
+fn chosen_rows(editor: &Editor) -> Vec<Chain> {
+    match editor.selection.tracks.is_empty() {
+        false => editor
+            .selection
+            .tracks
+            .iter()
+            .map(|&id| Chain::Track(id))
+            .collect(),
+        true => editor.selected_track.into_iter().collect(),
+    }
+}
+
+/// Zooms the view with the focus by `factor` around the playhead while it
+/// plays in sight, or else the start marker, or the middle of the view if
+/// the start marker is out of sight too.
 fn zoom(ctx: &mut Context<'_>, factor: f64) {
+    let playing = ctx.transport.is_playing();
+    let playhead = ctx.transport.playhead();
     let editor = ctx.document.editor_mut();
+    let panel = Panel::of(editor.focus);
     let start_marker = editor.start_marker;
-    let viewport = match editor.focus {
-        Focus::PIANO_ROLL => &mut editor.piano_roll.viewport,
-        Focus::SAMPLE_EDITOR => &mut editor.sample_editor.viewport,
-        _ => &mut editor.viewport,
-    };
-    let at = match viewport.visible().contains(start_marker) {
-        true => start_marker,
-        false => viewport.beats_at(viewport.width / 2.0),
-    };
-    viewport.zoom_around(factor, at);
+    editor.navigate(panel, Record::Step, playing, |editor| {
+        let viewport = editor.viewport_mut(panel);
+        let visible = viewport.visible();
+        let at = if playing && visible.contains(playhead) {
+            playhead
+        } else if visible.contains(start_marker) {
+            start_marker
+        } else {
+            viewport.beats_at(viewport.width / 2.0)
+        };
+        viewport.zoom_around(factor, at);
+    });
 }
 
 fn zoom_to_selection(ctx: &mut Context<'_>) {
+    let playing = ctx.transport.is_playing();
     let (project, editor) = ctx.document.parts();
-    match editor.focus {
-        Focus::PIANO_ROLL => {
+    let panel = Panel::of(editor.focus);
+    editor.navigate(panel, Record::Step, playing, |editor| match panel {
+        Panel::PianoRoll => {
             if let Some((range, low, high)) = crate::notes::selected_range(project, editor) {
                 editor.piano_roll.show_notes(range, low, high);
             }
         }
-        Focus::SAMPLE_EDITOR => {
+        Panel::SampleEditor => {
             if let Some(range) = crate::warp::selected_range(project, editor) {
                 editor.sample_editor.viewport.show(range);
             }
         }
-        _ => {
+        Panel::Arrangement => {
             if let Some(range) = editor.selected_range(project) {
                 editor.viewport.show(range);
             }
         }
+    });
+}
+
+/// Goes back to the view before the last step of the view with the focus,
+/// or forward again.
+fn step_view(ctx: &mut Context<'_>, forward: bool) {
+    let playing = ctx.transport.is_playing();
+    let (project, editor) = ctx.document.parts();
+    let panel = Panel::of(editor.focus);
+    editor.step_view(project, panel, forward, playing);
+}
+
+/// Shows the whole song across the arrangement, or the whole clip across
+/// the piano roll or the Sample Editor.
+fn fit_width(ctx: &mut Context<'_>) {
+    let playing = ctx.transport.is_playing();
+    let (project, editor) = ctx.document.parts();
+    let panel = Panel::of(editor.focus);
+    let clip = |id: Option<musicable_model::clip::ClipId>| {
+        id.and_then(|id| project.find_clip(id))
+            .map(|(_, clip)| clip.range())
+    };
+    let range = match panel {
+        Panel::Arrangement => Some(song_range(project)),
+        Panel::PianoRoll => clip(editor.piano_roll.clip),
+        Panel::SampleEditor => clip(editor.sample_editor.clip),
+    };
+    if let Some(range) = range {
+        editor.navigate(panel, Record::Step, playing, |editor| {
+            editor.viewport_mut(panel).show(range);
+        });
     }
+}
+
+/// Makes the arrangement's tracks fill its height, and says how many are in
+/// sight when they can't all be.
+fn fit_heights(ctx: &mut Context<'_>) {
+    let playing = ctx.transport.is_playing();
+    let (project, editor) = ctx.document.parts();
+    let mut fitted = (0, 0);
+    editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+        fitted = editor.fit_track_heights(project);
+    });
+    let (shown, count) = fitted;
+    if shown < count {
+        ctx.requests.push(Request::Notice(format!(
+            "{shown} of {count} tracks are in sight at the smallest height. Scroll for the rest."
+        )));
+    }
+}
+
+/// Makes the selected tracks, or the track the panels show, the next of the
+/// behaviour's sizes taller, or shorter.
+fn step_heights(ctx: &mut Context<'_>, taller: bool) {
+    let playing = ctx.transport.is_playing();
+    let editor = ctx.document.editor_mut();
+    let sizes = editor.behaviour.track_sizes();
+    let chains = chosen_rows(editor);
+    editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+        for chain in chains {
+            let height = editor.height_of(chain);
+            let next = match taller {
+                true => (sizes.iter().copied())
+                    .find(|&size| size > height + 0.5)
+                    .unwrap_or(MAX_TRACK_HEIGHT),
+                false => (sizes.iter().rev().copied())
+                    .find(|&size| size < height - 0.5)
+                    .unwrap_or(MIN_TRACK_HEIGHT),
+            };
+            editor.track_heights.insert(chain, next);
+        }
+    });
+}
+
+/// Scrolls the view with the focus so the playhead is a little way in from
+/// its left edge, and lets Follow follow again there.
+fn scroll_to_playhead(ctx: &mut Context<'_>) {
+    let playing = ctx.transport.is_playing();
+    let playhead = ctx.transport.playhead();
+    let editor = ctx.document.editor_mut();
+    let panel = Panel::of(editor.focus);
+    editor.navigate(panel, Record::Step, playing, |editor| {
+        let viewport = editor.viewport_mut(panel);
+        viewport.start = (playhead - viewport.beats_in(viewport.width / 20.0)).max(Beats::ZERO);
+    });
+    editor.navigation.of_mut(panel).suspended = false;
 }
 
 /// Widens the grid by `by` steps, or narrows it: a fixed grid's step, or
@@ -717,5 +1023,171 @@ mod tests {
         // Scrolled down to the lowest key, and no further.
         assert_eq!(viewport.top, 128.0 * PianoRoll::MAX_KEY_HEIGHT - 300.0);
         assert_eq!(setup.document.take_committed(), []);
+    }
+
+    /// Bass and Keys, with clips from beat 0 to 32 and 16 to 64.
+    fn two_tracks() -> (Setup, TrackId, TrackId) {
+        let mut project = Project::new();
+        let bass = project.add_track("Bass", TrackKind::Midi);
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        for (track, start, end) in [(bass, 0, 32), (keys, 16, 64)] {
+            let range = BeatRange::new(Beats::new(start), Beats::new(end));
+            let clip = project.new_clip("C", range, ClipContent::Midi(MidiClip::default()));
+            project.track_mut(track).unwrap().clips.push(clip);
+        }
+        (Setup::new(project), bass, keys)
+    }
+
+    fn history(setup: &Setup) -> usize {
+        setup.document.editor().navigation.arrangement.len()
+    }
+
+    #[test]
+    fn w_and_h_pressed_again_change_nothing() {
+        let (mut setup, ..) = two_tracks();
+        setup.run(&FIT_SONG_WIDTH);
+        let fitted = setup.document.editor().viewport;
+        let visible = fitted.visible();
+        assert!(visible.start == Beats::ZERO && Beats::new(64) <= visible.end);
+        assert_eq!(history(&setup), 1);
+        setup.run(&FIT_SONG_WIDTH);
+        assert_eq!(setup.document.editor().viewport, fitted);
+        assert_eq!(history(&setup), 1);
+        setup.run(&FIT_TRACK_HEIGHTS);
+        let heights = setup.document.editor().track_heights.clone();
+        assert_eq!(history(&setup), 2);
+        setup.run(&FIT_TRACK_HEIGHTS);
+        assert_eq!(setup.document.editor().track_heights, heights);
+        assert_eq!(history(&setup), 2);
+        // Each undoes nothing of the other's, however they're mixed.
+        setup.run(&FIT_SONG_WIDTH);
+        setup.run(&FIT_TRACK_HEIGHTS);
+        let editor = setup.document.editor();
+        assert_eq!((editor.viewport, &editor.track_heights), (fitted, &heights));
+        // Two tracks share the 480 points the tracks have.
+        assert!(
+            heights.values().all(|&h| (h - 240.0).abs() < 0.5),
+            "{heights:?}"
+        );
+        // Nothing of it changes the project.
+        assert_eq!(setup.document.take_committed(), []);
+    }
+
+    #[test]
+    fn w_after_zooming_fits_the_song_again() {
+        let (mut setup, ..) = two_tracks();
+        setup.run(&FIT_SONG_WIDTH);
+        let fitted = setup.document.editor().viewport;
+        setup.run(&ZOOM_IN);
+        setup.run(&ZOOM_IN);
+        assert_ne!(setup.document.editor().viewport, fitted);
+        setup.run(&FIT_SONG_WIDTH);
+        assert_eq!(setup.document.editor().viewport, fitted);
+    }
+
+    #[test]
+    fn x_goes_back_and_shift_x_forward() {
+        let (mut setup, ..) = two_tracks();
+        let before = setup.document.editor().viewport;
+        assert!(!setup.applies(&ZOOM_BACK) && !setup.applies(&ZOOM_FORWARD));
+        setup.run(&FIT_SONG_WIDTH);
+        let fitted = setup.document.editor().viewport;
+        setup.run(&ZOOM_BACK);
+        assert_eq!(setup.document.editor().viewport, before);
+        assert!(setup.applies(&ZOOM_FORWARD));
+        setup.run(&ZOOM_FORWARD);
+        assert_eq!(setup.document.editor().viewport, fitted);
+        // A new step after going back leaves nothing to go forward to.
+        setup.run(&ZOOM_BACK);
+        setup.run(&ZOOM_IN);
+        assert!(!setup.applies(&ZOOM_FORWARD));
+        setup.run(&ZOOM_BACK);
+        assert_eq!(setup.document.editor().viewport, before);
+    }
+
+    #[test]
+    fn a_wheel_gesture_is_one_step_back() {
+        let (mut setup, ..) = two_tracks();
+        let before = setup.document.editor().viewport;
+        let to = |start: i64, history: &str| {
+            Args::new()
+                .with("start", Beats::new(start))
+                .with("zoom", before.zoom)
+                .with("top", 0.0)
+                .with("width", before.width)
+                .with("history", history)
+        };
+        for start in [4, 8, 12] {
+            setup.run_with(&SET_VIEWPORT, to(start, "gesture")).unwrap();
+        }
+        setup.run_with(&SET_VIEWPORT, to(12, "step")).unwrap();
+        assert_eq!(history(&setup), 1);
+        setup.run(&ZOOM_BACK);
+        assert_eq!(setup.document.editor().viewport.start, before.start);
+        // What the user didn't do isn't a step.
+        setup.run_with(&SET_VIEWPORT, to(20, "none")).unwrap();
+        assert_eq!(history(&setup), 0);
+    }
+
+    #[test]
+    fn zooming_while_playing_keeps_the_playhead_still_and_holds_follow() {
+        let (mut setup, ..) = two_tracks();
+        setup.transport.playing = true;
+        setup.transport.playhead = Beats::new(10);
+        let x = setup.document.editor().viewport.x_of(Beats::new(10));
+        setup.run(&ZOOM_IN);
+        let editor = setup.document.editor();
+        assert!((editor.viewport.x_of(Beats::new(10)) - x).abs() < 0.01);
+        assert!(editor.navigation.arrangement.suspended);
+        // Follow finding the playhead in sight follows again.
+        let viewport = editor.viewport;
+        let args = Args::new()
+            .with("start", viewport.start)
+            .with("zoom", viewport.zoom)
+            .with("top", 0.0)
+            .with("width", viewport.width)
+            .with("history", "follow");
+        setup.run_with(&SET_VIEWPORT, args).unwrap();
+        assert!(!setup.document.editor().navigation.arrangement.suspended);
+        // And so does playing from stopped.
+        setup.run(&ZOOM_OUT);
+        assert!(setup.document.editor().navigation.arrangement.suspended);
+        setup.transport.playing = false;
+        setup.run(&crate::transport::PLAY);
+        assert!(!setup.document.editor().navigation.arrangement.suspended);
+    }
+
+    #[test]
+    fn tracks_step_through_the_sizes_and_too_many_say_so() {
+        let (mut setup, bass, keys) = two_tracks();
+        setup.select_tracks(&[bass]);
+        let height = |setup: &Setup, track| setup.document.editor().height_of(Chain::Track(track));
+        setup.run(&TRACKS_TALLER);
+        assert_eq!(height(&setup, bass), 120.0);
+        setup.run(&TRACKS_TALLER);
+        setup.run(&TRACKS_TALLER);
+        assert_eq!(height(&setup, bass), MAX_TRACK_HEIGHT);
+        for _ in 0..5 {
+            setup.run(&TRACKS_SHORTER);
+        }
+        assert_eq!(height(&setup, bass), MIN_TRACK_HEIGHT);
+        assert_eq!(height(&setup, keys), 60.0);
+        setup
+            .run_with(&RESET_TRACK_HEIGHT, Args::new().with("track", bass))
+            .unwrap();
+        assert_eq!(height(&setup, bass), 60.0);
+
+        let mut project = Project::new();
+        for n in 0..30 {
+            project.add_track(format!("T{n}"), TrackKind::Audio);
+        }
+        let mut setup = Setup::new(project);
+        setup.run(&FIT_TRACK_HEIGHTS);
+        assert_eq!(
+            setup.requests,
+            [Request::Notice(
+                "20 of 30 tracks are in sight at the smallest height. Scroll for the rest.".into()
+            )]
+        );
     }
 }

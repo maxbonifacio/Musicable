@@ -33,6 +33,9 @@ pub const RECORD: CommandId = CommandId::new("transport.record");
 pub const CAPTURE: CommandId = CommandId::new("transport.capture");
 /// Moves the start marker and the playhead to the start of the song.
 pub const GO_TO_START: CommandId = CommandId::new("transport.go_to_start");
+/// Moves the start marker and the playhead to the end of the song: the end
+/// of its last clip, locator, automation or loop.
+pub const GO_TO_END: CommandId = CommandId::new("transport.go_to_end");
 /// Loops the selection, or else turns looping over the loop region on or
 /// off.
 pub const TOGGLE_LOOP: CommandId = CommandId::new("transport.toggle_loop");
@@ -63,15 +66,21 @@ type Handler = fn(&mut Context<'_>);
 
 /// The transport commands that take no arguments, with their titles and
 /// what they run.
-const COMMANDS: [(CommandId, &str, Handler); 10] = [
+const COMMANDS: [(CommandId, &str, Handler); 11] = [
     (PLAY_STOP, "Play/Stop", play_stop),
-    (PLAY, "Play", |ctx| ctx.transport.play()),
+    (PLAY, "Play", |ctx| {
+        start(ctx);
+        ctx.transport.play();
+    }),
     (STOP, "Stop", |ctx| ctx.transport.stop()),
     (RECORD, "Record", record),
     (CAPTURE, "Capture", |ctx| {
         ctx.requests.push(Request::Capture)
     }),
-    (GO_TO_START, "Go to Start", |ctx| jump(ctx, Beats::ZERO)),
+    (GO_TO_START, "Go to Start", |ctx| go_to(ctx, Beats::ZERO)),
+    (GO_TO_END, "Go to End", |ctx| {
+        go_to(ctx, crate::navigation::song_end(ctx.document.project()))
+    }),
     (TOGGLE_LOOP, "Toggle Loop", toggle_loop),
     (TOGGLE_METRONOME, "Toggle Metronome", toggle_metronome),
     (TEMPO_UP, "Tempo Up", |ctx| {
@@ -175,6 +184,31 @@ pub fn jump(ctx: &mut Context<'_>, at: Beats) {
     ctx.transport.locate(at);
 }
 
+/// Moves the start marker and the playhead to `at`, scrolling the
+/// arrangement there while stopped, if it's out of sight. While the song
+/// plays, Follow shows it.
+fn go_to(ctx: &mut Context<'_>, at: Beats) {
+    jump(ctx, at);
+    if ctx.transport.is_playing() {
+        return;
+    }
+    let editor = ctx.document.editor_mut();
+    if !editor.viewport.visible().contains(at) {
+        let panel = crate::navigation::Panel::Arrangement;
+        editor.navigate(panel, crate::navigation::Record::Step, false, |editor| {
+            editor.viewport.follow(at);
+        });
+    }
+}
+
+/// Lets Follow follow the playhead again everywhere, as the song starts
+/// playing.
+fn start(ctx: &mut Context<'_>) {
+    if !ctx.transport.is_playing() {
+        ctx.document.editor_mut().navigation.resume_all();
+    }
+}
+
 fn play_stop(ctx: &mut Context<'_>) {
     if ctx.transport.is_playing() {
         ctx.transport.stop();
@@ -190,6 +224,7 @@ fn play(ctx: &mut Context<'_>) {
     if editor.behaviour.play_from == PlayFrom::StartMarker {
         ctx.transport.locate(editor.start_marker);
     }
+    start(ctx);
     ctx.transport.play();
 }
 

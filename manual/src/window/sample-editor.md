@@ -98,13 +98,17 @@ changes it ([The mouse](../customising/mouse.md)):
 | The lane's line | Click; drag | Adds a point on the line; moves that stretch of the line, with its points, up or down, or on a lane of steps, that step |
 | A point on the lane | Click; drag; Alt-drag | Deletes the point; moves it, on the grid and between the points either side; moves it off the grid |
 | The rulers | Click; drag | Puts the start marker and the playhead there; zooms |
+| | Double-click | Zooms to the selected markers, or with none selected, to the whole clip |
 | Anywhere | Wheel; Ctrl-wheel | Scrolls sideways; zooms around the pointer |
 
 A marker can't pass the markers either side, nor squeeze or spread the
 audio between them past 5 or 999 BPM. Alt keeps any drag that snaps to
 the grid off it while it's held, from whenever it's pressed: moving
 markers, selecting time, and the lane's points and drawing. Escape cancels
-a drag.
+a drag. A drag along the waveform held at its left or right edge scrolls
+it. W, X and Shift+X fit the clip and step back and forward through the
+Sample Editor's own history of views ([Getting
+around](arrangement.md#getting-around)).
 
 ## The keys
 

@@ -1508,6 +1508,7 @@ fn examples() -> Vec<Example> {
         leaves(transport::RESET_DROPOUTS, bare),
         leaves(mixer::CLEAR_PEAKS, bare),
         leaves(transport::GO_TO_START, bare),
+        leaves(transport::GO_TO_END, bare),
         leaves(transport::LOCATE, |_| {
             Some(Args::new().with("at", Beats::new(8)))
         }),
@@ -1596,6 +1597,15 @@ fn examples() -> Vec<Example> {
         leaves(view::SET_TRACK_HEIGHT, |_| {
             Some(Args::new().with("master", true).with("height", 120.0))
         }),
+        // Every track's, as part of a gesture.
+        leaves(view::SET_TRACK_HEIGHT, |_| {
+            Some(
+                Args::new()
+                    .with("all", true)
+                    .with("height", 90.0)
+                    .with("history", "gesture"),
+            )
+        }),
         leaves(view::SET_VIEWPORT, |_| {
             Some(
                 Args::new()
@@ -1625,6 +1635,40 @@ fn examples() -> Vec<Example> {
         leaves(view::WIDEN_GRID, bare),
         leaves(view::ZOOM_IN, bare),
         leaves(view::ZOOM_OUT, bare),
+        // After a zoom, back, and forward again after going back.
+        leaves(view::ZOOM_BACK, |s| {
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::ZOOM_FORWARD, |s| {
+            s.run(&view::ZOOM_IN);
+            s.run(&view::ZOOM_BACK);
+            Some(Args::new())
+        }),
+        leaves(view::FIT_SONG_WIDTH, bare),
+        leaves(view::FIT_TRACK_HEIGHTS, bare),
+        leaves(view::TRACKS_TALLER, |s| {
+            let track = find_track(s, |_| true)?.id;
+            s.select_tracks(&[track]);
+            Some(Args::new())
+        }),
+        leaves(view::TRACKS_SHORTER, |s| {
+            let track = find_track(s, |_| true)?.id;
+            s.select_tracks(&[track]);
+            Some(Args::new())
+        }),
+        leaves(view::RESET_TRACK_HEIGHT, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(Args::new().with("track", track))
+        }),
+        // Every track's.
+        leaves(view::RESET_TRACK_HEIGHT, |_| {
+            Some(Args::new().with("all", true))
+        }),
+        leaves(view::SCROLL_TO_PLAYHEAD, bare),
+        leaves(view::SET_LANE_SIZES, |_| {
+            Some(Args::new().with("height", 400.0).with("track", 72.0))
+        }),
         leaves(view::ZOOM_TO_SELECTION, clip_selected),
         // The markers selected in the Sample Editor.
         leaves(view::ZOOM_TO_SELECTION, marker_selected),

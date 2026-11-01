@@ -35,6 +35,7 @@ use egui::{
     RichText, Role, ScrollArea, Sense, SetOpenCommand, Ui, WidgetInfo, pos2, vec2,
 };
 use musicable_commands::editor::{Grid, Viewport};
+use musicable_commands::navigation::{Lanes, Record};
 use musicable_commands::{
     Args, CommandId, Editor, Modifiers, arrange, automation, edit, locator, notes, param_text,
     take as takes, transport, view as views, warp,
@@ -50,6 +51,7 @@ use crate::browser::{Destination, Dragged};
 use crate::devices::describe;
 use crate::mixer::{decibels, pan_text};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
+use crate::navigate::{self, Wheeling};
 use crate::parts::{Parts, TRACK_HEADER};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
@@ -65,6 +67,14 @@ const ZOOM_SPEED: f32 = 0.005;
 /// more, they scroll on their own.
 const MASTER_SHARE: f32 = 0.5;
 const SCRUB_ZOOM_SPEED: f32 = 0.01;
+/// How much a point of the wheel makes tracks taller or shorter: their
+/// height changes by `e` to the power of this many points. Finer than the
+/// zoom, as Live's Alt and the wheel is too coarse for some.
+const HEIGHT_SPEED: f32 = 0.003;
+/// How near one of the behaviour's track sizes a dragged edge snaps to it,
+/// when they snap, in points.
+const HEIGHT_SNAP: f32 = 6.0;
+
 /// The most points an automation lane names for screen readers, of those
 /// in sight. A lane drawn freely can have thousands.
 const MAX_NAMED_POINTS: usize = 64;
@@ -79,9 +89,12 @@ pub(crate) struct Arrangement {
     landed: Option<Plan>,
     /// What the open context menu was opened on.
     menu: Option<Spot>,
-    /// Set when the user scrolls away from the playhead while it plays, so
-    /// Follow doesn't scroll back until the playhead is in sight again.
-    follow_paused: bool,
+    /// The wheel's gesture, while it lasts.
+    wheeling: Wheeling,
+    /// Where what's dragged from the browser or the devices panel came
+    /// into the lanes, which it scrolls at the edges it goes towards from
+    /// there.
+    entered: Option<Pos2>,
     /// How far the master's row and lanes are scrolled up, when they don't
     /// all fit.
     master_scroll: f32,
@@ -268,8 +281,12 @@ struct Drag {
     to: Pos2,
     /// The clips a drag of clips moves.
     clips: Vec<ClipId>,
-    /// The viewport as the drag started.
+    /// The viewport as the drag started. Where the drag started in song
+    /// time is kept by it: the view can scroll under a drag.
     viewport: Viewport,
+    /// The track nearest where it started, by its place, for a time
+    /// selection started under the tracks.
+    row: Option<usize>,
     /// The height of the track, or of the master's row, whose edge is
     /// dragged, as the drag started.
     height: f32,
@@ -277,6 +294,14 @@ struct Drag {
     sent: Option<Plan>,
     /// What a drag that draws automation drew so far.
     drawn: Drawn,
+}
+
+impl Drag {
+    /// The song position where it started, unsnapped, for lanes whose left
+    /// edge is at `left`.
+    fn origin(&self, left: f32) -> Beats {
+        self.viewport.beats_at(self.from.x - left)
+    }
 }
 
 /// What a drag drew on an automation lane: a value for each step of the
@@ -287,8 +312,9 @@ struct Drawn {
     /// The values, and whether each holds for a step of the grid: a drag
     /// goes off the grid and back as Alt is pressed and let go.
     values: BTreeMap<Beats, (f64, bool)>,
-    /// Where the pointer was when it last drew.
-    last: Option<Pos2>,
+    /// Where the pointer was when it last drew, and where the view started
+    /// then, so the view can scroll under a drag.
+    last: Option<(Pos2, Beats)>,
 }
 
 /// What a drag would do if it ended now.
@@ -338,11 +364,12 @@ enum Plan {
     },
     /// Scrolls and zooms. Drags ask for it as they go.
     Viewport(Viewport),
-    /// A track's height, or the master's row's. Drags ask for it as they
-    /// go.
+    /// A track's height, or the master's row's, or with `all` every
+    /// track's. Drags ask for it as they go.
     Height {
         chain: Chain,
         height: f32,
+        all: bool,
     },
     /// Copies a stretch of a take to its track.
     Comp {
@@ -850,9 +877,21 @@ impl Scene<'_> {
 
     /// The song positions where `drag` started and where the pointer is
     /// now, each snapped to the grid unless the drag kept off it then.
+    ///
+    /// Where it started is kept in song time, so the view can scroll under
+    /// the drag and leave it there.
     fn ends(&self, drag: &Drag) -> (Beats, Beats) {
-        let at = |x, free| self.snap(self.layout.beats_at(x), free).max(Beats::ZERO);
-        (at(drag.from.x, drag.started_free), at(drag.to.x, drag.free))
+        let at = |at, free| self.snap(at, free).max(Beats::ZERO);
+        let from = drag.origin(self.layout.lanes.left());
+        let to = self.layout.beats_at(drag.to.x);
+        (at(from, drag.started_free), at(to, drag.free))
+    }
+
+    /// How far the pointer has moved along the song since `drag` started,
+    /// counting how far the view scrolled under it.
+    fn moved(&self, drag: &Drag) -> Beats {
+        let (now, left) = (self.layout.viewport, self.layout.lanes.left());
+        navigate::moved(drag.from.x, drag.to.x, drag.viewport, now, left)
     }
 
     /// Where something dragged from the browser or the devices panel goes
@@ -1175,7 +1214,13 @@ impl Scene<'_> {
         };
         let layout = &self.layout;
         let spec = self.spec(param);
-        let (from, to) = (drag.drawn.last.unwrap_or(drag.to), drag.to);
+        let to = drag.to;
+        // Where the pointer last drew, where that is now the view has
+        // scrolled.
+        let from = match drag.drawn.last {
+            Some((last, start)) => pos2(last.x + layout.viewport.x_of(start), last.y),
+            None => to,
+        };
         // The value along the way from `from` to `to`, at `x`.
         let value = |x: f32| {
             let along = match to.x - from.x {
@@ -1212,7 +1257,7 @@ impl Scene<'_> {
             values.insert(beats(from.x), (value(from.x), false));
             values.insert(beats(to.x), (value(to.x), false));
         }
-        drag.drawn.last = Some(to);
+        drag.drawn.last = Some((to, layout.viewport.start));
     }
 
     /// The points of the automation of `param` once what `drawn` drew
@@ -1316,10 +1361,27 @@ impl Scene<'_> {
         })
     }
 
+    /// A track's height as a drag of its edge leaves it: within the
+    /// heights tracks have, and on the nearest of the behaviour's sizes, if
+    /// it's near one and they snap.
+    fn snap_height(&self, height: f32) -> f32 {
+        let height = height.clamp(views::MIN_TRACK_HEIGHT, views::MAX_TRACK_HEIGHT);
+        let behaviour = self.editor().behaviour;
+        if !behaviour.snap_track_heights {
+            return height;
+        }
+        let nearest = (behaviour.track_sizes().into_iter())
+            .min_by(|a, b| (a - height).abs().total_cmp(&(b - height).abs()));
+        match nearest {
+            Some(size) if (size - height).abs() <= HEIGHT_SNAP => size,
+            _ => height,
+        }
+    }
+
     fn plan(&self, drag: &Drag) -> Option<Plan> {
         let project = self.project();
         let layout = &self.layout;
-        let moved = layout.viewport.beats_in(drag.to.x - drag.from.x);
+        let moved = self.moved(drag);
         match (drag.action, drag.hit) {
             (
                 MouseAction::Move | MouseAction::Copy | MouseAction::MoveFree,
@@ -1400,7 +1462,7 @@ impl Scene<'_> {
                 let from = match hit.track() {
                     Some(track) => project.track_index(track)?,
                     None if hit.on_master() => master,
-                    None => layout.nearest_index(drag.from.y)?,
+                    None => drag.row?,
                 };
                 let to = match layout.in_master(drag.to.y) && layout.master_shown() {
                     true => master,
@@ -1467,19 +1529,23 @@ impl Scene<'_> {
                 let at = self.snap(locator.at + moved, drag.free).max(Beats::ZERO);
                 (at != locator.at).then_some(Plan::Locator { locator: id, at })
             }
-            (MouseAction::ResizeTrack, Hit::TrackEdge(track)) => Some(Plan::Height {
-                chain: Chain::Track(track),
-                height: (drag.height + drag.to.y - drag.from.y)
-                    .clamp(views::MIN_TRACK_HEIGHT, views::MAX_TRACK_HEIGHT),
-            }),
+            (MouseAction::ResizeTrack | MouseAction::ResizeAllTracks, Hit::TrackEdge(track)) => {
+                Some(Plan::Height {
+                    chain: Chain::Track(track),
+                    height: self.snap_height(drag.height + drag.to.y - drag.from.y),
+                    all: drag.action == MouseAction::ResizeAllTracks,
+                })
+            }
             // The master's top edge: up makes it taller, as far as the
             // master's part of the lanes goes.
-            (MouseAction::ResizeTrack, Hit::MasterEdge) => {
+            (MouseAction::ResizeTrack | MouseAction::ResizeAllTracks, Hit::MasterEdge) => {
                 let (least, most) = (views::MIN_TRACK_HEIGHT, views::MAX_TRACK_HEIGHT);
                 let room = master_room(layout.lanes, self.theme).clamp(least, most);
+                let height = self.snap_height(drag.height + drag.from.y - drag.to.y);
                 Some(Plan::Height {
                     chain: Chain::Master,
-                    height: (drag.height + drag.from.y - drag.to.y).clamp(least, room),
+                    height: height.clamp(least, room),
+                    all: false,
                 })
             }
             (MouseAction::Comp | MouseAction::CompFree, Hit::Take { track, take, .. }) => {
@@ -1798,18 +1864,8 @@ fn send(actions: &mut Vec<Action>, plan: &Plan) {
             }
             run(actions, edit::SELECT_TIME, args);
         }
-        Plan::Viewport(viewport) => set_viewport(actions, viewport),
-        Plan::Height { chain, height } => {
-            let args = match chain {
-                Chain::Track(track) => Args::new().with("track", *track),
-                Chain::Master => Args::new().with("master", true),
-            };
-            run(
-                actions,
-                views::SET_TRACK_HEIGHT,
-                args.with("height", *height),
-            );
-        }
+        Plan::Viewport(viewport) => set_viewport(actions, viewport, Record::Step),
+        Plan::Height { .. } => send_height(actions, plan, Record::Step),
         Plan::Comp {
             take, start, end, ..
         } => {
@@ -1831,12 +1887,37 @@ fn send(actions: &mut Vec<Action>, plan: &Plan) {
     }
 }
 
-fn set_viewport(actions: &mut Vec<Action>, viewport: &Viewport) {
+/// Asks the app for `plan`, part of a drag that goes on: a drag of the ruler
+/// or of a track's edge is one step of the view's history, once it ends.
+fn send_going(actions: &mut Vec<Action>, plan: &Plan) {
+    match plan {
+        Plan::Viewport(viewport) => set_viewport(actions, viewport, Record::Gesture),
+        Plan::Height { .. } => send_height(actions, plan, Record::Gesture),
+        plan => send(actions, plan),
+    }
+}
+
+/// Asks the app for the height `plan` gives, counting it as `record` says.
+fn send_height(actions: &mut Vec<Action>, plan: &Plan, record: Record) {
+    let Plan::Height { chain, height, all } = plan else {
+        return;
+    };
+    let args = match (chain, all) {
+        (_, true) => Args::new().with("all", true),
+        (Chain::Track(track), _) => Args::new().with("track", *track),
+        (Chain::Master, _) => Args::new().with("master", true),
+    };
+    let args = args.with("height", *height).with("history", record.name());
+    run(actions, views::SET_TRACK_HEIGHT, args);
+}
+
+fn set_viewport(actions: &mut Vec<Action>, viewport: &Viewport, record: Record) {
     let args = Args::new()
         .with("start", viewport.start)
         .with("zoom", viewport.zoom)
         .with("top", viewport.top)
-        .with("width", viewport.width);
+        .with("width", viewport.width)
+        .with("history", record.name());
     run(actions, views::SET_VIEWPORT, args);
 }
 
@@ -1910,11 +1991,20 @@ impl Arrangement {
         ] {
             self.respond(ui, &scene, response, area, actions);
         }
-        self.wheel(ui, &scene, &mut viewport);
-        self.follow(&scene, &mut viewport);
-        if viewport != editor.viewport {
-            set_viewport(actions, &viewport);
+        let wheeled = self.wheel(ui, &scene, &mut viewport, actions);
+        self.edge_scroll(ui, &scene, &mut viewport);
+        let followed = navigate::follow(
+            &view.playback,
+            editor.follow,
+            editor.navigation.arrangement.suspended,
+            self.drag.is_some() || wheeled,
+            &mut viewport,
+        );
+        let (record, force) = self.wheeling.record(ui, wheeled, followed);
+        if viewport != editor.viewport || force {
+            set_viewport(actions, &viewport, record);
         }
+        self.lane_sizes(&scene, actions);
         if viewport != editor.viewport || self.master_scroll != master_scroll {
             let scroll = self.master_scroll;
             scene.layout = Layout::new(rect, theme, view.project, editor, viewport, scroll);
@@ -2048,13 +2138,16 @@ impl Arrangement {
             // Selections, scrolling and heights change as the drag goes.
             if matches!(
                 drag.action,
-                MouseAction::SelectTime | MouseAction::ScrubZoom | MouseAction::ResizeTrack
+                MouseAction::SelectTime
+                    | MouseAction::ScrubZoom
+                    | MouseAction::ResizeTrack
+                    | MouseAction::ResizeAllTracks
             ) {
                 let plan = scene.plan(drag);
                 if plan != drag.sent
                     && let Some(plan) = &plan
                 {
-                    send(actions, plan);
+                    send_going(actions, plan);
                 }
                 drag.sent = plan;
             }
@@ -2240,6 +2333,24 @@ impl Arrangement {
             (MouseAction::Rename, Hit::Header(track)) => {
                 run(actions, edit::RENAME, Args::new().with("track", track));
             }
+            (MouseAction::ResetHeight, Hit::TrackEdge(track)) => {
+                let args = Args::new().with("track", track);
+                run(actions, views::RESET_TRACK_HEIGHT, args);
+            }
+            (MouseAction::ResetHeight, Hit::MasterEdge) => {
+                let args = Args::new().with("master", true);
+                run(actions, views::RESET_TRACK_HEIGHT, args);
+            }
+            // The selection, or with nothing selected the whole song.
+            (MouseAction::ZoomToFit, _) => {
+                let focus = Args::new().with("panel", musicable_commands::panel::ARRANGEMENT);
+                run(actions, views::SET_FOCUS, focus);
+                let zoom = match scene.editor().selected_range(project) {
+                    Some(_) => views::ZOOM_TO_SELECTION,
+                    None => views::FIT_SONG_WIDTH,
+                };
+                actions.push(Action::Run(zoom));
+            }
             (MouseAction::Rename, Hit::Locator(id)) => {
                 run(actions, edit::RENAME, Args::new().with("locator", id));
             }
@@ -2298,6 +2409,7 @@ impl Arrangement {
             to: from,
             clips: Vec::new(),
             viewport: scene.layout.viewport,
+            row: scene.layout.nearest_index(from.y),
             height: 0.0,
             sent: None,
             drawn: Drawn::default(),
@@ -2320,10 +2432,10 @@ impl Arrangement {
                     vec![clip]
                 };
             }
-            (MouseAction::ResizeTrack, Hit::TrackEdge(track)) => {
+            (MouseAction::ResizeTrack | MouseAction::ResizeAllTracks, Hit::TrackEdge(track)) => {
                 drag.height = scene.layout.row(track).map_or(0.0, |row| row.height);
             }
-            (MouseAction::ResizeTrack, Hit::MasterEdge) => {
+            (MouseAction::ResizeTrack | MouseAction::ResizeAllTracks, Hit::MasterEdge) => {
                 drag.height = scene.layout.master.height;
             }
             (MouseAction::Draw | MouseAction::DrawFree, _) => scene.draw(&mut drag),
@@ -2353,12 +2465,9 @@ impl Arrangement {
                     Args::new().with("at", *start),
                 );
             }
-            // These were asked for as the drag went.
-            Plan::Viewport(_) | Plan::Height { .. } => {
-                if drag.sent.as_ref() != Some(&plan) {
-                    send(actions, &plan);
-                }
-            }
+            // These were asked for as the drag went: the last ends the
+            // gesture, a step of the view's history.
+            Plan::Viewport(_) | Plan::Height { .. } => send(actions, &plan),
             _ => send(actions, &plan),
         }
         Some(plan)
@@ -2413,18 +2522,26 @@ impl Arrangement {
         buttons
     }
 
-    /// Scrolls and zooms with the wheel, over the tracks and the ruler. Over
-    /// the master's part, when its lanes don't all fit, it scrolls them.
-    fn wheel(&mut self, ui: &Ui, scene: &Scene<'_>, viewport: &mut Viewport) {
+    /// Scrolls and zooms with the wheel, over the tracks and the ruler, and
+    /// makes tracks taller or shorter. Over the master's part, when its
+    /// lanes don't all fit, it scrolls them. Returns whether it changed the
+    /// view.
+    fn wheel(
+        &mut self,
+        ui: &Ui,
+        scene: &Scene<'_>,
+        viewport: &mut Viewport,
+        actions: &mut Vec<Action>,
+    ) -> bool {
         let layout = &scene.layout;
         let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
-            return;
+            return false;
         };
         let over = [layout.lanes, layout.ruler, layout.headers]
             .into_iter()
             .any(|rect| ui.rect_contains_pointer(rect));
         if !over || !rect_union(layout).contains(pos) {
-            return;
+            return false;
         }
         let line = ui.ctx().options(|o| o.input_options.line_scroll_speed);
         let x = pos.x.clamp(layout.lanes.left(), layout.lanes.right());
@@ -2432,6 +2549,7 @@ impl Arrangement {
         let master = layout.in_master(pos.y) && layout.master_overflow > 0.0;
         let mut wheel = Vec::new();
         let before = *viewport;
+        let master_scroll = self.master_scroll;
         ui.input(|i| {
             for event in &i.events {
                 match event {
@@ -2447,6 +2565,7 @@ impl Arrangement {
                 }
             }
         });
+        let mut taller = 0.0;
         for (unit, delta, mods) in wheel {
             let delta = match unit {
                 MouseWheelUnit::Point => delta,
@@ -2469,33 +2588,143 @@ impl Arrangement {
                     let factor = f64::from(((delta.x + delta.y) * ZOOM_SPEED).exp());
                     viewport.zoom_around(factor, at);
                 }
+                Some(MouseAction::TrackHeight) => taller += delta.x + delta.y,
                 _ => {}
             }
         }
+        let resized = taller != 0.0 && self.wheel_heights(scene, pos, taller, actions);
         viewport.start = viewport.start.max(Beats::ZERO);
         let tracks = layout.tracks_part(layout.lanes.x_range());
         let lowest = lowest_top(layout.content, scene.theme, tracks);
         viewport.top = viewport.top.clamp(0.0, lowest);
         self.master_scroll = self.master_scroll.clamp(0.0, layout.master_overflow);
-        let sideways = viewport.start != before.start || viewport.zoom != before.zoom;
-        if sideways && scene.view.playback.playing {
-            self.follow_paused = true;
+        resized || *viewport != before || self.master_scroll != master_scroll
+    }
+
+    /// Makes the track under `pos` taller, by `points` of the wheel, or
+    /// shorter, or the selected tracks if it's one of them: the master's
+    /// row on its own. Returns whether there was one.
+    fn wheel_heights(
+        &self,
+        scene: &Scene<'_>,
+        pos: Pos2,
+        points: f32,
+        actions: &mut Vec<Action>,
+    ) -> bool {
+        let layout = &scene.layout;
+        let master = layout.master;
+        let under = match layout.row_at(pos.y) {
+            Some(row) => Chain::Track(row.id),
+            None if layout.in_master(pos.y) && (master.top..master.bottom()).contains(&pos.y) => {
+                Chain::Master
+            }
+            None => return false,
+        };
+        let selected = &scene.editor().selection.tracks;
+        let chains: Vec<Chain> = match under {
+            Chain::Track(id) if selected.contains(&id) => {
+                selected.iter().map(|&id| Chain::Track(id)).collect()
+            }
+            chain => vec![chain],
+        };
+        let factor = (points * HEIGHT_SPEED).exp();
+        for chain in chains {
+            let height = match chain {
+                Chain::Master => master.height,
+                Chain::Track(id) => match layout.row(id) {
+                    Some(row) => row.height,
+                    None => continue,
+                },
+            };
+            let most = match chain {
+                Chain::Master => master_room(layout.lanes, scene.theme),
+                Chain::Track(_) => views::MAX_TRACK_HEIGHT,
+            };
+            let height =
+                (height * factor).clamp(views::MIN_TRACK_HEIGHT, most.max(views::MIN_TRACK_HEIGHT));
+            let plan = Plan::Height {
+                chain,
+                height,
+                all: false,
+            };
+            send_height(actions, &plan, Record::Gesture);
+        }
+        true
+    }
+
+    /// Scrolls the lanes while a drag is held at their edge, by time, so a
+    /// still pointer scrolls as fast at any frame rate: sideways for the
+    /// drags that go along the song, and down and up for those that go
+    /// across tracks, and for what's dragged from the browser or the
+    /// devices panel.
+    fn edge_scroll(&mut self, ui: &Ui, scene: &Scene<'_>, viewport: &mut Viewport) {
+        let layout = &scene.layout;
+        let (from, pos, sideways, down, master) = match &self.drag {
+            Some(drag) => {
+                let (sideways, down) = edge_scrolls(drag.action);
+                let master = layout.in_master(drag.from.y) && drag.area != Area::Ruler;
+                (Some(drag.from), drag.to, sideways, down, master)
+            }
+            None if egui::DragAndDrop::payload::<Dragged>(ui.ctx()).is_some() => {
+                match scene.pointer.filter(|&pos| layout.lanes.contains(pos)) {
+                    Some(pos) => {
+                        let from = *self.entered.get_or_insert(pos);
+                        (Some(from), pos, true, true, false)
+                    }
+                    None => {
+                        self.entered = None;
+                        return;
+                    }
+                }
+            }
+            None => {
+                self.entered = None;
+                return;
+            }
+        };
+        let lanes = layout.lanes;
+        if sideways {
+            navigate::edge_scroll_sideways(ui, lanes, from.map(|f| f.x), pos.x, viewport);
+        }
+        if down {
+            let part = match master {
+                true => layout.master_part(lanes.x_range()),
+                false => layout.tracks_part(lanes.x_range()),
+            };
+            let from = from.map(|f| f.y);
+            match master {
+                true => {
+                    let lowest = layout.master_overflow;
+                    let scroll = &mut self.master_scroll;
+                    navigate::edge_scroll_down(ui, part, from, pos.y, scroll, lowest);
+                }
+                false => {
+                    let lowest = lowest_top(layout.content, scene.theme, part);
+                    let top = &mut viewport.top;
+                    navigate::edge_scroll_down(ui, part, from, pos.y, top, lowest);
+                }
+            }
         }
     }
 
-    /// Scrolls to keep the playhead in sight while it plays, a page at a
-    /// time, if Follow is on.
-    fn follow(&mut self, scene: &Scene<'_>, viewport: &mut Viewport) {
-        let playback = scene.view.playback;
-        if !playback.playing || !scene.editor().follow {
-            self.follow_paused = false;
-            return;
-        }
-        let in_sight = viewport.visible().contains(playback.playhead);
-        if self.follow_paused {
-            self.follow_paused = !in_sight;
-        } else if self.drag.is_none() {
-            viewport.follow(playback.playhead);
+    /// Tells the commands the sizes the lanes are drawn at, when they
+    /// change, for fitting tracks to the arrangement's height.
+    fn lane_sizes(&self, scene: &Scene<'_>, actions: &mut Vec<Action>) {
+        let layout = &scene.layout;
+        let theme = scene.theme;
+        let lanes = Lanes {
+            height: layout.master_top - layout.lanes.top(),
+            track: theme.track_height,
+            take: theme.take_height,
+            automation: theme.automation_height,
+        };
+        if lanes != scene.editor().lanes {
+            let args = Args::new()
+                .with("height", f64::from(lanes.height))
+                .with("track", f64::from(lanes.track))
+                .with("take", f64::from(lanes.take))
+                .with("automation", f64::from(lanes.automation));
+            run(actions, views::SET_LANE_SIZES, args);
         }
     }
 
@@ -2588,6 +2817,31 @@ impl Arrangement {
             _ => (None, None),
         };
         actions.push(Action::DropFiles { files, track, at });
+    }
+}
+
+/// Whether a drag doing `action` scrolls the lanes at their edges: sideways,
+/// and down and up.
+fn edge_scrolls(action: MouseAction) -> (bool, bool) {
+    use MouseAction as A;
+    match action {
+        A::Move | A::Copy | A::MoveFree | A::SelectTime => (true, true),
+        A::Trim
+        | A::TrimFree
+        | A::Stretch
+        | A::Fade
+        | A::DrawLoop
+        | A::MoveLoop
+        | A::ResizeLoop
+        | A::MoveLocator
+        | A::Comp
+        | A::CompFree
+        | A::MovePoint
+        | A::MovePointFree
+        | A::MoveSegment
+        | A::Draw
+        | A::DrawFree => (true, false),
+        _ => (false, false),
     }
 }
 
