@@ -4,6 +4,7 @@
 use musicable_mcp::Memory;
 
 /// Bytes in a megabyte, as the tools give memory.
+#[cfg(any(windows, target_os = "linux"))]
 const MB: f64 = 1_000_000.0;
 
 /// How much memory this process uses, where the system says.
