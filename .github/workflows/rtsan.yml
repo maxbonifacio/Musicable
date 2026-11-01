@@ -6,7 +6,7 @@ name: RealtimeSanitizer
 # allocation checker can't, such as a plugin's C or C++ allocations.
 # See crates/engine/src/rt.rs. RTSan needs nightly Rust, so the job pins one
 # and a new nightly can't break it on its own. It runs on Linux, the cheapest
-# runner.
+# runner, or our own when RUNNER_LINUX names it (docs/ci-runners.md).
 
 on:
   push:
@@ -34,6 +34,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its run still going. Each push to
+# main gets a group of its own, so every merge is checked.
+concurrency:
+  group: rtsan-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.run_id) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   NIGHTLY: nightly-2026-10-22
@@ -41,7 +47,7 @@ env:
 jobs:
   rtsan:
     name: RealtimeSanitizer (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ !github.event.pull_request.head.repo.fork && vars.RUNNER_LINUX || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

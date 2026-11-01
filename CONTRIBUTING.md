@@ -87,7 +87,8 @@ cargo test --workspace
 [The manual](manual) is for people making music with Musicable, and
 [docs](docs) for people working on it. It's an
 [mdBook](https://rust-lang.github.io/mdBook/), which CI publishes to
-<https://maxbonifacio.github.io/Musicable/> from main.
+<https://maxbonifacio.github.io/Musicable/> from main while the repository
+is public.
 
 - **A change people can see changes the manual in the same pull request**:
   a command, a control, a gesture, a menu, a setting, an option of the
@@ -206,4 +207,5 @@ numbers. They measure up to one thread per physical core, or as many as the
 `MUSICABLE_BENCH_THREADS` environment variable says. CI runs both on Windows
 when the engine changes, with one thread per logical processor, and puts the
 numbers in the run's summary, but hosted runners are small shared machines:
-treat their numbers as rough.
+treat their numbers as rough. Which machines run CI, ours or GitHub's, is in
+[docs/ci-runners.md](docs/ci-runners.md).
