@@ -44,6 +44,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     note_outputs,
     always_live,
     view,
+    note_timings,
 ];
 
 /// Upgrades `document`, a file of version `from`, to [`VERSION`].
@@ -493,6 +494,41 @@ fn always_live(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     for (i, track) in tracks.into_iter().flatten().enumerate() {
         if let Some(track) = track.as_object_mut() {
             add(track, &format!("tracks[{i}]"), "always_live", json!(false))?;
+        }
+    }
+    Ok(())
+}
+
+/// Version 28 added when the notes a plugin plays come, against its
+/// latency, and whether someone chose it. Version 27 plugins take what's
+/// assumed for their kind, as the app has it until it knows better: an
+/// instrument's as it plays them, and an effect's with its sound.
+fn note_timings(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    let tracks = file.get_mut("tracks").and_then(Value::as_array_mut);
+    for (i, track) in tracks.into_iter().flatten().enumerate() {
+        let path = format!("tracks[{i}].devices");
+        assumed_note_timing(track.get_mut("devices"), &path)?;
+    }
+    let master = file.get_mut("master").and_then(|m| m.get_mut("devices"));
+    assumed_note_timing(master, "master.devices")
+}
+
+/// Gives each plugin in `devices`, a list at `path`, the note timing
+/// assumed for its kind, not chosen.
+fn assumed_note_timing(devices: Option<&mut Value>, path: &str) -> Result<(), Invalid> {
+    let devices = devices.and_then(Value::as_array_mut);
+    for (j, device) in devices.into_iter().flatten().enumerate() {
+        let plugin = (device.get_mut("kind"))
+            .and_then(|kind| kind.get_mut("plugin"))
+            .and_then(Value::as_object_mut);
+        if let Some(plugin) = plugin {
+            let timing = match plugin.get("kind").and_then(Value::as_str) {
+                Some("instrument") => "as_played",
+                _ => "with_sound",
+            };
+            let path = format!("{path}[{j}].kind.plugin");
+            add(plugin, &path, "note_timing", json!(timing))?;
+            add(plugin, &path, "note_timing_chosen", json!(false))?;
         }
     }
     Ok(())
@@ -1198,6 +1234,42 @@ mod tests {
             run(&STEPS[..26], &mut file, 26).unwrap_err().path,
             "view",
             "a view in a version 26 file"
+        );
+    }
+
+    #[test]
+    fn version_27_plugins_take_the_note_timing_assumed_for_their_kind() {
+        let synth = json!({"kind": {"plugin": {"kind": "instrument"}}});
+        let arp = json!({"kind": {"plugin": {"kind": "midi_effect"}}});
+        let native = json!({"kind": {"native": {"kind": "eq"}}});
+        let mut file = json!({
+            "version": 27,
+            "tracks": [{"devices": [arp, synth, native.clone()]}],
+            "master": {"devices": [{"kind": {"plugin": {"kind": "audio_effect"}}}]},
+        });
+        run(&STEPS[..27], &mut file, 27).unwrap();
+        let timing = |device: &Value| {
+            let plugin = &device["kind"]["plugin"];
+            (
+                plugin["note_timing"].clone(),
+                plugin["note_timing_chosen"].clone(),
+            )
+        };
+        let devices = &file["tracks"][0]["devices"];
+        assert_eq!(timing(&devices[0]), (json!("with_sound"), json!(false)));
+        assert_eq!(timing(&devices[1]), (json!("as_played"), json!(false)));
+        assert_eq!(devices[2], native);
+        let master = &file["master"]["devices"][0];
+        assert_eq!(timing(master), (json!("with_sound"), json!(false)));
+        assert_eq!(file["version"], json!(28));
+        let mut file = json!({
+            "version": 27,
+            "master": {"devices": [{"kind": {"plugin": {"note_timing": "as_played"}}}]},
+        });
+        assert_eq!(
+            run(&STEPS[..27], &mut file, 27).unwrap_err().path,
+            "master.devices[0].kind.plugin.note_timing",
+            "a plugin's note timing in a version 27 file"
         );
     }
 

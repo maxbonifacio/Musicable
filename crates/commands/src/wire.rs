@@ -966,6 +966,8 @@ mod tests {
             kind: PluginKind::AudioEffect,
             inputs,
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         });
         let index = m.project().devices(chain).unwrap().len();

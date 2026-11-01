@@ -105,26 +105,31 @@ pub fn child(path: &Path) {
 
 /// Prints a result for [`scan_isolated`] to read.
 fn print(outcome: &Outcome) {
-    let json = serde_json::to_string(outcome).unwrap_or_default();
-    // Straight to the file: unlike `println!`, which a test harness can
-    // capture.
-    let mut stdout = io::stdout().lock();
-    let _ = writeln!(stdout, "\n{RESULT}{json}");
-    let _ = stdout.flush();
+    print_result(outcome);
 }
 
 /// Scans a library in a process of its own: `command` runs the scanning
 /// process, which calls [`child`] for the library. Gives up on it after
 /// `timeout`.
-pub fn scan_isolated(mut command: Command, timeout: Duration) -> Outcome {
+pub fn scan_isolated(command: Command, timeout: Duration) -> Outcome {
+    match run_isolated(command, timeout) {
+        Ok((out, status)) => outcome(&out, status, timeout),
+        Err(e) => Outcome::Crashed(format!("the scanner didn't start: {e}")),
+    }
+}
+
+/// Runs `command`, a scanning process, and gives back what it printed and
+/// how it exited, or `None` if it didn't within `timeout`, when it's
+/// stopped.
+pub(crate) fn run_isolated(
+    mut command: Command,
+    timeout: Duration,
+) -> io::Result<(Vec<u8>, Option<ExitStatus>)> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut process = match command.spawn() {
-        Ok(process) => process,
-        Err(e) => return Outcome::Crashed(format!("the scanner didn't start: {e}")),
-    };
+    let mut process = command.spawn()?;
     let (send, output) = mpsc::channel();
     if let Some(mut stdout) = process.stdout.take() {
         thread::spawn(move || {
@@ -150,18 +155,34 @@ pub fn scan_isolated(mut command: Command, timeout: Duration) -> Outcome {
     let out = output
         .recv_timeout(Duration::from_secs(2))
         .unwrap_or_default();
-    outcome(&out, status, timeout)
+    Ok((out, status))
+}
+
+/// The last result a scanning process printed whole: what follows
+/// [`RESULT`] on a line of `out`.
+pub(crate) fn last_result<T: serde::de::DeserializeOwned>(out: &[u8]) -> Option<T> {
+    String::from_utf8_lossy(out)
+        .lines()
+        .filter_map(|line| line.strip_prefix(RESULT))
+        .filter_map(|json| serde_json::from_str::<T>(json).ok())
+        .next_back()
+}
+
+/// Prints `result` for the app's scanning process to read, as
+/// [`last_result`] does.
+pub(crate) fn print_result(result: &impl Serialize) {
+    let json = serde_json::to_string(result).unwrap_or_default();
+    // Straight to the file: unlike `println!`, which a test harness can
+    // capture.
+    let mut stdout = io::stdout().lock();
+    let _ = writeln!(stdout, "\n{RESULT}{json}");
+    let _ = stdout.flush();
 }
 
 /// What the scanning process's output and exit say: the last result it
 /// printed whole.
 fn outcome(out: &[u8], status: Option<ExitStatus>, timeout: Duration) -> Outcome {
-    let found = String::from_utf8_lossy(out)
-        .lines()
-        .filter_map(|line| line.strip_prefix(RESULT))
-        .filter_map(|json| serde_json::from_str::<Outcome>(json).ok())
-        .next_back();
-    match (found, status) {
+    match (last_result(out), status) {
         (Some(outcome), _) => outcome,
         (None, Some(status)) => Outcome::Crashed(format!("it crashed the scanner ({status})")),
         (None, None) => Outcome::Crashed(format!(
@@ -364,7 +385,7 @@ impl ScanCache {
 
 /// When a library last changed, and how big it is. A bundle changes when
 /// its binary does, so the newest file in it counts.
-fn fingerprint(path: &Path) -> (u64, u64) {
+pub fn fingerprint(path: &Path) -> (u64, u64) {
     let since_1970 = |time: SystemTime| {
         time.duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos().min(u64::MAX.into()) as u64)

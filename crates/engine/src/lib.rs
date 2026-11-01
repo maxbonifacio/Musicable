@@ -70,7 +70,7 @@ pub use event::{
 pub use graph::{Controls, Graph, GraphError, Joint, NodeId, NodeKey, Notes, PreparedGraph};
 pub use load::{Load, LoadKey, NodeLoads};
 pub use meter::{Level, Meter, Meters};
-pub use midi::{MidiMessage, MidiMonitor, MidiNotes, NoteWire, Played};
+pub use midi::{MidiMessage, MidiMonitor, MidiNotes, NoteWire, Played, played_notes};
 pub use output_recording::OutputRecording;
 pub use parallel::{
     AheadWaker, PARTS, ParallelMonitor, ParallelOptions, ParallelRenderer, ParallelStats, Pipeline,
@@ -184,6 +184,18 @@ pub trait Node: Any + Send {
     /// [`made_notes`](Node::made_notes) as it renders. Called off the audio
     /// thread as the graph is built, before [`prepare`](Node::prepare).
     fn makes_notes(&mut self) {}
+
+    /// How many frames later than what comes into it the notes it plays
+    /// ([`play_notes`](Node::play_notes)) or makes as it renders
+    /// ([`made_notes`](Node::made_notes)) are: a plugin's latency, for one
+    /// whose notes come with its sound, as a MIDI effect that looks ahead
+    /// holds them back, and none for the rest. Delay compensation lines up
+    /// what those notes play with the rest of the graph, as it does a
+    /// node's sound ([`Graph::prepare`]). Asked after
+    /// [`prepare`](Node::prepare).
+    fn notes_latency(&self) -> usize {
+        0
+    }
 
     /// Sends the modulation the node makes for the block about to render,
     /// for a node that modulates other nodes' parameters

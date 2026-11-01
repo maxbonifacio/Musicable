@@ -1068,6 +1068,8 @@ mod tests {
             kind,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: crate::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: plugin::PluginSettings::default(),
         })
     }

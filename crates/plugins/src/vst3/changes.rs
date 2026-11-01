@@ -456,6 +456,8 @@ struct EventList {
     events: UnsafeCell<Vec<Event>>,
     /// Whether it's the plugin's, which keeps what the plugin adds.
     output: bool,
+    /// How many events the plugin added that there was no room for.
+    dropped: UnsafeCell<u64>,
 }
 
 // SAFETY: as for `InputList`.
@@ -470,6 +472,7 @@ impl Events {
             com: ComWrapper::new(EventList {
                 events: UnsafeCell::new(Vec::with_capacity(capacity)),
                 output,
+                dropped: UnsafeCell::new(0),
             }),
         }
     }
@@ -487,6 +490,13 @@ impl Events {
 
     pub(crate) fn clear(&mut self) {
         self.events().clear();
+    }
+
+    /// How many events the plugin added that there was no room for, since
+    /// this was last asked.
+    pub(crate) fn take_dropped(&mut self) -> u64 {
+        // SAFETY: `&mut self` is the host's turn.
+        std::mem::take(unsafe { &mut *self.com.dropped.get() })
     }
 
     /// The events in it, in the order they came.
@@ -537,6 +547,11 @@ impl IEventListTrait for EventList {
             (true, Some(event)) if events.len() < events.capacity() => {
                 events.push(*event);
                 kResultOk
+            }
+            (true, Some(_)) => {
+                // SAFETY: the plugin's turn.
+                unsafe { *self.dropped.get() += 1 };
+                kResultFalse
             }
             _ => kResultFalse,
         }
@@ -674,6 +689,9 @@ mod tests {
             assert_eq!(list.addEvent(&mut got), kResultFalse);
             assert_eq!(list.addEvent(ptr::null_mut()), kResultFalse);
         }
+        // What there was no room for is counted.
+        assert_eq!(output.take_dropped(), 1);
+        assert_eq!(output.take_dropped(), 0);
         let offsets: Vec<i32> = output.list().iter().map(|e| e.sampleOffset).collect();
         assert_eq!(offsets, [2]);
         output.clear();

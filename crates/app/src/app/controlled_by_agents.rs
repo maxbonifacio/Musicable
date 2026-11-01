@@ -488,6 +488,8 @@ fn agents_read_the_plugins_the_layout_and_the_meters() {
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     }));
     let missing_id = missing.id.0;
@@ -505,11 +507,13 @@ fn agents_read_the_plugins_the_layout_and_the_meters() {
         vendor: vendor.into(),
         kind,
         never_ahead: false,
+        note_timing: None,
     };
     window.state_mut().plugin_entries = vec![
         entry("Surge", "Surge", PluginKind::Instrument),
         PluginEntry {
             never_ahead: true,
+            note_timing: Some(musicable_model::plugin::NoteTiming::AsPlayed),
             ..entry("Delay", "Acme", PluginKind::AudioEffect)
         },
     ];
@@ -526,6 +530,7 @@ fn agents_read_the_plugins_the_layout_and_the_meters() {
             "vendor": "Acme",
             "kind": "audio_effect",
             "render_ahead": "never",
+            "note_timing": "as_played",
         }])
     );
 
@@ -1356,6 +1361,8 @@ fn agents_read_what_a_plugin_says_as_it_plays() {
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     }));
     let id = load.id;
@@ -1412,6 +1419,8 @@ fn agents_measure_a_devices_response() {
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings,
     }));
     let id = gain.id;

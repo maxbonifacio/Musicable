@@ -413,6 +413,7 @@ impl Instance {
             queue: &mut audio.to_main,
             voices: None,
             notes: None,
+            dropped: 0,
         };
         let out_events = events::output_list(&mut output);
         // SAFETY: on the main thread while inactive, or on the audio thread

@@ -309,20 +309,26 @@ pub(crate) struct WriterRing {
 }
 
 /// A note a writer's note record played, with the engine time it played
-/// at.
-type TimedNote = (u64, NodeEventKind);
+/// at and how late its record's notes are
+/// ([`PreparedGraph::record_notes_late`]), or with no note, that they're
+/// that late from then on.
+type TimedNote = (u64, u64, Option<NodeEventKind>);
 
 /// The ahead side's end of a writer's queues.
 pub(crate) struct CoreWriter {
     key: NodeKey,
     ring: Arc<WriterRing>,
     notes: Producer<TimedNote>,
+    /// How late it last said its notes are.
+    late: u64,
 }
 
 /// The live side's end.
 pub(crate) struct LiveQueue {
     ring: Arc<WriterRing>,
     notes: Consumer<TimedNote>,
+    /// How late the notes it last played were.
+    late: u64,
 }
 
 /// The two ends of the queues for the writer with `key`, for an engine with
@@ -338,10 +344,12 @@ pub(crate) fn writer_queues(key: NodeKey, config: EngineConfig) -> (CoreWriter, 
         key,
         ring: ring.clone(),
         notes,
+        late: 0,
     };
     let live = LiveQueue {
         ring,
         notes: notes_rx,
+        late: 0,
     };
     (core, live)
 }
@@ -388,7 +396,9 @@ impl LiveQueue {
 
     /// Hands `writer` the notes the ahead side's note record played in the
     /// same frames, after [`play_sound`](Self::play_sound), using `notes`
-    /// for room: [`NOTES`](Self::NOTES) of them.
+    /// for room: [`NOTES`](Self::NOTES) of them. They go with how late they
+    /// are, as the live side hands its own, in a stretch of their own from
+    /// where a graph that took over with another lateness started.
     pub(crate) fn play_notes(
         &mut self,
         writer: &mut dyn crate::TapWriter,
@@ -397,17 +407,29 @@ impl LiveQueue {
         notes: &mut Vec<NodeEvent>,
     ) {
         let end = time + frames as u64;
+        let mut from = time;
         notes.clear();
-        while let Ok(&(at, kind)) = self.notes.peek()
+        while let Ok(&(at, late, kind)) = self.notes.peek()
             && at < end
         {
             let _ = self.notes.pop();
-            if notes.len() < notes.capacity() {
-                let offset = at.saturating_sub(time) as usize;
+            let at = at.max(from);
+            if late != self.late {
+                if at > from {
+                    writer.write_notes(from, (at - from) as usize, notes, self.late);
+                    notes.clear();
+                    from = at;
+                }
+                self.late = late;
+            }
+            if let Some(kind) = kind
+                && notes.len() < notes.capacity()
+            {
+                let offset = (at - from) as usize;
                 notes.push(NodeEvent { offset, kind });
             }
         }
-        writer.write_notes(time, frames, notes);
+        writer.write_notes(from, (end - from) as usize, notes, self.late);
     }
 }
 
@@ -1233,7 +1255,8 @@ impl Core {
         let drain = old.as_deref().is_some_and(|old| old.turns_ahead(&graph));
         let halves = live.is_some() || old.as_deref().is_some_and(|old| !old.live_ids.is_empty());
         if let Some(old) = old.as_deref_mut() {
-            take_over(&mut graph, live.as_deref_mut(), old);
+            let dropped = take_over(&mut graph, live.as_deref_mut(), old);
+            self.counters.events_dropped.fetch_add(dropped, Relaxed);
         }
         // Its loads have all carried on, for the control thread to read,
         // unless the live side has some to carry on still.
@@ -1265,7 +1288,8 @@ impl Core {
     ) {
         if let Some(graph) = self.graph.as_deref_mut() {
             if let Some(old) = old {
-                take_over(graph, live, old);
+                let dropped = take_over(graph, live, old);
+                self.counters.events_dropped.fetch_add(dropped, Relaxed);
             }
             graph.loads.set_installed();
         }
@@ -1336,9 +1360,18 @@ fn keep(
     }
     let mut dropped = 0;
     for writer in writers {
+        let late = graph.own_record_notes_late(writer.key).unwrap_or(0);
+        // Said even in a block without notes, so the live side knows how
+        // far the notes have come.
+        if late != writer.late {
+            match writer.notes.push((start, late, None)) {
+                Ok(()) => writer.late = late,
+                Err(_) => dropped += 1,
+            }
+        }
         for note in graph.own_record_notes(writer.key).unwrap_or_default() {
             let at = start + note.offset as u64;
-            if writer.notes.push((at, note.kind)).is_err() {
+            if writer.notes.push((at, late, Some(note.kind))).is_err() {
                 dropped += 1;
             }
         }

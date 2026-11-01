@@ -376,6 +376,7 @@ fn plugin(name: &str, format: PluginFormat, id: &str, kind: PluginKind) -> Plugi
         vendor: "Example".to_owned(),
         kind,
         never_ahead: false,
+        note_timing: None,
     }
 }
 
@@ -622,6 +623,8 @@ fn a_device_saves_as_a_preset_with_the_name_typed() {
         kind: PluginKind::Instrument,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     }));
     project.track_mut(keys).unwrap().devices.push(synth.clone());

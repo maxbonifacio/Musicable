@@ -195,7 +195,11 @@ pub fn list() -> Vec<Tool> {
             "Get Project",
             "Reads the project: its file, the tempo map and time signatures, the loop, the \
              tracks with their mixer settings, devices and clips, and their modulators and \
-             routings if they have any, the master, the wires, each taking a tap's signal into a \
+             routings if they have any, with the ways notes come that the modulators can't hear, \
+             as a plugin they move makes them, in unheard_notes: a note wire's, or a MIDI \
+             track's own input's, with wire null, and through the other channel whose \
+             modulators it would close a loop with, if it would, the master, the wires, each taking a tap's \
+             signal into a \
              device's side input at a gain, or a MIDI track's notes into an instrument's or a \
              MIDI effect's note input, on a MIDI channel from 0 to 15 if it has one, the \
              locators, and which parameters are automated, each with its id. A wire's tap and \
@@ -229,7 +233,8 @@ pub fn list() -> Vec<Tool> {
              input, last, as wire.connect takes them. A plugin's says whether it loaded, why \
              it plays nothing if it doesn't, whether its window is open, and its readouts: \
              what its read-only parameters say now, such as Test Load's Position, the last \
-             song position it rendered. filter keeps the \
+             song position it rendered. A MIDI effect's, or a plugin's that plays notes out, \
+             has its note_timing, as device.set_note_timing takes it. filter keeps the \
              parameters whose names hold it, for a plugin with thousands.",
             object(
                 json!({
@@ -400,8 +405,9 @@ pub fn list() -> Vec<Tool> {
             GET_PLUGINS,
             "Get Plugins",
             "Lists the plugins installed, as the browser does, for device.add_plugin: each \
-             one's format, id, name, vendor, kind (instrument, midi_effect or audio_effect) \
-             and Render Ahead (auto, or never if it always renders live), and whether the \
+             one's format, id, name, vendor, kind (instrument, midi_effect or audio_effect), \
+             Render Ahead (auto, or never if it always renders live) and note timing (auto, or \
+             with_sound or as_played where it's marked), and whether the \
              plugins are being scanned. A filter keeps those whose names, vendors or ids \
              hold it.",
             object(

@@ -43,6 +43,7 @@ use musicable_commands::{Args, automation, edit, track};
 use musicable_model::mixer::Bus;
 use musicable_model::modulation::Output;
 use musicable_model::param::ParamAddress;
+use musicable_model::plugin::NoteTiming;
 use musicable_model::routing::{InputError, Tap, Wire};
 use musicable_model::time::Beats;
 use musicable_model::{
@@ -95,6 +96,10 @@ pub struct MidiChoice {
 pub(crate) struct Choices<'a> {
     pub audio: &'a [InputChoice],
     pub midi: &'a [MidiChoice],
+    /// How each plugin device's plugin is doing, for what a MIDI track
+    /// taking a plugin's notes says of them.
+    pub plugins:
+        Option<&'a std::collections::BTreeMap<musicable_model::DeviceId, crate::PluginStatus>>,
 }
 
 /// The readings of the project's meters, as the engine last measured them,
@@ -1072,15 +1077,47 @@ impl Mixer<'_> {
             actions.push(Action::ListInputs);
         }
         name_menu(&menu.response, format!("{} Input", track.name), &text);
-        let hint = match tapped {
+        // A plugin's notes come when its device's Notes' Timing says.
+        let plugin = tapped.and_then(|tap| match tap {
+            Tap::Device(device) => self.project.find_device(device),
+            _ => None,
+        });
+        let plugin = plugin.and_then(|(_, _, device)| Some((device, device.kind.plugin()?)));
+        let hint = match (tapped, plugin) {
             _ if missing => {
                 "Where the track records from. This MIDI input isn't there: it's not plugged in."
+                    .to_owned()
             }
-            Some(_) => "Where the track records from: another track's notes, which it plays",
-            None => {
-                "Where the track records from: a MIDI input, or all of them, and one channel or \
-                 all of them, as MPE controllers need"
+            (Some(_), Some((device, plugin))) => {
+                // Its latency matters only where its menu has Notes' Timing.
+                let status = self
+                    .inputs
+                    .plugins
+                    .and_then(|status| status.get(&device.id));
+                let name = device.kind.name();
+                match status.filter(|status| status.note_timing.is_some()) {
+                    Some(status) => {
+                        let timing = match plugin.note_timing {
+                            NoteTiming::WithSound => "with its sound",
+                            NoteTiming::AsPlayed => "as it plays them",
+                        };
+                        let latency = status.latency_ms;
+                        format!(
+                            "Where the track records from: the notes {name} plays, which come \
+                             {timing}, against its latency of {latency:.1} ms. If they're early \
+                             or late, its Notes' Timing, in its menu in the devices panel, \
+                             changes that"
+                        )
+                    }
+                    None => format!("Where the track records from: the notes {name} plays"),
+                }
             }
+            (Some(_), None) => {
+                "Where the track records from: another track's notes, which it plays".to_owned()
+            }
+            (None, _) => "Where the track records from: a MIDI input, or all of them, and one \
+                          channel or all of them, as MPE controllers need"
+                .to_owned(),
         };
         menu.response.on_hover_text(hint);
         let changed = match (&picked, &track.input) {
@@ -2299,6 +2336,7 @@ mod tests {
                 let inputs = Choices {
                     audio: &state.inputs,
                     midi: &state.midi,
+                    plugins: None,
                 };
                 show(
                     ui,
@@ -3090,6 +3128,8 @@ mod tests {
             kind: PluginKind::MidiEffect,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         }));
         let arp_id = arp.id;
@@ -3143,6 +3183,8 @@ mod tests {
             kind: PluginKind::AudioEffect,
             inputs: Vec::new(),
             note_output: true,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         }));
         let detector_id = detector.id;

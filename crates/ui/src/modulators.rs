@@ -967,7 +967,7 @@ fn output_name(project: &Project, output: Output) -> Option<String> {
 }
 
 /// What the modulators' menus call `chain`: its track's name, or Master.
-fn channel_name(project: &Project, chain: Chain) -> &str {
+pub(crate) fn channel_name(project: &Project, chain: Chain) -> &str {
     match chain {
         Chain::Track(id) => project.track(id).map_or("", |track| track.name.as_str()),
         Chain::Master => "Master",
@@ -1373,6 +1373,8 @@ mod tests {
                     kind: PluginKind::AudioEffect,
                     inputs: Vec::new(),
                     note_output: false,
+                    note_timing: musicable_model::plugin::NoteTiming::WithSound,
+                    note_timing_chosen: false,
                     settings: PluginSettings::default(),
                 }));
                 plugins.push(device.id);

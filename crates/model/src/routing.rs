@@ -32,6 +32,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod unheard;
+
+pub use unheard::UnheardNotes;
+
 use crate::mixer::Bus;
 use crate::native::NativeKind;
 use crate::{Chain, DeviceId, DeviceKind, Input, Project, TrackId, TrackKind, next_id};
@@ -952,6 +956,8 @@ mod tests {
                 kind,
                 inputs: Vec::new(),
                 note_output: false,
+                note_timing: crate::plugin::NoteTiming::WithSound,
+                note_timing_chosen: false,
                 settings: PluginSettings::default(),
             }))
         };
@@ -1296,6 +1302,8 @@ mod tests {
             kind: PluginKind::AudioEffect,
             inputs: vec![input(1, "Carrier"), input(3, "Aux")],
             note_output: false,
+            note_timing: crate::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         }));
         let vocoder_id = vocoder.id;

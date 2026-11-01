@@ -108,6 +108,8 @@ fn plugged() -> Project {
         kind: PluginKind::Instrument,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings {
             state: Some(PluginState::new(*b"preset")),
             params: vec![
@@ -124,6 +126,8 @@ fn plugged() -> Project {
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     }));
     project.master.devices.push(effect);
@@ -669,6 +673,8 @@ fn plugin(id: &str, kind: PluginKind) -> DeviceKind {
         kind,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     })
 }
@@ -2817,6 +2823,8 @@ fn wired() -> Project {
         kind: PluginKind::AudioEffect,
         inputs: vec![input(2, "Sidechain"), input(5, "Aux")],
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     }));
     let ducker_id = ducker.id;

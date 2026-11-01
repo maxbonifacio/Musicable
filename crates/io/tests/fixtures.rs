@@ -25,7 +25,7 @@ use musicable_model::native::{
 };
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
 use musicable_model::plugin::{
-    PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
+    NoteTiming, PluginDevice, PluginInput, PluginKind, PluginParam, PluginSettings, PluginState,
 };
 use musicable_model::routing::{Port, Tap, Wire};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
@@ -70,6 +70,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("made-notes", made_notes()),
         ("always-live", always_live()),
         ("view", view()),
+        ("note-timing", note_timing()),
     ]
 }
 
@@ -389,6 +390,11 @@ fn plugins() -> Project {
             },
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::assumed(match instrument {
+                true => PluginKind::Instrument,
+                false => PluginKind::AudioEffect,
+            }),
+            note_timing_chosen: false,
             settings,
         })
     };
@@ -703,6 +709,8 @@ fn automation() -> Project {
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     });
     let filter = project.new_device(filter);
@@ -1175,6 +1183,8 @@ fn bypass() -> Project {
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     }));
     limiter.bypassed = true;
@@ -1212,6 +1222,8 @@ fn modulation() -> Project {
         kind: PluginKind::AudioEffect,
         inputs: Vec::new(),
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     }));
     let plugin_id = plugin.id;
@@ -1372,6 +1384,11 @@ fn plugin_inputs() -> Project {
         },
         inputs,
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::assumed(match instrument {
+            true => PluginKind::Instrument,
+            false => PluginKind::AudioEffect,
+        }),
+        note_timing_chosen: false,
         settings: PluginSettings::default(),
     };
     let vocoder = plugin(
@@ -1462,6 +1479,8 @@ fn midi_effects() -> Project {
             kind,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::assumed(kind),
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         })
     };
@@ -1512,6 +1531,8 @@ fn notes_from_tracks() -> Project {
             kind,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::assumed(kind),
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         })
     };
@@ -1545,6 +1566,8 @@ fn midi_to() -> Project {
             kind,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::assumed(kind),
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         })
     };
@@ -1586,6 +1609,8 @@ fn made_notes() -> Project {
             kind,
             inputs: Vec::new(),
             note_output: true,
+            note_timing: musicable_model::plugin::NoteTiming::assumed(kind),
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         })
     };
@@ -1653,6 +1678,58 @@ fn view() -> Project {
             None,
         ],
     });
+    project
+}
+
+/// When plugins' notes come, against their latency, from version 28: a
+/// MIDI effect left to what's assumed, one someone chose to play its notes
+/// as it plays them, and a synth that plays notes out with its sound,
+/// chosen too.
+fn note_timing() -> Project {
+    let mut project = Project::new();
+    let plugin = |id: &str, name: &str, kind, note_output, timing: Option<NoteTiming>| {
+        DeviceKind::Plugin(PluginDevice {
+            format: PluginFormat::Vst3,
+            id: id.into(),
+            name: name.into(),
+            kind,
+            inputs: Vec::new(),
+            note_output,
+            note_timing: timing.unwrap_or(NoteTiming::assumed(kind)),
+            note_timing_chosen: timing.is_some(),
+            settings: PluginSettings::default(),
+        })
+    };
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let midi_effect = PluginKind::MidiEffect;
+    let devices = [
+        plugin(
+            "ABCDEF0123456789ABCDEF0123456789",
+            "Humanize",
+            midi_effect,
+            false,
+            None,
+        ),
+        plugin(
+            "0123456789ABCDEF0123456789ABCDEF",
+            "Arp",
+            midi_effect,
+            false,
+            Some(NoteTiming::AsPlayed),
+        ),
+        plugin(
+            "00112233445566778899AABBCCDDEEFF",
+            "Sequencer",
+            PluginKind::Instrument,
+            true,
+            Some(NoteTiming::WithSound),
+        ),
+    ];
+    let devices: Vec<_> = devices
+        .into_iter()
+        .map(|kind| project.new_device(kind))
+        .collect();
+    project.track_mut(keys).unwrap().devices = devices;
     project
 }
 

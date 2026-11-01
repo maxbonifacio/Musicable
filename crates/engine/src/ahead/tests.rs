@@ -152,9 +152,14 @@ impl Node for Ticks {
 
 /// Keeps what it's written, a frame at a time in two channels, as a
 /// recorder would: a mono block in both, and silence as zeros. And the
-/// notes, at their engine times. Each block has to follow the one before.
+/// notes, at the engine times they were played at, as early as they're
+/// late. Each block has to follow the one before, and each stretch of
+/// notes the one before, up to the frames written, and no note can come
+/// before where the notes before said the notes still to come were played.
 struct Kept {
     next: u64,
+    notes_next: u64,
+    settled: u64,
     frames: rtrb::Producer<[f32; 2]>,
     notes: rtrb::Producer<(u64, NodeEventKind)>,
 }
@@ -172,17 +177,24 @@ impl TapWriter for Kept {
         }
     }
 
-    fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent]) {
-        assert_eq!(
-            time + frames as u64,
-            self.next,
+    fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent], late: u64) {
+        assert_eq!(time, self.notes_next, "a stretch from where the last ended");
+        self.notes_next += frames as u64;
+        assert!(
+            self.notes_next <= self.next,
             "the notes of the frames written"
         );
         for note in notes {
             assert!(note.offset < frames);
-            let at = time + note.offset as u64;
+            let at = (time + note.offset as u64).saturating_sub(late);
+            assert!(
+                at >= self.settled,
+                "a note at {at}, settled at {}",
+                self.settled
+            );
             assert!(self.notes.push((at, note.kind)).is_ok());
         }
+        self.settled = (self.settled).max((time + frames as u64).saturating_sub(late));
     }
 }
 
@@ -209,6 +221,8 @@ fn kept(from: u64) -> (Box<dyn TapWriter>, Keeping) {
     let (notes, notes_rx) = RingBuffer::new(1 << 15);
     let writer = Kept {
         next: from,
+        notes_next: from,
+        settled: 0,
         frames,
         notes,
     };
@@ -288,6 +302,41 @@ fn recorded_every(period: u64) -> PreparedGraph {
     g.add_note_record(WRITER, ticks).unwrap();
     g.set_output(counter).unwrap();
     g.prepare(&CONFIG).unwrap()
+}
+
+/// The same, with the notes `late` frames late, as a plugin's that come
+/// with its sound: those it plays at engine time `t` were played at `t`
+/// less `late`.
+fn recorded_late(period: u64, late: usize) -> PreparedGraph {
+    let mut g = Graph::new();
+    let counter = g.add(NodeKey(0), Counter(0.0));
+    let ticks = g.add(NodeKey(1), LateTicks(Ticks(period), late));
+    g.send_notes(ticks, counter).unwrap();
+    g.add_record(WRITER, counter).unwrap();
+    g.add_note_record(WRITER, ticks).unwrap();
+    g.set_output(counter).unwrap();
+    g.prepare(&CONFIG).unwrap()
+}
+
+/// [`Ticks`], whose notes come `.1` frames late.
+struct LateTicks(Ticks, usize);
+
+impl Node for LateTicks {
+    fn channels(&self) -> usize {
+        1
+    }
+
+    fn notes_latency(&self) -> usize {
+        self.1
+    }
+
+    fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+        self.0.play_notes(ctx, notes);
+    }
+
+    fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+        output.clear();
+    }
 }
 
 /// A track that monitors the first device input, with key 0, as the output:
@@ -643,6 +692,49 @@ fn record_taps_reach_their_writers_as_they_play() {
         channel: None,
     };
     assert_eq!(notes[2], (100, NodeEventKind::Note(on)));
+}
+
+#[test]
+fn late_notes_reach_their_writers_as_early_as_they_were_played() {
+    // Rendering ahead, the first blocks have no notes, and the writer knows
+    // the notes still to come are late all the same, and when a graph
+    // takes over with another lateness, which it does at another time
+    // rendering ahead. The writer checks that no note comes before where
+    // it was told the notes still to come were played.
+    let sizes = [7, 256, 1000, 64, 2048, 333];
+    for swap in [false, true] {
+        let [notes, live] = [Lead::Normal, Lead::Off].map(|lead| {
+            let (mut engine, mut handle) = with_lead(lead);
+            let (writer, mut keeping) = kept(0);
+            assert!(handle.add_writer(WRITER, writer).is_ok());
+            handle.swap_graph(recorded_late(100, 960)).unwrap();
+            handle.send(play()).unwrap();
+            let mut notes = Vec::new();
+            for (n, &size) in sizes.iter().cycle().take(30).enumerate() {
+                if swap && n == 15 {
+                    handle.swap_graph(recorded_late(100, 0)).unwrap();
+                }
+                render(&mut engine, size, size);
+                handle.collect_garbage();
+                notes.extend(keeping.notes());
+            }
+            notes
+        });
+        if !swap {
+            assert_eq!(notes, live);
+        }
+        // The note it plays at 1900 was played at 940.
+        let on = NoteEvent::On {
+            note: NoteId(19),
+            key: (1900 % 128) as u8,
+            velocity: 1.0,
+            channel: None,
+        };
+        for notes in [&notes, &live] {
+            assert!(notes.contains(&(940, NodeEventKind::Note(on))));
+            assert!(notes.is_sorted_by_key(|&(at, _)| at));
+        }
+    }
 }
 
 #[test]

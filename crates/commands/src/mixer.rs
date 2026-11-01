@@ -1346,6 +1346,8 @@ mod tests {
             kind: PluginKind::MidiEffect,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         }));
         let arp_id = arp.id;
@@ -1403,6 +1405,8 @@ mod tests {
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         }));
         let synth_id = synth.id;
@@ -1663,6 +1667,8 @@ mod tests {
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         }));
         let eq = project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Eq)));
@@ -1714,6 +1720,8 @@ mod tests {
                 name: "Key".into(),
             }],
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         });
         setup.document.transact("Keyed Arp", |tx| {

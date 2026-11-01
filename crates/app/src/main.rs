@@ -17,6 +17,7 @@ use musicable_app::null_test::{self, Player, Render};
 use musicable_app::{App, PLUGINS_FILE};
 use musicable_commands::{Editor, Keymap, KeymapFile, Registry, Scope};
 use musicable_engine::{EngineConfig, ParallelOptions};
+use musicable_model::plugin::PluginKind;
 use musicable_model::{Project, TrackId};
 use musicable_plugins::scan::ScanCache;
 
@@ -36,6 +37,11 @@ usage: musicable [PROJECT]                open the app, with PROJECT if given
                                           Export Audio does
        musicable scan-plugin LIBRARY      list the plugins in the plugin library LIBRARY, as
                                           the app's plugin scan does in a process of its own
+       musicable time-plugin-notes FORMAT LIBRARY ID KIND
+                                          play plugin ID, a KIND in the FORMAT library
+                                          LIBRARY, to see when the notes it plays come
+                                          against its latency, as the app does in a process
+                                          of its own
        musicable mcp                      let the agent whose client starts it control the
                                           Musicable that's running, over MCP on the standard
                                           input and output: see docs/agents.md
@@ -70,6 +76,8 @@ fn main() -> ExitCode {
         // The app runs it, and reads what it prints through a pipe, so it
         // doesn't attach to a console.
         Some(musicable_app::SCAN_PLUGIN) => scan_plugin(args.next()),
+        // The same.
+        Some(musicable_app::TIME_PLUGIN_NOTES) => time_plugin_notes(args),
         // An agent's client runs it, and speaks MCP with it through pipes,
         // so it doesn't either.
         Some("mcp") => mcp(),
@@ -230,6 +238,27 @@ fn scan_plugin(library: Option<OsString>) -> ExitCode {
         return ExitCode::FAILURE;
     };
     musicable_plugins::scan::child(Path::new(&library));
+    ExitCode::SUCCESS
+}
+
+/// `musicable time-plugin-notes FORMAT LIBRARY ID KIND`: plays plugin `ID`,
+/// of `KIND`, in the plugin library at `LIBRARY`, in `FORMAT`, to see when
+/// the notes it plays come against its latency, for the app, which runs it
+/// in a process of its own so a plugin that crashes or hangs takes only
+/// this down.
+fn time_plugin_notes(mut args: impl Iterator<Item = OsString>) -> ExitCode {
+    let mut next = || args.next().and_then(|arg| arg.into_string().ok());
+    let (format, library, id, kind) = (next(), next(), next(), next());
+    let format = format
+        .as_deref()
+        .and_then(musicable_plugins::format_name::parse);
+    let kind = kind.as_deref().and_then(PluginKind::from_key);
+    let (Some(format), Some(library), Some(id), Some(kind)) = (format, library, id, kind) else {
+        attach_console();
+        eprintln!("time-plugin-notes needs a format, a library, a plugin and a kind\n{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    musicable_plugins::timing::child(format, Path::new(&library), &id, kind);
     ExitCode::SUCCESS
 }
 

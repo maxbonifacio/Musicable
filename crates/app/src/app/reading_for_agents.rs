@@ -26,6 +26,7 @@ impl App {
                     "vendor": plugin.vendor,
                     "kind": plugin.kind.key(),
                     "render_ahead": if plugin.never_ahead { "never" } else { "auto" },
+                    "note_timing": plugin.note_timing.map_or("auto", |timing| timing.key()),
                 })
             })
             .collect();

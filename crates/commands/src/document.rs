@@ -16,7 +16,7 @@ use musicable_model::modulation::{
 };
 use musicable_model::native::NativeKind;
 use musicable_model::param::{ClipParam, ParamAddress, ParamSpec};
-use musicable_model::plugin::{PluginInput, PluginSettings};
+use musicable_model::plugin::{NoteTiming, PluginInput, PluginSettings};
 use musicable_model::routing::{InputError, Port, Route, Tap, Wire, WireError, WireId};
 use musicable_model::time::{BeatRange, Beats, TempoMap};
 use musicable_model::{
@@ -622,6 +622,47 @@ impl Transaction<'_> {
             .any(|track| track.input == Some(Input::Tap(tap)))
             || (project.wires.iter()).any(|wire| wire.from == tap && wire.takes_notes());
         self.put_plugin_note_output(device, on || taken);
+    }
+
+    /// Sets when the notes the plugin device with id `device` plays come,
+    /// against its latency, to `timing`, as someone chose, or with `None`,
+    /// leaves it to what the app finds out of the plugin, as it is until the
+    /// app next says ([`follow_plugin_note_timing`](Self::follow_plugin_note_timing)).
+    /// A device that isn't a plugin does nothing.
+    pub fn set_plugin_note_timing(&mut self, device: DeviceId, timing: Option<NoteTiming>) {
+        let Some(plugin) = (self.project.find_device(device)).and_then(|(_, _, d)| d.kind.plugin())
+        else {
+            return;
+        };
+        let to = (timing.unwrap_or(plugin.note_timing), timing.is_some());
+        self.put_plugin_note_timing(device, to);
+    }
+
+    /// Sets when the notes the plugin device with id `device` plays come to
+    /// `timing`, what the app found out of its plugin, unless someone chose
+    /// it for the device.
+    pub fn follow_plugin_note_timing(&mut self, device: DeviceId, timing: NoteTiming) {
+        let Some(plugin) = (self.project.find_device(device)).and_then(|(_, _, d)| d.kind.plugin())
+        else {
+            return;
+        };
+        if !plugin.note_timing_chosen {
+            self.put_plugin_note_timing(device, (timing, false));
+        }
+    }
+
+    /// Sets the plugin device with id `device`'s note timing and whether
+    /// someone chose it, as undo and redo do.
+    fn put_plugin_note_timing(&mut self, device: DeviceId, to: (NoteTiming, bool)) {
+        let Some(plugin) = (self.project.device_mut(device)).and_then(|d| d.kind.plugin_mut())
+        else {
+            return;
+        };
+        let from = (plugin.note_timing, plugin.note_timing_chosen);
+        if from != to {
+            (plugin.note_timing, plugin.note_timing_chosen) = to;
+            self.edits.push(Edit::PluginNoteTiming { device, from, to });
+        }
     }
 
     /// Sets whether the plugin device with id `device` has a note output to
@@ -2349,6 +2390,7 @@ impl Transaction<'_> {
             }
             Edit::PluginInputs { device, to, .. } => self.put_plugin_inputs(*device, to.clone()),
             Edit::PluginNoteOutput { device, to, .. } => self.put_plugin_note_output(*device, *to),
+            Edit::PluginNoteTiming { device, to, .. } => self.put_plugin_note_timing(*device, *to),
             Edit::NativeParam {
                 device, param, to, ..
             } => self.set_native_param(*device, *param, *to),
@@ -2818,6 +2860,13 @@ pub enum Edit {
         from: bool,
         to: bool,
     },
+    /// When the notes the plugin device with id `device` plays come, against
+    /// its latency, changed, and whether someone chose it.
+    PluginNoteTiming {
+        device: DeviceId,
+        from: (NoteTiming, bool),
+        to: (NoteTiming, bool),
+    },
     /// Parameter `param` of the built-in device with id `device` changed.
     NativeParam {
         device: DeviceId,
@@ -3270,6 +3319,11 @@ impl Edit {
                 from: to,
                 to: from,
             },
+            Edit::PluginNoteTiming { device, from, to } => Edit::PluginNoteTiming {
+                device,
+                from: to,
+                to: from,
+            },
             Edit::NativeParam {
                 device,
                 param,
@@ -3707,6 +3761,14 @@ impl Edit {
                 },
             ) if device == other => *to = *next,
             (
+                Edit::PluginNoteTiming { device, to, .. },
+                Edit::PluginNoteTiming {
+                    device: other,
+                    to: next,
+                    ..
+                },
+            ) if device == other => *to = *next,
+            (
                 Edit::NativeParam {
                     device, param, to, ..
                 },
@@ -3851,6 +3913,7 @@ impl Edit {
                 | Edit::PluginSettings { .. }
                 | Edit::PluginInputs { .. }
                 | Edit::PluginNoteOutput { .. }
+                | Edit::PluginNoteTiming { .. }
                 | Edit::NativeParam { .. }
                 | Edit::NativeSample { .. }
                 | Edit::AddWire { .. }
@@ -3950,6 +4013,7 @@ impl Edit {
             Edit::PluginSettings { from, to, .. } => from == to,
             Edit::PluginInputs { from, to, .. } => from == to,
             Edit::PluginNoteOutput { from, to, .. } => from == to,
+            Edit::PluginNoteTiming { from, to, .. } => from == to,
             Edit::NativeParam { from, to, .. } => from == to,
             Edit::NativeSample { from, to, .. } => from == to,
             Edit::LanePoints { from, to, .. } => from == to,
@@ -4027,6 +4091,8 @@ mod tests {
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         }));
         project
@@ -4119,6 +4185,8 @@ mod tests {
             kind: PluginKind::Instrument,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings {
                 state: Some(PluginState::new(*b"state")),
                 params: Vec::new(),

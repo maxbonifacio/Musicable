@@ -44,6 +44,7 @@ pub mod scan;
 #[cfg(test)]
 mod tests;
 mod threads;
+pub mod timing;
 pub mod vst3;
 
 #[cfg(test)]
@@ -216,7 +217,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// [`PluginFormat`] in files: `"clap"` or `"vst3"`.
-pub(crate) mod format_name {
+pub mod format_name {
     use musicable_model::PluginFormat;
     use serde::{Deserialize, Deserializer, Serializer};
 

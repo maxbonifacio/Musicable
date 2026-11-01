@@ -1,0 +1,368 @@
+{
+  "format": "musicable-project",
+  "version": 28,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 1290240,
+    "end": 3870720
+  },
+  "looping": true,
+  "metronome": false,
+  "punch_in": true,
+  "punch_out": true,
+  "next_track_id": 5,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 7,
+  "next_locator_id": 0,
+  "next_take_id": 6,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Vocal",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": true,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 2,
+          "name": "Vocal",
+          "start": 1290240,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Recordings/Vocal 1.wav",
+              "offset": 384000,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": null,
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 3,
+          "name": "Vocal",
+          "start": 2580480,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Recordings/Vocal 1.wav",
+              "offset": 192000,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": null,
+              "automation": []
+            }
+          }
+        }
+      ],
+      "takes": [
+        {
+          "id": 0,
+          "name": "Take 1",
+          "clips": [
+            {
+              "id": 0,
+              "name": "Vocal",
+              "start": 1290240,
+              "length": 2580480,
+              "content": {
+                "audio": {
+                  "file": "Recordings/Vocal 1.wav",
+                  "offset": 0,
+                  "gain": 1.0,
+                  "fade_in": 0,
+                  "fade_out": 0,
+                  "warp": null,
+                  "automation": []
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "name": "Take 2",
+          "clips": [
+            {
+              "id": 1,
+              "name": "Vocal",
+              "start": 1290240,
+              "length": 2580480,
+              "content": {
+                "audio": {
+                  "file": "Recordings/Vocal 1.wav",
+                  "offset": 384000,
+                  "gain": 1.0,
+                  "fade_in": 0,
+                  "fade_out": 0,
+                  "warp": null,
+                  "automation": []
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Guitar \"DI\"",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "{0.0.1.00000000}.{a5c2e7b0-9f1d-4c3e-8b6a-2d4f6e8a0c1b}",
+          "name": "Line In (USB Audio 🎸)",
+          "channel": 2,
+          "stereo": false
+        }
+      },
+      "monitor": "in",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [
+        {
+          "id": 3,
+          "name": "Take 1",
+          "clips": [
+            {
+              "id": 4,
+              "name": "Guitar",
+              "start": 1290240,
+              "length": 645120,
+              "content": {
+                "audio": {
+                  "file": "C:/Takes/Guitar.wav",
+                  "offset": 0,
+                  "gain": 1.0,
+                  "fade_in": 0,
+                  "fade_out": 0,
+                  "warp": null,
+                  "automation": []
+                }
+              }
+            },
+            {
+              "id": 5,
+              "name": "Guitar",
+              "start": 3225600,
+              "length": 645120,
+              "content": {
+                "audio": {
+                  "file": "C:/Takes/Guitar.wav",
+                  "offset": 96000,
+                  "gain": 1.0,
+                  "fade_in": 0,
+                  "fade_out": 0,
+                  "warp": null,
+                  "automation": []
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "name": "",
+          "clips": []
+        }
+      ],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 2,
+      "name": "Keys",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "Seaboard RISE 2",
+          "name": "Seaboard RISE 2",
+          "channel": 15
+        }
+      },
+      "monitor": "off",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [
+        {
+          "id": 5,
+          "name": "Take 1",
+          "clips": [
+            {
+              "id": 6,
+              "name": "Keys",
+              "start": 1290240,
+              "length": 1290240,
+              "content": {
+                "midi": {
+                  "offset": 0,
+                  "next_note_id": 1,
+                  "notes": [
+                    {
+                      "id": 0,
+                      "start": 0,
+                      "length": 322560,
+                      "key": 48,
+                      "velocity": 0.75,
+                      "release_velocity": 0.5,
+                      "expression": {
+                        "pitch_bend": [],
+                        "pressure": [],
+                        "timbre": []
+                      }
+                    }
+                  ],
+                  "controllers": []
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 3,
+      "name": "Room",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": true,
+      "input": null,
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 4,
+      "name": "Reverb",
+      "kind": "return",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": true,
+      "armed": false,
+      "input": null,
+      "monitor": "in",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "wires": [],
+  "workspace": null,
+  "view": null
+}

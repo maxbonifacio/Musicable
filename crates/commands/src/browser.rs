@@ -13,10 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use musicable_model::plugin::{PluginKind, PluginState};
+use musicable_model::plugin::{NoteTiming, PluginKind, PluginState};
 use musicable_model::{DeviceId, DeviceKind, PluginFormat};
 
-use crate::device::{FORMAT, PLUGIN_KINDS, plugin_format};
+use crate::device::{FORMAT, NOTE_TIMINGS, PLUGIN_KINDS, plugin_format};
 use crate::{Command, CommandError, CommandId, Param, Registry, Request, Type, Value};
 
 /// Finds samples by their names, folders and tags.
@@ -48,6 +48,10 @@ pub const SET_PLUGIN_KIND: CommandId = CommandId::new("browser.set_plugin_kind")
 /// it says it must render live, and at Never, it renders live wherever it
 /// is, as the device asks for each buffer, with what it plays into.
 pub const SET_PLUGIN_RENDER_AHEAD: CommandId = CommandId::new("browser.set_plugin_render_ahead");
+/// Marks when an installed plugin's notes come, against its latency, for
+/// every project, or takes the mark away: the devices of it whose note
+/// timing nobody chose follow it.
+pub const SET_PLUGIN_NOTE_TIMING: CommandId = CommandId::new("browser.set_plugin_note_timing");
 
 /// What a plugin's Render Ahead can be: see [`SET_PLUGIN_RENDER_AHEAD`].
 const RENDER_AHEAD: &[&str] = &["auto", "never"];
@@ -117,6 +121,29 @@ pub trait Library {
         _format: PluginFormat,
         _id: &str,
         _never: bool,
+    ) -> Result<(), String> {
+        Err(NO_LIBRARY.to_owned())
+    }
+    /// When the notes the installed plugin `id` in `format`, of `kind`,
+    /// plays come, against its latency, as the user marked it or the app
+    /// measured it, for a device of it as it's added: `None` where the app
+    /// knows nothing of it, when it's taken to be as assumed for its kind.
+    fn plugin_note_timing(
+        &self,
+        _format: PluginFormat,
+        _id: &str,
+        _kind: PluginKind,
+    ) -> Option<NoteTiming> {
+        None
+    }
+    /// Marks when the notes the installed plugin `id` in `format` plays
+    /// come, against its latency, as `timing`, for good, or with `None`
+    /// takes the mark away, so it's what the app measured, or assumes.
+    fn set_plugin_note_timing(
+        &mut self,
+        _format: PluginFormat,
+        _id: &str,
+        _timing: Option<NoteTiming>,
     ) -> Result<(), String> {
         Err(NO_LIBRARY.to_owned())
     }
@@ -308,6 +335,36 @@ pub fn register(registry: &mut Registry) {
             let kind = PluginKind::from_key(&key).unwrap_or_default();
             ctx.library
                 .set_plugin_kind(format, &id, kind)
+                .map_err(CommandError::invalid)?;
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(SET_PLUGIN_NOTE_TIMING, "Set Plugin Note Timing").with_params(&[
+            FORMAT,
+            Param::required(
+                "plugin",
+                Type::Text,
+                "The plugin's id in its format, such as org.surge-synth-team.surge-xt.",
+            ),
+            Param::required(
+                "timing",
+                Type::Choice(NOTE_TIMINGS),
+                "When the notes it plays come, against its latency: with_sound, as late as its \
+                 sound, as a MIDI effect that looks ahead or a note detector has them, or \
+                 as_played, as early as what comes into it, as a synth's arpeggiator plays \
+                 them as it fires. auto takes the mark away, so it's what Musicable measured \
+                 or assumes for its kind. Its devices whose timing nobody chose follow it.",
+            ),
+        ]),
+        |ctx, args| {
+            let format = plugin_format(args)?;
+            let id: String = args.get("plugin")?;
+            let key: String = args.get("timing")?;
+            // The choices are checked.
+            let timing = NoteTiming::from_key(&key);
+            ctx.library
+                .set_plugin_note_timing(format, &id, timing)
                 .map_err(CommandError::invalid)?;
             Ok(Value::None)
         },

@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 
 use musicable_model::clip::Controller;
+use musicable_model::plugin::NoteTiming;
 
 use crate::graph::{Routed, channel_lane};
 use crate::midi::Held;
@@ -86,9 +87,18 @@ pub struct Switch {
     /// The events of a part of a block the device renders, moved to their
     /// offsets in the part.
     shifted: Vec<NodeEvent>,
-    /// The frame the device stopped on in the block that rendered last, if
-    /// it stopped: the notes it made that still sound end there.
-    stopped_at: Option<usize>,
+    /// The frames the device stopped on in the block that rendered last,
+    /// in order: the notes it made that still sound end at each. A device
+    /// brought back after it stops can stop again in the same block.
+    stops: Vec<usize>,
+    /// Whether the notes the device makes as it renders go somewhere
+    /// ([`Node::makes_notes`]).
+    making: bool,
+    /// The notes the device made in a block it stopped in, on their way
+    /// on, so each stop's ends land among them where it stopped.
+    made: Vec<Routed>,
+    /// When the notes the device makes come, against its latency.
+    note_timing: NoteTiming,
 }
 
 /// How many switches can be on their way through a device at once. One
@@ -126,8 +136,20 @@ impl Switch {
             fade: 1,
             due: VecDeque::new(),
             shifted: Vec::new(),
-            stopped_at: None,
+            stops: Vec::new(),
+            making: false,
+            made: Vec::new(),
+            note_timing: NoteTiming::AsPlayed,
         }
+    }
+
+    /// Has the notes the device makes as it renders come `timing` against
+    /// its latency: with its sound, so they're as late as it is
+    /// ([`Node::notes_latency`]), or as it plays them, as early as what
+    /// comes into it, as until this says otherwise.
+    pub fn with_note_timing(mut self, timing: NoteTiming) -> Self {
+        self.note_timing = timing;
+        self
     }
 
     /// A deactivated device's switch: it never starts `device`, and plays
@@ -268,7 +290,12 @@ impl Switch {
             if self.leaving() && self.settled() {
                 self.device.stop();
                 self.running = false;
-                self.stopped_at = Some(at);
+                // Room for every stop a block has frames for: each comes
+                // a fade after the device was last brought back.
+                if self.stops.len() == self.stops.capacity() {
+                    self.stops.pop();
+                }
+                self.stops.push(at);
             }
             if at == frames {
                 break;
@@ -322,6 +349,10 @@ impl Node for Switch {
         self.over = if self.to_dry { self.fade } else { 0 };
         self.due = VecDeque::with_capacity(DUE);
         self.shifted = Vec::with_capacity(SHIFTED);
+        self.stops = Vec::with_capacity(config.max_block / self.fade as usize + 2);
+        if self.making {
+            self.made = Vec::with_capacity(Notes::CAPACITY);
+        }
     }
 
     fn latency(&self) -> usize {
@@ -378,7 +409,7 @@ impl Node for Switch {
     }
 
     fn process(&mut self, ctx: &ProcessContext<'_>, inputs: Inputs<'_>, output: &mut AudioMut<'_>) {
-        self.stopped_at = None;
+        self.stops.clear();
         if self.deactivated {
             self.device.flush(ctx);
             output.clear();
@@ -427,17 +458,55 @@ impl Node for Switch {
         }
     }
 
-    /// What the device made as it rendered, and, if it stopped, the end of
-    /// the notes it made that still sound and of the switches it held on.
+    /// What the device made as it rendered, and, where it stopped, the end
+    /// of the notes it made that still sound and of the switches it held
+    /// on. A device brought back after it stopped in the block made the
+    /// notes after the stop afresh, so they come after the ends, and sound
+    /// on.
     fn made_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
-        self.device.made_notes(ctx, notes);
-        if let Some(at) = self.stopped_at.take() {
-            notes.release_all(at.min(ctx.frames.saturating_sub(1)));
+        let Self {
+            device,
+            stops,
+            made,
+            ..
+        } = self;
+        if stops.is_empty() {
+            device.made_notes(ctx, notes);
+            return;
         }
+        made.clear();
+        let mut buffer = Notes::buffer(made, ctx.frames);
+        device.made_notes(ctx, &mut buffer);
+        notes.drop_more(buffer.dropped());
+        made.sort_unstable_by_key(|r| (r.event.offset, r.order));
+        let last = ctx.frames.saturating_sub(1);
+        let mut made = made.iter().peekable();
+        for &stop in stops.iter() {
+            // The device rendered the frames before its stop, and those
+            // after it once it's back. A stop at the block's end comes after
+            // its last frame, so the ends go there, after what it made on it.
+            while let Some(r) = made.next_if(|r| r.event.offset < stop) {
+                notes.send_played(r.event.offset, r.event.kind);
+            }
+            notes.release_all(stop.min(last));
+        }
+        for r in made {
+            notes.send_played(r.event.offset, r.event.kind);
+        }
+        stops.clear();
     }
 
     fn makes_notes(&mut self) {
+        self.making = true;
         self.device.makes_notes();
+    }
+
+    /// The device's latency, for a device whose notes come with its sound.
+    fn notes_latency(&self) -> usize {
+        match self.note_timing {
+            NoteTiming::WithSound => self.latency,
+            NoteTiming::AsPlayed => 0,
+        }
     }
 
     fn ended_voices(&self) -> &[NoteId] {
@@ -505,10 +574,24 @@ pub struct NoteSwitch {
     merged: Vec<NodeEvent>,
     /// The events of a part of a block, moved to their offsets in the part.
     shifted: Vec<NodeEvent>,
+    /// When the notes the device plays come, against its latency.
+    note_timing: NoteTiming,
+    /// The device's latency, as it was when the switch was prepared, for a
+    /// device whose notes come with its sound: what it passes on bypassed
+    /// waits as long, as a bypassed device's dry copy does.
+    latency: usize,
+    /// What it passed on bypassed that's still to go on, with the engine
+    /// time it goes on at, in order.
+    delayed: VecDeque<(u64, NodeEventKind)>,
 }
 
-/// How much modulation can wait for a MIDI effect's next block. Beyond it,
-/// more is dropped.
+/// How many notes a bypassed MIDI effect with a latency can hold back at
+/// once. Beyond them, more are dropped.
+const DELAYED: usize = 4 * Notes::CAPACITY;
+
+/// How many of a MIDI effect's parameters, each for every note or for one,
+/// modulation can wait for its next block for. The modulation of more is
+/// dropped.
 const LATE: usize = 256;
 
 /// How many controllers a MIDI effect started afresh can hear before
@@ -535,7 +618,19 @@ impl NoteSwitch {
             late: Vec::new(),
             merged: Vec::new(),
             shifted: Vec::new(),
+            note_timing: NoteTiming::AsPlayed,
+            latency: 0,
+            delayed: VecDeque::new(),
         }
+    }
+
+    /// Has the notes the device plays come `timing` against its latency:
+    /// with its sound, so they're as late as it is ([`Node::notes_latency`]),
+    /// and those it passes on bypassed wait as long, or as it plays them, as
+    /// until this says otherwise.
+    pub fn with_note_timing(mut self, timing: NoteTiming) -> Self {
+        self.note_timing = timing;
+        self
     }
 
     /// A deactivated MIDI effect's switch: it never starts `device`, and
@@ -576,6 +671,15 @@ impl Node for NoteSwitch {
         self.late = Vec::with_capacity(LATE);
         self.merged = Vec::with_capacity(MERGED);
         self.shifted = Vec::with_capacity(SHIFTED);
+        self.latency = match (self.deactivated, self.note_timing) {
+            (false, NoteTiming::WithSound) => self.device.latency(),
+            _ => 0,
+        };
+        self.delayed = VecDeque::with_capacity(if self.latency > 0 { DELAYED } else { 0 });
+    }
+
+    fn notes_latency(&self) -> usize {
+        self.latency
     }
 
     /// Its own parameter takes its automation as events, which switch it
@@ -617,6 +721,16 @@ impl Node for NoteSwitch {
                 }
                 self.input = previous.input;
                 std::mem::swap(&mut self.late, &mut previous.late);
+                // What it held back goes on, as late as it holds back now:
+                // what it had of the notes it passed on, their ends among
+                // them, which would hang otherwise. Each came in before
+                // anything comes to this one, so they stay in order.
+                if !previous.delayed.is_empty() {
+                    std::mem::swap(&mut self.delayed, &mut previous.delayed);
+                    for (due, _) in &mut self.delayed {
+                        *due = (*due - previous.latency as u64) + self.latency as u64;
+                    }
+                }
             }
             (false, true) if !previous.bypassed => self.device.stop(),
             (true, false) if !self.bypassed => self.device.reset(),
@@ -633,14 +747,25 @@ impl Node for NoteSwitch {
             self.device.flush(ctx);
             return;
         }
+        // It all comes on the next block's first frame, so the last of each
+        // parameter's is what counts.
         for event in ctx.events {
-            if matches!(event.kind, NodeEventKind::Modulation { .. })
-                && self.late.len() < self.late.capacity()
-            {
-                self.late.push(NodeEvent {
-                    offset: 0,
-                    ..*event
-                });
+            let NodeEventKind::Modulation { param, note, .. } = event.kind else {
+                continue;
+            };
+            let moved = NodeEvent {
+                offset: 0,
+                ..*event
+            };
+            let same = |e: &NodeEvent| {
+                matches!(e.kind, NodeEventKind::Modulation { param: p, note: n, .. }
+                    if (p, n) == (param, note))
+            };
+            let late = &mut self.late;
+            match late.iter().position(same) {
+                Some(waiting) => late[waiting] = moved,
+                None if late.len() < late.capacity() => late.push(moved),
+                None => {}
             }
         }
     }
@@ -657,6 +782,8 @@ impl Node for NoteSwitch {
             late,
             merged,
             shifted,
+            latency,
+            delayed,
             ..
         } = self;
         if *deactivated {
@@ -683,6 +810,8 @@ impl Node for NoteSwitch {
             && switch(&mut **device, bypassed, to, 0, input, notes)
         {
             fresh = !*bypassed;
+            // What it held back passed by: the switch ended what sounds.
+            delayed.clear();
         }
         let frames = ctx.frames;
         let (mut at, mut next) = (0, 0);
@@ -694,6 +823,7 @@ impl Node for NoteSwitch {
                     && switch(&mut **device, bypassed, to, at, input, notes)
                 {
                     fresh = !*bypassed;
+                    delayed.clear();
                 }
                 next += 1;
             }
@@ -701,9 +831,38 @@ impl Node for NoteSwitch {
                 .find(|e| switch_value(e).is_some())
                 .map_or(frames, |e| e.offset);
             let events = events_in(ctx.events, at..end);
-            if *bypassed {
+            if *bypassed && *latency == 0 {
                 device.flush(&ProcessContext { events, ..*ctx });
+                // What a switch it took over from held back is due now.
+                for (due, kind) in delayed.drain(..) {
+                    let at = usize::try_from(due.saturating_sub(ctx.time)).unwrap_or(usize::MAX);
+                    notes.send_played(at.min(frames.saturating_sub(1)), kind);
+                }
                 pass_on(events, notes);
+            } else if *bypassed {
+                // As late as the device would have played them.
+                device.flush(&ProcessContext { events, ..*ctx });
+                let passed = |e: &&NodeEvent| {
+                    matches!(
+                        e.kind,
+                        NodeEventKind::Note(_) | NodeEventKind::Controller { .. }
+                    )
+                };
+                for event in events.iter().filter(passed) {
+                    let due = ctx.time + (event.offset + *latency) as u64;
+                    match delayed.len() < delayed.capacity() {
+                        true => delayed.push_back((due, event.kind)),
+                        false => notes.drop_more(1),
+                    }
+                }
+                let until = ctx.time + end as u64;
+                while let Some(&(due, kind)) = delayed.front()
+                    && due < until
+                {
+                    delayed.pop_front();
+                    // One a switch it took over from held back may be late.
+                    notes.send_played(due.saturating_sub(ctx.time) as usize, kind);
+                }
             } else {
                 chased.clear();
                 if std::mem::take(&mut fresh) {
@@ -1457,6 +1616,173 @@ mod tests {
         }
     }
 
+    /// A device that plays out a note of its own each time it starts
+    /// afresh, held until it stops, a key higher each time.
+    struct Restarts {
+        made: Vec<(u64, NoteEvent)>,
+        fresh: bool,
+        started: u64,
+    }
+
+    impl Node for Restarts {
+        fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            if std::mem::take(&mut self.fresh) {
+                self.started += 1;
+                let key = 59 + self.started as u8;
+                self.made.push((ctx.time, on(self.started, key)));
+            }
+            output.clear();
+        }
+
+        fn reset(&mut self) {
+            self.fresh = true;
+        }
+
+        fn made_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+            for (time, note) in self.made.drain(..) {
+                notes.send((time - ctx.time) as usize, note);
+            }
+        }
+    }
+
+    /// A device that plays out a note at each engine time in `at`, held
+    /// until it stops.
+    struct Emits {
+        at: Vec<u64>,
+        made: Vec<(u64, NoteEvent)>,
+    }
+
+    impl Node for Emits {
+        fn process(&mut self, ctx: &ProcessContext<'_>, _: Inputs<'_>, output: &mut AudioMut<'_>) {
+            let frames = ctx.time..ctx.time + ctx.frames as u64;
+            for (n, &at) in self.at.iter().enumerate() {
+                if frames.contains(&at) {
+                    self.made.push((at, on(n as u64 + 1, 60 + n as u8)));
+                }
+            }
+            output.clear();
+        }
+
+        fn made_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+            for (time, note) in self.made.drain(..) {
+                notes.send((time - ctx.time) as usize, note);
+            }
+        }
+    }
+
+    #[test]
+    fn a_note_made_on_the_last_frame_before_a_stop_at_the_blocks_end_ends_with_it() {
+        use crate::graph::{Graph, NodeKey};
+        use crate::{AudioRef, Block, ReferenceRenderer, TransportState};
+        let device = Emits {
+            at: vec![0, 959],
+            made: Vec::with_capacity(4),
+        };
+        let mut g = Graph::new();
+        let switch_node = g.add(NodeKey(0), Switch::new(Box::new(device), false));
+        let kept = Kept {
+            notes: Vec::with_capacity(32),
+            controllers: Vec::with_capacity(32),
+        };
+        let kept = g.add(NodeKey(1), kept);
+        g.send_made_notes(switch_node, kept).unwrap();
+        g.set_output(kept).unwrap();
+        let config = EngineConfig {
+            sample_rate: 48_000,
+            max_block: 480,
+        };
+        let mut graph = g.prepare(&config).unwrap();
+        let tempo = musicable_model::time::TempoMap::default();
+        let mut run = |time, events: &[NodeEvent]| {
+            for &event in events {
+                assert!(graph.route(switch_node, event));
+            }
+            let block = Block {
+                frames: 480,
+                time,
+                transport: TransportState::default(),
+                tempo: &tempo,
+                input: AudioRef::empty(480),
+                midi: &[],
+                ahead: false,
+            };
+            crate::rt::scope(|| assert_eq!(graph.run(&mut ReferenceRenderer, &block), 0));
+            kept_by(&mut graph, kept).notes.clone()
+        };
+        let release = musicable_model::clip::Note::RELEASE_VELOCITY;
+        assert_eq!(run(0, &[]), [(0, on(1, 60))]);
+        // Bypassed on the block's first frame, its fade is over at the
+        // block's end, where it stops, just after the note it made on the
+        // block's last frame, which ends with the other.
+        let ended = run(480, &[switch(0, true)]);
+        assert_eq!(ended[0], (479, on(2, 61)));
+        let mut offs: Vec<_> = ended[1..].to_vec();
+        offs.sort_by_key(|(_, note)| note.note().0);
+        assert_eq!(offs, [(479, off(1, release)), (479, off(2, release))]);
+    }
+
+    #[test]
+    fn a_device_brought_back_in_the_block_it_stopped_in_plays_on_until_it_stops_again() {
+        use crate::graph::{Graph, NodeKey};
+        use crate::{AudioRef, Block, ReferenceRenderer, TransportState};
+        let restarts = Restarts {
+            made: Vec::with_capacity(4),
+            fresh: true,
+            started: 0,
+        };
+        let mut g = Graph::new();
+        let switch_node = g.add(NodeKey(0), Switch::new(Box::new(restarts), false));
+        let kept = Kept {
+            notes: Vec::with_capacity(32),
+            controllers: Vec::with_capacity(32),
+        };
+        let kept = g.add(NodeKey(1), kept);
+        g.send_made_notes(switch_node, kept).unwrap();
+        g.set_output(kept).unwrap();
+        let config = EngineConfig {
+            sample_rate: 48_000,
+            max_block: 2048,
+        };
+        let mut graph = g.prepare(&config).unwrap();
+        let tempo = musicable_model::time::TempoMap::default();
+        let mut run = |time, events: &[NodeEvent]| {
+            for &event in events {
+                assert!(graph.route(switch_node, event));
+            }
+            let block = Block {
+                frames: 2048,
+                time,
+                transport: TransportState::default(),
+                tempo: &tempo,
+                input: AudioRef::empty(2048),
+                midi: &[],
+                ahead: false,
+            };
+            crate::rt::scope(|| assert_eq!(graph.run(&mut ReferenceRenderer, &block), 0));
+            kept_by(&mut graph, kept).notes.clone()
+        };
+        let release = musicable_model::clip::Note::RELEASE_VELOCITY;
+        assert_eq!(run(0, &[]), [(0, on(1, 60))]);
+        // Bypassed on frame 0, it stops once the fade is over, on frame 480,
+        // and its note ends there. Brought back on frame 600, it plays a
+        // note afresh, which sounds on. Bypassed again on frame 1000, 400
+        // frames short of its fade back, it fades out from there, stops on
+        // frame 1400, and that note ends there.
+        let events = [switch(0, true), switch(600, false), switch(1000, true)];
+        assert_eq!(
+            run(2048, &events),
+            [
+                (480, off(1, release)),
+                (600, on(2, 61)),
+                (1400, off(2, release))
+            ]
+        );
+        // Brought back and bypassed in the next blocks, it ends the note it
+        // played then too.
+        assert_eq!(run(4096, &[switch(0, false)]), [(0, on(3, 62))]);
+        assert_eq!(run(6144, &[switch(0, true)]), [(480, off(3, release))]);
+    }
+
     #[test]
     fn a_device_s_notes_made_as_it_renders_go_on_and_end_as_it_stops() {
         use crate::graph::{Graph, NodeKey};
@@ -1644,6 +1970,207 @@ mod tests {
         play(&mut graph, nodes, 64, &[], &[]);
         let log = log(&mut graph, nodes[1]);
         assert_eq!(log.changes, [(30, param), (64, modulation)]);
+    }
+
+    #[test]
+    fn a_midi_effect_gets_the_last_of_each_parameters_modulation_a_block_late() {
+        let effect = Octave::boxed();
+        let (mut graph, nodes) = notes_through(NoteSwitch::new(effect, false), Vec::new());
+        let modulation = |param, amount, note| NodeEventKind::Modulation {
+            param: ParamId(param),
+            amount,
+            note,
+        };
+        let at = |offset, kind| NodeEvent { offset, kind };
+        // More of each than it could keep, each moving on every frame.
+        let mut moves = Vec::new();
+        for offset in 0..64 {
+            for param in 0..6 {
+                moves.push(at(offset, modulation(param, offset as f64, None)));
+            }
+            moves.push(at(offset, modulation(2, -(offset as f64), Some(NoteId(9)))));
+        }
+        play(&mut graph, nodes, 0, &[], &moves);
+        play(&mut graph, nodes, 64, &[], &[]);
+        let log = log(&mut graph, nodes[1]);
+        let mut last: Vec<_> = (0..6)
+            .map(|param| (64, modulation(param, 63.0, None)))
+            .collect();
+        last.push((64, modulation(2, -63.0, Some(NoteId(9)))));
+        assert_eq!(log.changes, last);
+    }
+
+    /// A MIDI effect that holds the notes it gets back by its latency, as
+    /// one that looks ahead does, and plays them on as they are.
+    struct HoldsBack {
+        latency: usize,
+        held: Vec<(u64, NoteEvent)>,
+    }
+
+    impl HoldsBack {
+        fn boxed(latency: usize) -> Box<dyn Node> {
+            let held = Vec::with_capacity(16);
+            Box::new(Self { latency, held })
+        }
+    }
+
+    impl Node for HoldsBack {
+        fn process(&mut self, _: &ProcessContext<'_>, _: Inputs<'_>, _: &mut AudioMut<'_>) {}
+
+        fn latency(&self) -> usize {
+            self.latency
+        }
+
+        fn play_notes(&mut self, ctx: &ProcessContext<'_>, notes: &mut Notes<'_>) {
+            for event in ctx.events {
+                if let NodeEventKind::Note(note) = event.kind {
+                    let due = ctx.time + (event.offset + self.latency) as u64;
+                    self.held.push((due, note));
+                }
+            }
+            let end = ctx.time + ctx.frames as u64;
+            self.held.retain(|&(due, note)| {
+                let now = due < end;
+                if now {
+                    notes.send((due - ctx.time) as usize, note);
+                }
+                !now
+            });
+        }
+    }
+
+    #[test]
+    fn a_midi_effect_whose_notes_come_with_its_sound_holds_them_back_bypassed_too() {
+        let script = vec![vec![(10, on(1, 60))], vec![(20, off(1, 0.5))]];
+        for (timing, latency) in [(NoteTiming::WithSound, 100), (NoteTiming::AsPlayed, 0)] {
+            for bypassed in [false, true] {
+                let effect = NoteSwitch::new(HoldsBack::boxed(100), bypassed);
+                let (mut graph, nodes) =
+                    notes_through(effect.with_note_timing(timing), script.clone());
+                // The graph waits for the notes as long as they're late.
+                assert_eq!(graph.latency(), latency, "{timing:?}");
+                let played: Vec<_> = (0..4)
+                    .map(|block| play(&mut graph, nodes, block * 64, &[], &[]))
+                    .collect();
+                // Played, it holds them back; bypassed, so does its switch,
+                // if they come with its sound.
+                let held = !bypassed || timing == NoteTiming::WithSound;
+                let expected = match held {
+                    true => [
+                        vec![],
+                        vec![(46, on(1, 60))],
+                        vec![(56, off(1, 0.5))],
+                        vec![],
+                    ],
+                    false => [
+                        vec![(10, on(1, 60))],
+                        vec![(20, off(1, 0.5))],
+                        vec![],
+                        vec![],
+                    ],
+                };
+                assert_eq!(played, expected, "{timing:?}, bypassed {bypassed}");
+            }
+        }
+        // Brought back while it holds notes back, the switch lets them go:
+        // the switch ends what sounds where it lands.
+        let effect = NoteSwitch::new(HoldsBack::boxed(100), true);
+        let (mut graph, nodes) =
+            notes_through(effect.with_note_timing(NoteTiming::WithSound), script);
+        assert!(play(&mut graph, nodes, 0, &[], &[]).is_empty());
+        assert_eq!(
+            play(&mut graph, nodes, 64, &[switch(0, false)], &[]),
+            [],
+            "the note held back never starts"
+        );
+    }
+
+    #[test]
+    fn what_takes_the_notes_a_latent_device_makes_waits_for_them_if_they_come_with_its_sound() {
+        use crate::graph::{Graph, NodeKey};
+        use crate::nodes::{Delay, Latent};
+        for (timing, latency) in [(NoteTiming::WithSound, 37), (NoteTiming::AsPlayed, 0)] {
+            let mut g = Graph::new();
+            let device = Box::new(Latent(Delay::new(37)));
+            let maker = g.add(
+                NodeKey(0),
+                Switch::new(device, false).with_note_timing(timing),
+            );
+            let kept = Kept {
+                notes: Vec::with_capacity(4),
+                controllers: Vec::with_capacity(4),
+            };
+            let kept = g.add(NodeKey(1), kept);
+            g.send_made_notes(maker, kept).unwrap();
+            g.set_output(kept).unwrap();
+            let config = EngineConfig {
+                sample_rate: 48_000,
+                max_block: 64,
+            };
+            assert_eq!(g.prepare(&config).unwrap().latency(), latency, "{timing:?}");
+        }
+    }
+
+    #[test]
+    fn what_a_bypassed_midi_effect_holds_back_goes_on_when_its_latency_changes() {
+        let script = vec![vec![(10, on(1, 60))], vec![(20, off(1, 0.5))]];
+        let release = || NoteSwitch::new(HoldsBack::boxed(100), true);
+        for (timing, latency, ends) in [
+            // It holds back no more: the end due on frame 184 is late, so it
+            // goes at once.
+            (NoteTiming::AsPlayed, 0, vec![(0, off(1, 0.5))]),
+            // It holds back as long.
+            (NoteTiming::WithSound, 100, vec![(56, off(1, 0.5))]),
+        ] {
+            let effect = release().with_note_timing(NoteTiming::WithSound);
+            let (mut graph, nodes) = notes_through(effect, script.clone());
+            assert_eq!(play(&mut graph, nodes, 0, &[], &[]), []);
+            assert_eq!(play(&mut graph, nodes, 64, &[], &[]), [(46, on(1, 60))]);
+            // A new graph takes over, with the end held back still to go on.
+            let effect = release().with_note_timing(timing);
+            let (mut next, next_nodes) = notes_through(effect, Vec::new());
+            let old = graph.nodes[nodes[1].0].as_mut();
+            next.nodes[next_nodes[1].0].adopt(old);
+            assert_eq!(next.latency(), latency);
+            let played: Vec<_> = (2..5)
+                .flat_map(|block| play(&mut next, next_nodes, block * 64, &[], &[]))
+                .collect();
+            assert_eq!(played, ends, "{timing:?}");
+        }
+    }
+
+    #[test]
+    fn a_record_of_notes_that_come_with_a_plugins_sound_says_how_late_they_are() {
+        use crate::graph::{Graph, NodeKey};
+        for (timing, late) in [(NoteTiming::WithSound, 100), (NoteTiming::AsPlayed, 0)] {
+            let mut g = Graph::new();
+            let script = g.add(
+                NodeKey(0),
+                Script {
+                    blocks: Vec::new(),
+                    next: 0,
+                },
+            );
+            let effect = NoteSwitch::new(HoldsBack::boxed(100), false).with_note_timing(timing);
+            let switch = g.add(NodeKey(1), effect);
+            let kept = Kept {
+                notes: Vec::with_capacity(4),
+                controllers: Vec::with_capacity(4),
+            };
+            let kept = g.add(NodeKey(2), kept);
+            g.send_notes(script, switch).unwrap();
+            g.send_notes(switch, kept).unwrap();
+            g.set_output(kept).unwrap();
+            g.add_note_record(NodeKey(10), switch).unwrap();
+            g.add_note_record(NodeKey(11), script).unwrap();
+            let config = EngineConfig {
+                sample_rate: 48_000,
+                max_block: 64,
+            };
+            let graph = g.prepare(&config).unwrap();
+            assert_eq!(graph.record_notes_late(NodeKey(10)), Some(late));
+            assert_eq!(graph.record_notes_late(NodeKey(11)), Some(0));
+        }
     }
 
     #[test]

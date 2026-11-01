@@ -53,7 +53,7 @@ mod windows;
 mod workspace;
 
 pub use browser::{Library, Listing, MAX_PREVIEW_VOLUME, MIN_PREVIEW_VOLUME, Preview};
-pub use devices::{PluginEntry, PluginParam, PluginStatus, Plugins};
+pub use devices::{PluginEntry, PluginParam, PluginStatus, Plugins, TimingFrom};
 pub use keys::{KeyPresses, chord, first_press};
 pub use mixer::{InputChoice, Level, Levels, MidiChoice};
 pub use mouse::{

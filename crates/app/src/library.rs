@@ -26,14 +26,14 @@ use musicable_library::{
     Adder, AudioFacts, Busy, FileId, Index, IndexError, Prepared, Preset, Priority, Query, Queue,
     Record, Searcher, scan,
 };
-use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings, PluginState};
+use musicable_model::plugin::{NoteTiming, PluginDevice, PluginKind, PluginSettings, PluginState};
 use musicable_model::{DeviceId, DeviceKind, PluginFormat};
 use musicable_plugins::Waker;
 use musicable_ui::Peaks;
 
 use crate::audio_files::{clip_path, waveform};
 use crate::media::FileReader;
-use crate::plugins::Plugins;
+use crate::plugins::{Plugins, TimingFrom};
 
 /// The index file's name in the config folder.
 pub const LIBRARY_FILE: &str = "library.json";
@@ -907,6 +907,8 @@ impl Library {
                     kind: plugins.kind_of(plugin),
                     inputs: Vec::new(),
                     note_output: false,
+                    note_timing: plugins.note_timing_of(plugin).0,
+                    note_timing_chosen: false,
                     settings: PluginSettings {
                         state: Some(state),
                         params: Vec::new(),
@@ -1188,6 +1190,29 @@ impl musicable_commands::Library for LibraryLink<'_> {
         never: bool,
     ) -> Result<(), String> {
         self.plugins.set_render_ahead(format, id, never)
+    }
+
+    fn set_plugin_note_timing(
+        &mut self,
+        format: PluginFormat,
+        id: &str,
+        timing: Option<NoteTiming>,
+    ) -> Result<(), String> {
+        self.plugins.set_note_timing(format, id, timing)
+    }
+
+    fn plugin_note_timing(
+        &self,
+        format: PluginFormat,
+        id: &str,
+        _kind: PluginKind,
+    ) -> Option<NoteTiming> {
+        let plugin = (self.plugins.installed().iter())
+            .find(|plugin| plugin.format == format && plugin.id == id)?;
+        match self.plugins.note_timing_of(plugin) {
+            (timing, TimingFrom::Marked | TimingFrom::Measured) => Some(timing),
+            (_, TimingFrom::Assumed) => None,
+        }
     }
 
     /// Saved from the plugin as it plays, as a preset saves it.

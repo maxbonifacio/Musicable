@@ -127,6 +127,7 @@ impl Registry {
                 let inputs = Choices {
                     audio: view.inputs,
                     midi: view.midi_inputs,
+                    plugins: Some(view.plugins.status),
                 };
                 framed(ui, |ui| {
                     let (project, levels, at) = (view.project, view.levels, view.playback.playhead);

@@ -592,6 +592,7 @@ the order the devices play.
 | `device.set_param` | Set Device Parameter | Sets the parameter `param` of the device `device` to `value`. A built-in device's parameter is its place in the kind's table, from 0, as [project-format.md](project-format.md) numbers them, and needs a value, which is kept in the parameter's range. A plugin's is the plugin's id for it, and without a value it's left to the plugin's state | none | none |
 | `device.set_bypass` | Set Device Bypass | Bypasses the devices `devices`, or brings them back with `bypassed` false: each stops, and what comes into it plays on, as late as its latency would make it, so the mix keeps its timing. It overrides their Bypass lanes, as moving a control does | none | The device's power button |
 | `device.set_active` | Set Device Active | Deactivates the devices `devices`, or activates them with `active` true. A deactivated device is out of the signal, latency and all, though it keeps its place and its settings, and a plugin stays loaded | none | none |
+| `device.set_note_timing` | Set Note Timing | Sets when the notes the plugin device `device` plays come, against its latency: `with_sound` or `as_played`, which someone chose, or `auto`, which leaves it to what the app found out of the plugin (`Transaction::follow_plugin_note_timing`) | none | none |
 | `device.toggle_bypass` | Toggle Device Bypass | Bypasses the devices selected in the devices panel, or brings them back if every one is bypassed | 0 in the devices panel | none |
 | `device.select` | Select Devices | Selects the devices `devices`, all of one chain, which the devices panel then shows, or adds them to the selection or takes those already in it away with `toggle`, and gives the panel the focus. With none, none are selected | none | Clicking a device's title bar |
 | `device.move` | Move Devices | Moves the devices `devices` to `index` or the end of the devices of `track`, the selected track, or the master with `master`, or with `new_track` onto a new track named after the first: a MIDI track if one is an instrument or a MIDI effect, an audio track if none is. `index` counts the chain without them. They keep their ids, so their lanes and their plugins go with them. A move that leaves a MIDI effect after its chain's instrument, or where there are no notes, is refused | none | Dragging a device's title bar |
@@ -835,11 +836,13 @@ there too. A file is named by its full path.
 | `browser.focus_search` | Search in Browser | Shows the browser, with the keys in the search field of the list showing | Ctrl+F | Ctrl+F |
 | `browser.set_plugin_kind` | Set Plugin Kind | Marks the installed plugin `plugin` of the format `format` as `kind`, `instrument`, `midi_effect` or `audio_effect`, for when the scan's rule gets it wrong: the browser lists it in that kind's folder from then on, and adds it as that kind. Marking it as the kind the scan found takes the mark away | none | none |
 | `browser.set_plugin_render_ahead` | Set Plugin Render Ahead | Sets the installed plugin `plugin` of the format `format` to `render_ahead`: `auto`, where it renders ahead of the audio device with the rest of the project unless it says it must render live, or `never`, where it renders live wherever it is, with what it plays into, in every project | none | none |
+| `browser.set_plugin_note_timing` | Set Plugin Note Timing | Marks when the notes the installed plugin `plugin` of the format `format` plays come, against its latency, `timing`: `with_sound` or `as_played`, or `auto`, which takes the mark away, so it's what the app measured or assumes for its kind. Its devices whose timing nobody chose follow it | none | none |
 
 The library's changes aren't the project's, so they aren't in its undo
 history: a tag is taken away with `browser.tag` too, a plugin marked as
 another kind is marked back with `browser.set_plugin_kind`, and a
-plugin's Render Ahead is set back with `browser.set_plugin_render_ahead`.
+plugin's Render Ahead is set back with `browser.set_plugin_render_ahead`,
+and its note timing with `browser.set_plugin_note_timing`.
 Add Folder without a
 folder and Search in Browser ask the app, with `Request::AddLibraryFolder`
 and `Request::FocusBrowserSearch`.

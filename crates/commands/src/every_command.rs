@@ -292,6 +292,14 @@ fn examples() -> Vec<Example> {
                     .with("kind", "midi_effect"),
             )
         }),
+        leaves(browser::SET_PLUGIN_NOTE_TIMING, |_| {
+            Some(
+                Args::new()
+                    .with("format", "clap")
+                    .with("plugin", "org.example.arp")
+                    .with("timing", "with_sound"),
+            )
+        }),
         leaves(browser::SET_PLUGIN_RENDER_AHEAD, |_| {
             Some(
                 Args::new()
@@ -624,6 +632,16 @@ fn examples() -> Vec<Example> {
             })
         }),
         edits(device::TOGGLE_BYPASS, device_selected),
+        // The other timing, which someone chose.
+        edits(device::SET_NOTE_TIMING, |s| {
+            let device = find_device(s, |d| d.plugin().is_some())?;
+            let (_, _, found) = project(s).find_device(device)?;
+            let timing = match found.kind.plugin()?.note_timing {
+                musicable_model::plugin::NoteTiming::WithSound => "as_played",
+                musicable_model::plugin::NoteTiming::AsPlayed => "with_sound",
+            };
+            Some(Args::new().with("device", device).with("timing", timing))
+        }),
         leaves(device::HIDE_WINDOW, |s| {
             let device = find_device(s, |d| d.plugin().is_some())?;
             Some(Args::new().with("device", device))
@@ -2478,6 +2496,8 @@ fn fixture() -> Project {
             name: "Sidechain".into(),
         }],
         note_output: false,
+        note_timing: musicable_model::plugin::NoteTiming::WithSound,
+        note_timing_chosen: false,
         settings: PluginSettings {
             state: Some(PluginState::new(*b"state")),
             params: vec![PluginParam { id: 1, value: 0.5 }],

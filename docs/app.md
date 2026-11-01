@@ -50,7 +50,9 @@ mcp` lets the agent whose client starts it, such as Claude Code, control the
 Musicable that's running, and `musicable api` prints the commands agents can
 run, as JSON ([agents.md](agents.md)). `musicable scan-plugin LIBRARY` is
 the plugin scan's own process for each library
-([plugins.md](plugins.md#scanning)).
+([plugins.md](plugins.md#scanning)), and `musicable time-plugin-notes
+FORMAT LIBRARY ID KIND` the process that plays a plugin to see when its
+notes come against its latency ([plugins.md](plugins.md#note-timing)).
 
 ## The Tier 0 demo
 
@@ -645,7 +647,8 @@ at that track's tap, its Pre FX, after one of its MIDI effects or at its
 Post FX, or after a plugin that plays notes out, what it made, which it
 writes into a buffer like a MIDI input's
 (`recorder::TapNotes`): each note and controller move, packed in two
-words, with the engine frame it played at, 16,384 of them. A MIDI track's
+words, with the engine frame it played at, as early as the engine says
+they're late, as a plugin's that come with its sound are, 16,384 of them. A MIDI track's
 Post FX can have both buffers, its sound for an audio track and its notes
 for a MIDI track, so the session keeps them apart (`recorder::Taps`), and
 each armed track says which it takes by its kind (`Armed::kind`). They go where
@@ -665,7 +668,9 @@ the change. The inputs' buffers hold 8 seconds at least: if the recorder falls f
 that, or an input stops capturing for two seconds, the recording has silence
 there, and the status bar says how much. A MIDI track's recording waits for
 its inputs to bring every message up to where it records, which the stream
-says 5 ms behind what's heard, for two seconds at most. A MIDI input's
+says 5 ms behind what's heard, for two seconds at most, and for another
+track's notes as long again as they can be late, `Graph::MAX_LATENCY`
+(`recorder::notes_patience`). A MIDI input's
 buffer holds 16,384 messages: if the recorder falls further behind, the
 status bar says how many are missing. A recording that the engine's
 replacement cuts short, for new audio settings, ends where it got to. One
@@ -723,7 +728,8 @@ Windows.
 it makes into takes, and how long it holds the inputs for (`capture_minutes`
 in [settings.toml](#settings-and-your-keymap)). A capture asked for while
 playing waits for the inputs to bring what was heard up to then, as a
-recording does, for two seconds at most. An audio input is held as 32-bit
+recording does, for two seconds at most, or longer for another track's
+notes. An audio input is held as 32-bit
 floats at the engine's sample rate, rounded up to a power of two of frames,
 and a MIDI input's 2,000 messages for each second take 24 MiB for 5 minutes.
 What's held is dropped when another project opens, when `capture_minutes`
@@ -944,7 +950,9 @@ to work for the app ([How it's built](#how-its-built)).
   them as one changes, and lists the plugins again. The same goes for the
   plugins set to Render Ahead Never (`browser.set_plugin_render_ahead`),
   in `[plugins.render_ahead]`, which the plugin's menu in the browser and
-  its devices' menus tick ([plugins.md](plugins.md#rendering-ahead)).
+  its devices' menus tick ([plugins.md](plugins.md#rendering-ahead)), and
+  the plugins marked as to when their notes come
+  (`browser.set_plugin_note_timing`), in `[plugins.note_timing]`.
 
 ### Behind the browser
 

@@ -200,7 +200,13 @@ MIDI track's Post FX can have both, and writers of two taps that come to
 the same node, such as Pre FX and Post FX on a track without MIDI effects,
 share its notes. The engine hands them to the writer's `write_notes` after
 its frames, each at its offset into the block, the
-block's notes empty where the graph hasn't the record. A note played at
+block's notes empty where the graph hasn't the record, with how late they
+are (`PreparedGraph::record_notes_late`): a plugin's that come with its
+sound come its latency after what played them. What was rendered ahead
+comes from the writer's queue, which says how late the notes are whenever
+that changes, even in a block without notes, so a writer that settles its
+buffer as far as the notes still to come were played never settles past
+one. The writer puts each note as early as it's late, as `TapNotes` does. A note played at
 `t` left the clips then, so it belongs at `p`, without the latency: the
 notes of the other track's clips land on them, and those played live on it
 where the engine played them, later than that track's own take has them by
@@ -398,12 +404,40 @@ late its output is: `Node::latency`, read once the node is prepared.
   does, needs a new graph, and the new graph compensates for the new
   latency.
 
-Two things aren't delayed. Notes sent with `Graph::send_notes` or
-`send_side_notes` arrive at an instrument when they're due, so its sound
-lines up as long as nothing latent comes before it on its track, which is
-the usual chain. And meters measure
-where they are, before the delays at the buses, so a latent track's meter
-moves later than a dry one's.
+Notes can be late too. A node's notes are as late as those that come to
+it, and as the node's own notes latency (`Node::notes_latency`): a plugin's
+latency, for a MIDI effect or a plugin that plays notes out whose notes
+come with its sound (`NoteTiming::WithSound`, [plugins.md](plugins.md#note-timing)),
+and nothing for the rest. A node that makes notes as it renders makes them
+as late as what comes into it, and its notes latency.
+
+- A node is as late as the latest of its audio and the notes that come to
+  it, plus its latency, so what plays a latent MIDI effect's notes, and
+  the rest of the mix after it, wait for them. `prepare` works it out
+  stage by stage, as made notes have the graph in stages: each stage's
+  players first, each after those whose notes it gets, then its nodes.
+- Where notes of different lateness meet at a node, such as two MIDI
+  tracks' at one instrument when only one has a latent MIDI effect, the
+  earlier ones go through a `nodes::NoteDelay` that holds them back by the
+  difference (`Graph::delay_notes`), so they all come as late as the
+  latest. A note delay is a node like any other that plays notes, with a
+  key the graph makes from the keys of the nodes at either end of the
+  route, with the top bit set, so the delay on the same route in the graph
+  that takes over carries on with what it held back, as late as it holds
+  back now, and one that goes ends what it had sounding there, as any
+  player does. It holds back four blocks' worth of notes at most, and what
+  it has no room to play in a block waits for the next.
+- Otherwise notes aren't delayed: the audio that comes with them waits
+  for them. Notes that come earlier than the audio they meet arrive when
+  they're due, so an instrument's sound lines up as long as nothing latent
+  comes before it on its track, which is the usual chain.
+- A note record says how late its notes are
+  (`PreparedGraph::record_notes_late`), and the engine hands its writer
+  that with them, which puts each that much earlier, so a recording puts
+  them where they belong ([Recording](#recording)).
+
+And meters measure where they are, before the delays at the buses, so a
+latent track's meter moves later than a dry one's.
 
 ## Bypassing devices
 
@@ -1156,7 +1190,10 @@ for either), in order with them, and takes room in a block as a note does.
   which stop it when the voice ends. CLAP plugins and the built-in
   instruments say when their voices end. Nothing reads it yet.
 - A node can send `Notes::CAPACITY` (512) note events in a block. The rest
-  are dropped, and counted in `Stats::events_dropped`.
+  are dropped, and counted in `Stats::events_dropped`, but for the ends of
+  all a node has sounding (`Notes::release_all`): those the block has no
+  room left for end first thing in the node's next turn, before anything
+  it plays then, so they come a block late but never go missing.
 - `Graph::plays_notes(node)` has a node play its notes even with nowhere
   to send them, as a MIDI effect without an instrument after it does, so
   it keeps its time and its record.
@@ -1169,7 +1206,10 @@ for either), in order with them, and takes room in a block as a note does.
   where its notes no longer go (`Notes::release_all` does both at once, as
   a switch does). Then the switches it holds on go on along the routes the
   swap adds, so a pedal a track's clips hold down holds whichever way
-  their notes go.
+  their notes go. A graph keeps room in its queue of events, and in what
+  comes to each node, for what a swap hands over (`graph::HAND_OVER`, as
+  many notes as a node can have sounding and every switch on every
+  channel). Beyond it, the rest are dropped and counted.
 
 **MIDI clips.** `MidiClips` sends the notes of a MIDI track's clips, with
 their expression, to the track's first instrument (`Track::instrument`),
@@ -1219,7 +1259,9 @@ messages. Reset All Controllers lets go of the switches held on as well. It
 knows what each controller holds (`MidiNotes::controllers`), so a recording
 can start with them where they are.
 
-A `MidiMonitor`'s notes have ids from 2^63 up, clear of clips' notes. When
+A `MidiMonitor`'s notes have ids from 2^63 up, the first range of
+`midi::played_notes`, clear of clips' notes and of the ranges plugins'
+notes take. When
 a swap gives a track another input, the notes held on the old one end at
 the next block. Another track's notes come into its side input with their
 own ids, which it gives new ones from the same count, so they can't clash
@@ -1244,8 +1286,11 @@ no sound, and none goes through it.
   with the block's notes and parameter changes, and sends on what the
   device plays. The modulation of its parameters comes as the block
   renders, after the notes have played, so the switch keeps it for the
-  device's next block (256 at most), which takes it at its first frame.
-- Bypassing (`Switch::BYPASS`) passes the notes on unchanged instead, and
+  device's next block, which takes it at its first frame: the last value
+  of each parameter, for every note or for one (256 of them at most).
+- Bypassing (`Switch::BYPASS`) passes the notes on unchanged instead,
+  held back by the device's latency if its notes come with its sound
+  (`NoteSwitch::with_note_timing`), as a bypassed device's dry copy is, and
   stops the device, which takes its events through `flush`, until it
   comes back afresh (`Node::reset`). Either way, the switch ends the notes
   sounding where it lands, and lets go of the switches held on there, such
@@ -1264,10 +1309,12 @@ no sound, and none goes through it.
   instrument or on a chain without notes, compiles as deactivated:
   commands never put one there (`Project::check_order`,
   `Project::fit_device`), but a file can.
-- A plugin's notes get ids of the engine's own, from 2^63 up, so they
-  can't clash with the notes played into it ([plugins.md](plugins.md#notes-and-the-transport)).
-  A monitor's ids start there too, but a MIDI effect's notes replace the
-  notes it gets, so no node gets both.
+- A plugin's notes get ids of the engine's own, so they can't clash with
+  the notes played into it ([plugins.md](plugins.md#notes-and-the-transport)).
+  Each plugin instance's take a range of their own (`midi::played_notes`),
+  apart from the monitors' and from each other's: an instrument gets both
+  a MIDI effect's notes and those it passes on as it's bypassed, which
+  still ring out, and two MIDI effects' in a row the same way.
 - Another MIDI track can take what a MIDI effect plays, after it, and what
   reaches the instrument, at Post FX ([Inputs from taps](#inputs-from-taps)).
 
@@ -1326,7 +1373,12 @@ plays them in the same block, never one late.
   that would close one through made notes. The project's flow catches
   the sound and the notes before then, but not modulation, so the
   compiler has a group's or the master's modulators skip the notes made
-  by a plugin they move, or by one before it.
+  by a plugin they move, or by one before it: it leaves out the whole way
+  they'd come, a note wire's or a track's own notes. It judges each way
+  against the graph before any joins it, in channel order, so the same
+  project always leaves out the same ones. `Project::unheard_notes` finds
+  them in the project, point by point, for the devices panel's warning
+  and agents, and a compile test holds the two to each other.
 - The compiler routes a plugin's made notes from the point after it
   (`Tap::Device`) to a MIDI track's input, a note wire or a note record,
   as it routes what a MIDI effect plays. A node hears that its notes go
@@ -1335,8 +1387,11 @@ plays them in the same block, never one late.
 - The switch passes its device's made notes on. A bypassed device makes
   none: as it stops, the notes it made that still sound end, on the frame
   it stops, and the switches it held on, such as the sustain pedal, come
-  up, so none hangs. A deactivated one is out of the signal, and makes
-  none.
+  up, so none hangs. A device brought back in the block it stopped in, or
+  stopping more than once in it, makes its notes afresh: the switch puts
+  each stop's ends among the device's notes where it stopped, so those it
+  makes after it sound on until it next stops. A deactivated one is out
+  of the signal, and makes none.
 - A plugin keeps its notes by engine time as it renders, so those it made
   in the parts of a block a switch renders apart each land where it
   played them ([plugins.md](plugins.md#notes-and-the-transport)).
@@ -2274,7 +2329,8 @@ thread, but node code shouldn't rely on denormals either way.
 | Pending events | 1024 events | New events are dropped and counted in `Stats::events_dropped` |
 | Old graphs and tempo maps waiting | 16 | The engine holds swaps and tempo maps until `collect_garbage` runs |
 | Nodes in a graph the parallel renderer shares | `ParallelOptions::max_nodes`, 16,384 by default | The audio thread renders the graph alone |
-| Notes a node sends in a block | `Notes::CAPACITY`, 512 | The rest are dropped and counted in `Stats::events_dropped` |
+| Notes a node sends in a block | `Notes::CAPACITY`, 512 | The rest are dropped and counted in `Stats::events_dropped`. Ends of all a node has sounding wait for its next block |
+| Ends and switches a swap hands over | `graph::HAND_OVER`, 614, besides the room for the new graph's own | The rest are dropped and counted in `Stats::events_dropped` |
 | Modulation a node sends through each port in a block | A value on every 32nd frame of engine time, and 17 more | The rest are dropped and counted in `Stats::events_dropped` |
 | Ticks a channel's modulators take on their events' frames | 16 a block, besides the grid | Later events wait for the next tick on the grid |
 | Notes a channel's modulators keep track of | 64 held at once | Later notes still start them, but don't hold their gates open |

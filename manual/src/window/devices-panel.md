@@ -120,6 +120,11 @@ panel or the mixer, to have the modulator move it, and the control shows how
 far its modulators take it
 ([Modulation](../using/modulation.md#the-modulator-strip)).
 
+On a group or the master, a line under the channel's name, in the warning
+colour, says which notes its modulators can't hear: those a plugin they
+move plays out, and whatever comes with them
+([Notes and triggers](../using/modulation.md#notes-and-triggers)).
+
 ## Built-in devices
 
 A built-in device has its name and its controls, which [Using the
@@ -145,7 +150,11 @@ A plugin device has its name, its kind and format ("Instrument · CLAP",
 
 Its right-click menu has the plugin's **Render Ahead**, as the browser's
 does, which holds for every device of the plugin
-([Plugins](../using/plugins.md#rendering-ahead)).
+([Plugins](../using/plugins.md#rendering-ahead)). For a MIDI effect, or a
+plugin that plays notes out, with a latency, it has the device's **Notes'
+Timing** too, with the latency: Auto, which says which it is and why, With
+Its Sound, or As It Plays Them
+([Plugins](../using/plugins.md#notes-timing-and-latency)).
 
 ## Presets
 

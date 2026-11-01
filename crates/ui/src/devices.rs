@@ -18,7 +18,8 @@ use egui::{
 use musicable_commands::{Args, CommandId, device, edit};
 use musicable_model::native::NativeKind;
 use musicable_model::param::ParamSpec;
-use musicable_model::plugin::PluginKind;
+use musicable_model::plugin::{NoteTiming, PluginDevice, PluginKind};
+use musicable_model::routing::UnheardNotes;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project};
 
 use crate::browser::{self, Destination, Dragged};
@@ -52,6 +53,11 @@ pub struct PluginEntry {
     ///
     /// [`browser::SET_PLUGIN_RENDER_AHEAD`]: musicable_commands::browser::SET_PLUGIN_RENDER_AHEAD
     pub never_ahead: bool,
+    /// When the user marked its notes as coming, against its latency, if
+    /// they did ([`browser::SET_PLUGIN_NOTE_TIMING`]).
+    ///
+    /// [`browser::SET_PLUGIN_NOTE_TIMING`]: musicable_commands::browser::SET_PLUGIN_NOTE_TIMING
+    pub note_timing: Option<NoteTiming>,
 }
 
 /// How a plugin device's plugin is doing.
@@ -68,6 +74,36 @@ pub struct PluginStatus {
     /// The parameters automation can move, in the plugin's order, once it's
     /// loaded: those it neither hides nor keeps to itself.
     pub params: Arc<[PluginParam]>,
+    /// Its plugin's latency, in milliseconds, once it's loaded.
+    pub latency_ms: f64,
+    /// When the notes its plugin plays come, against its latency, without
+    /// anyone choosing for the device, and why, where it matters: for a MIDI
+    /// effect, or a plugin that plays notes out, with a latency.
+    pub note_timing: Option<(NoteTiming, TimingFrom)>,
+}
+
+/// Why a plugin's note timing is what it is without anyone choosing for
+/// its device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimingFrom {
+    /// The user marked the plugin, for every project.
+    Marked,
+    /// Musicable played it, and heard.
+    Measured,
+    /// It's what's assumed for its kind, as nothing said otherwise.
+    #[default]
+    Assumed,
+}
+
+impl TimingFrom {
+    /// What menus say of it: "marked", "measured" or "assumed".
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Marked => "marked",
+            Self::Measured => "measured",
+            Self::Assumed => "assumed",
+        }
+    }
 }
 
 /// A plugin's parameter, for automation lanes to show.
@@ -171,6 +207,14 @@ impl DevicesPanel {
             });
         });
         ui.add_space(theme.devices.margin);
+        if let Some(chain) = chain {
+            for unheard in project.unheard_notes_of(chain) {
+                let text = RichText::new(unheard_text(project, unheard))
+                    .size(theme.small_text)
+                    .color(theme.warning);
+                ui.add(Label::new(text).wrap());
+            }
+        }
         self.boxes.clear();
         self.sight = None;
         let shown = chain.and_then(|chain| Some((chain, project.devices(chain)?)));
@@ -610,6 +654,13 @@ fn menu(
     if ui.add(delete).clicked() {
         actions.extend([select(targets.to_vec(), false), Action::Run(edit::DELETE)]);
     }
+    if let (Some(plugin), Some(status)) =
+        (device.kind.plugin(), view.plugins.status.get(&device.id))
+        && let Some(default) = status.note_timing
+    {
+        ui.separator();
+        note_timing_items(ui, device.id, plugin, status.latency_ms, default, actions);
+    }
     // The device's own plugin's, which holds for all of its devices.
     let installed = device.kind.plugin().and_then(|plugin| {
         (view.plugins.installed.iter())
@@ -1045,6 +1096,95 @@ fn plugin_menu(ui: &mut Ui, plugin: &PluginEntry, actions: &mut Vec<Action>) {
     }
     ui.separator();
     render_ahead_items(ui, plugin, actions);
+    ui.separator();
+    ui.menu_button("Notes' Timing", |ui| {
+        let items = [
+            (
+                "Auto",
+                None,
+                "As Musicable measured it, or assumes for its kind",
+            ),
+            (
+                NoteTiming::WithSound.name(),
+                Some(NoteTiming::WithSound),
+                "As late as its sound, as a MIDI effect that looks ahead, or a note detector, \
+                 has them",
+            ),
+            (
+                NoteTiming::AsPlayed.name(),
+                Some(NoteTiming::AsPlayed),
+                "As early as what comes into it, as a synth's arpeggiator plays its steps",
+            ),
+        ];
+        for (name, timing, tip) in items {
+            if ui
+                .radio(plugin.note_timing == timing, name)
+                .on_hover_text(tip)
+                .clicked()
+            {
+                let args = Args::new()
+                    .with("format", format_key(plugin.format))
+                    .with("plugin", plugin.id.as_str())
+                    .with("timing", timing.map_or("auto", NoteTiming::key));
+                actions.push(Action::RunWith(
+                    musicable_commands::browser::SET_PLUGIN_NOTE_TIMING,
+                    args,
+                ));
+                ui.close();
+            }
+        }
+    })
+    .response
+    .on_hover_text(
+        "When the notes the plugin plays come, against its latency, for its devices whose \
+         timing nobody chose",
+    );
+}
+
+/// The items of a plugin device's menu that set when the notes it plays
+/// come, against its plugin's latency, `latency_ms`: Auto, which is
+/// `default` and says why, With Its Sound, or As It Plays Them.
+fn note_timing_items(
+    ui: &mut Ui,
+    device: DeviceId,
+    plugin: &PluginDevice,
+    latency_ms: f64,
+    default: (NoteTiming, TimingFrom),
+    actions: &mut Vec<Action>,
+) {
+    let heading = format!("Notes' Timing (latency {latency_ms:.1} ms)");
+    ui.label(RichText::new(heading).weak()).on_hover_text(
+        "When the notes the plugin plays come, which neither CLAP nor VST3 says. If what plays \
+         them is about the plugin's latency late or early, try the other.",
+    );
+    let (timing, from) = default;
+    let auto = format!("Auto: {} ({})", timing.name(), from.name());
+    let items = [
+        (auto, "auto", !plugin.note_timing_chosen),
+        (
+            NoteTiming::WithSound.name().to_owned(),
+            NoteTiming::WithSound.key(),
+            plugin.note_timing_chosen && plugin.note_timing == NoteTiming::WithSound,
+        ),
+        (
+            NoteTiming::AsPlayed.name().to_owned(),
+            NoteTiming::AsPlayed.key(),
+            plugin.note_timing_chosen && plugin.note_timing == NoteTiming::AsPlayed,
+        ),
+    ];
+    let tips = [
+        "As the plugin was marked, Musicable measured it, or assumes for its kind",
+        "As late as its sound, as a MIDI effect that looks ahead, or a note detector, has them: \
+         the rest of the mix waits for them",
+        "As early as what comes into it, as a synth's arpeggiator plays its steps as they fire",
+    ];
+    for ((name, key, chosen), tip) in items.into_iter().zip(tips) {
+        if ui.radio(chosen, name).on_hover_text(tip).clicked() {
+            let args = Args::new().with("device", device).with("timing", key);
+            actions.push(Action::RunWith(device::SET_NOTE_TIMING, args));
+            ui.close();
+        }
+    }
 }
 
 /// The items of a plugin's menus that set its Render Ahead, for every
@@ -1124,6 +1264,33 @@ pub(crate) fn onto(args: Args, chain: Option<Chain>) -> Args {
     }
 }
 
+/// What the devices panel says of notes a channel's modulators don't hear
+/// ([`Project::unheard_notes`]).
+fn unheard_text(project: &Project, unheard: UnheardNotes) -> String {
+    let maker = project
+        .find_device(unheard.maker)
+        .map_or("A plugin", |(_, _, device)| device.kind.name());
+    let from = unheard
+        .wire
+        .and_then(|id| project.wires.iter().find(|w| w.id == id))
+        .and_then(|wire| project.tap_name(wire.from));
+    let notes = match from {
+        Some(tap) => format!("the notes from {tap}"),
+        None => "the notes from this track's input".to_owned(),
+    };
+    match unheard.through {
+        Some(through) => format!(
+            "The modulators don't hear {notes}: they'd make a loop with {}'s modulators, which \
+             hear notes too, through the notes {maker} plays out.",
+            modulators::channel_name(project, through)
+        ),
+        None => format!(
+            "The modulators don't hear {notes}: {maker} plays them out, and they move it, or \
+             something before it."
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use egui::accesskit::Toggled;
@@ -1154,6 +1321,8 @@ mod tests {
             kind,
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings::default(),
         }))
     }
@@ -1166,6 +1335,7 @@ mod tests {
             vendor: vendor.to_owned(),
             kind,
             never_ahead: false,
+            note_timing: None,
         }
     }
 
@@ -1327,6 +1497,97 @@ mod tests {
         click(&mut harness, "Add Device...");
         harness.get_by_label("Plugins");
         assert!(actions(&mut harness).is_empty());
+    }
+
+    #[test]
+    fn a_plugin_devices_menu_sets_when_its_notes_come_where_it_matters() {
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let arp = plugin(&mut project, "Humanize", PluginKind::MidiEffect);
+        let synth = plugin(&mut project, "Surge XT", PluginKind::Instrument);
+        (project.track_mut(keys).unwrap().devices).extend([arp.clone(), synth.clone()]);
+        let mut harness = harness(project);
+        let state = harness.state_mut();
+        state.editor.selected_track = Some(Chain::Track(keys));
+        let latent = PluginStatus {
+            loaded: true,
+            latency_ms: 20.0,
+            note_timing: Some((NoteTiming::WithSound, TimingFrom::Measured)),
+            ..PluginStatus::default()
+        };
+        state.plugin_status.insert(arp.id, latent);
+        state
+            .plugin_status
+            .insert(synth.id, PluginStatus::default());
+        harness.run();
+        // Auto says what it is, and why, until someone chooses.
+        let pick = |harness: &mut Harness<'static, State>, item: &str| {
+            harness.get_by_label("Device Humanize").click_secondary();
+            harness.run();
+            harness.get_by_label(item).click();
+            harness.run();
+        };
+        pick(&mut harness, "Auto: With Its Sound (measured)");
+        pick(&mut harness, "As It Plays Them");
+        let timing = |timing: &str| {
+            let args = Args::new().with("device", arp.id).with("timing", timing);
+            Action::RunWith(device::SET_NOTE_TIMING, args)
+        };
+        assert_eq!(
+            actions(&mut harness),
+            [
+                super::select(vec![arp.id], false),
+                timing("auto"),
+                super::select(vec![arp.id], false),
+                timing("as_played"),
+            ]
+        );
+        // Where it doesn't matter, the menu doesn't say.
+        harness.get_by_label("Device Surge XT").click_secondary();
+        harness.run();
+        assert!(harness.query_by_label_contains("Notes' Timing").is_none());
+    }
+
+    #[test]
+    fn the_panel_says_which_notes_the_modulators_cant_hear() {
+        // The Keys' synth plays out notes, which a note wire plays on the
+        // master's synth, and the master's Envelope, which hears what that
+        // plays, moves the Keys' synth.
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut echo = plugin(&mut project, "Echo", PluginKind::Instrument);
+        if let DeviceKind::Plugin(plugin) = &mut echo.kind {
+            plugin.note_output = true;
+        }
+        let master_synth =
+            project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Synth)));
+        let wire = project.new_wire(Tap::Device(echo.id), Port::Notes(master_synth.id));
+        project.wires.push(wire);
+        let envelope = project.new_modulator(
+            musicable_model::modulation::ModulatorKind::Envelope,
+            "Envelope 1",
+        );
+        let output = musicable_model::modulation::Output::new(envelope.id, 0);
+        let moves = project.new_routing(
+            output,
+            musicable_model::param::ParamAddress::Device(echo.id, 3),
+            0.5,
+        );
+        project.master.modulation.modulators.push(envelope);
+        project.master.modulation.routings.push(moves);
+        project.track_mut(keys).unwrap().devices.push(echo);
+        project.master.devices.push(master_synth);
+        let mut harness = harness(project);
+        harness.state_mut().editor.selected_track = Some(Chain::Master);
+        harness.run();
+        harness.get_by_label(
+            "The modulators don't hear the notes from Keys after Echo: Echo plays them out, and \
+             they move it, or something before it.",
+        );
+        // The Keys' own devices say nothing of it.
+        harness.state_mut().editor.selected_track = Some(Chain::Track(keys));
+        harness.run();
+        assert!(harness.query_by_label_contains("don't hear").is_none());
     }
 
     #[test]
@@ -2179,6 +2440,7 @@ mod tests {
         let state = harness.state_mut();
         state.plugins = vec![PluginEntry {
             never_ahead: true,
+            note_timing: None,
             ..entry("Outboard", "Example", PluginKind::AudioEffect)
         }];
         // Selected, so their menus don't select them.

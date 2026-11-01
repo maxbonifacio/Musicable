@@ -69,6 +69,14 @@ const FLUSH_SECONDS: u64 = 1;
 /// recording stops waiting for it and records silence in its place: an
 /// input that stalled.
 const PATIENCE_SECONDS: u64 = 2;
+
+/// How far behind the engine another track's notes can fall before a
+/// recording stops waiting for them, in frames at `rate`: the patience an
+/// input gets, and as long as the notes can be late, as a plugin's that
+/// come with its sound ([`Graph::MAX_LATENCY`](musicable_engine::Graph)).
+fn notes_patience(rate: u32) -> u64 {
+    u64::from(rate) * PATIENCE_SECONDS + musicable_engine::Graph::MAX_LATENCY as u64
+}
 /// How long the buffer of a tap that tracks record from holds what the
 /// engine wrote of it, in seconds, at least: as long as an audio input's.
 const TAP_SECONDS: u64 = 8;
@@ -198,13 +206,20 @@ impl TapWriter for TapNotes {
     /// A tap of notes has no sound.
     fn write(&mut self, _time: u64, _audio: AudioRef<'_>) {}
 
-    fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent]) {
+    /// Each note as early as it's late, at the frame it was played at,
+    /// and the buffer settled up to where the notes still to come were
+    /// played. Those of a graph that took over with notes later than
+    /// before go no earlier than what's written: they were played over the
+    /// same stretch as the notes before them.
+    fn write_notes(&mut self, time: u64, frames: usize, notes: &[NodeEvent], late: u64) {
         for event in notes {
             if let Some(words) = midi::pack(event.kind) {
-                self.writer.push(time + event.offset as u64, words);
+                let played = (time + event.offset as u64).saturating_sub(late);
+                self.writer.push(played, words);
             }
         }
-        self.writer.settle(time + frames as u64);
+        self.writer
+            .settle((time + frames as u64).saturating_sub(late));
     }
 }
 
@@ -810,7 +825,11 @@ impl Tape {
             // How far what it takes has brought everything, in engine time.
             let settled = i128::from(track.settled()) - track.lag(&segment);
             let settled = u64::try_from(settled.max(0)).unwrap_or(u64::MAX);
-            let stalled = self.until.saturating_sub(settled) > u64::from(rate) * PATIENCE_SECONDS;
+            let patience = match track.takes_notes() {
+                true => notes_patience(rate),
+                false => u64::from(rate) * PATIENCE_SECONDS,
+            };
+            let stalled = self.until.saturating_sub(settled) > patience;
             if settled < until && !forced && !stalled {
                 if settled <= e {
                     break;

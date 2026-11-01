@@ -121,6 +121,8 @@ impl Random {
             kind: self.pick(&PluginKind::ALL),
             inputs: Vec::new(),
             note_output: false,
+            note_timing: musicable_model::plugin::NoteTiming::WithSound,
+            note_timing_chosen: false,
             settings: PluginSettings { state, params },
         })
     }
