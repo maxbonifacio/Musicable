@@ -191,4 +191,5 @@
 | Command | Keys | Id |
 |---|---|---|
 | Stop Recording Output |  | `debug.stop_recording_output` |
+| Open Blind Test... |  | `debug.open_blind_test` |
 

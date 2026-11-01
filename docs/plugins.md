@@ -17,7 +17,7 @@ says what's different there.
 | `Instance`: a `clap::Instance` or a `vst3::Instance` | Main thread | Loads a plugin's library, makes and initializes the plugin, activates it, and carries out everything else the format wants done on the main thread. `Instance::new` takes the format, and the app holds every plugin as an `Instance` |
 | `NodeSource`, `ClapNode`, `Vst3Node` | Compiler and audio threads | `Instance::node_source` makes the nodes that process the plugin in the engine's graph |
 | `scan` | A process of its own | Lists the plugins in a library, so one that crashes or hangs as it loads takes only the scanner down; `ScanCache` remembers what was found |
-| `crates/test-plugins` | Tests | A gain, a synth and an arpeggiator, as a CLAP library and a VST3 module, that check the host keeps the formats' rules, and copies that crash, hang or fail to load |
+| `crates/test-plugins` | Tests | A gain, a synth, an arpeggiator and a CPU load, as a CLAP library and a VST3 module, that check the host keeps the formats' rules, and copies that crash, hang or fail to load |
 | `Plugins` | The app's main thread | An instance for each plugin device in the open project, kept in step with it both ways (`crates/app/src/plugins.rs`) |
 | `PluginScan` | A thread of the app's | Scans in the background, each library in a process of its own, and keeps what it found (`crates/app/src/plugin_scan.rs`) |
 | `PluginWindows` | The app's main thread | The plugins' own windows, and Musicable's windows they go inside (`crates/app/src/plugin_windows.rs`) |
@@ -570,7 +570,7 @@ CLAP asks.
 
 ## Testing
 
-`crates/test-plugins` builds a CLAP library with three plugins. Test Gain
+`crates/test-plugins` builds a CLAP library with four plugins. Test Gain
 multiplies by its Gain and delays by its Latency, which it reports, and
 asks to restart when the latency changes. Its Bypass, marked as its
 bypass, plays its input unchanged, as late as its latency makes it. Its
@@ -590,13 +590,21 @@ the one before, so tests hear which channel each note came on, in either
 dialect. Test Arpeggiator, a note effect,
 plays the keys held in turn, lowest first, an eighth of a second each,
 transposed by its Transpose, as CLAP's own notes with ids of its own, or as
-MIDI from a copy whose name starts with `midi`. All three
+MIDI from a copy whose name starts with `midi`. Test Load, a stereo
+effect, passes its input through unchanged, then spins for its Cost, in
+microseconds for each 64 frames, so a project of them costs the CPU a set
+time. Its Jitter makes one block in about 16, chosen from the block's
+number, take up to ten times as long, the same spikes on every run. Its
+read-only Position says the last song position it rendered, the end of its
+last block, which agents read from `get_device`'s `readouts` to tell how far
+ahead of the playhead the engine renders; the host keeps no read-only
+parameter in the project. All four
 check which thread the host calls each function on, and in which state, and
 count every breach. Tests drive them through hooks the library exports:
 turning a knob in the pretend window, changing state that isn't a
 parameter, asking for a callback or a resize.
 
-The library is also a VST3 module with the same three plugins. There, Test
+The library is also a VST3 module with the first three plugins. There, Test
 Gain is a component with a controller of its own, which tells the
 component about state that isn't a parameter in a message, asks to restart
 for a new latency, and has a meter, Peak, which the processor sets. Test

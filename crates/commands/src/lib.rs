@@ -433,6 +433,13 @@ pub enum Request {
     RecordOutput(PathBuf),
     /// Stop recording what the audio device plays.
     StopRecordingOutput,
+    /// Measure a device's response, offline: see [`debug`].
+    MeasureResponse(Probing),
+    /// Make a blind test: see [`debug::MAKE_BLIND_TEST`].
+    MakeBlindTest(BlindRound),
+    /// Open the blind test in this folder to be judged, or the one the
+    /// user picks.
+    OpenBlindTest(Option<PathBuf>),
     /// Clear the highest peak of every channel's meter.
     ClearPeaks,
     /// Give `command` these keys, everywhere or in a panel, in place of
@@ -466,6 +473,32 @@ pub struct ExportOptions {
     /// The tracks to write on their own: all of them without it.
     pub tracks: Option<Vec<TrackId>>,
 }
+
+/// The round of pairs [`debug::MAKE_BLIND_TEST`] makes: each file of
+/// `first` paired with the one at its place in `second`, in `folder`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlindRound {
+    pub folder: PathBuf,
+    pub first: Vec<PathBuf>,
+    pub second: Vec<PathBuf>,
+    pub first_name: String,
+    pub second_name: String,
+    pub name: String,
+    pub abx: bool,
+    pub seed: Option<u64>,
+}
+
+/// What [`debug::MEASURE_RESPONSE`] measures: `device`'s response, with
+/// noise at `level_dbfs`, and its gain and phase at the frequencies `at`.
+/// The numbers are finite, so it's `Eq`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Probing {
+    pub device: DeviceId,
+    pub level_dbfs: Option<f64>,
+    pub at: Vec<f64>,
+}
+
+impl Eq for Probing {}
 
 /// The audio device to play through, and how, as
 /// [`options::SET_AUDIO_DEVICE`] asks for it. What's `None` stays as it is.

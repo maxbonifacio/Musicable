@@ -1404,12 +1404,14 @@ fn the_app_scans_each_library_in_a_process_of_its_own() {
     };
     // A CLAP library and a VST3 bundle.
     let copies = |name| [testing::copy(&dir, name), testing::copy_vst3(&dir, name).0];
-    for good in copies("good") {
+    // The VST3 module has all but Test Load.
+    let all = ["Test Gain", "Test Synth", "Test Arpeggiator", "Test Load"];
+    for (good, count) in copies("good").into_iter().zip([4, 3]) {
         let Outcome::Found(found) = scanned(&good) else {
             panic!("the test plugins weren't found in {}", good.display());
         };
         let names: Vec<&str> = found.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["Test Gain", "Test Synth", "Test Arpeggiator"]);
+        assert_eq!(names, all[..count]);
         // A MIDI effect, which a VST3 plugin says only through its buses,
         // as the scanning process counts them.
         assert_eq!(found[2].kind(), PluginKind::MidiEffect);

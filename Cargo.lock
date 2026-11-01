@@ -2127,6 +2127,7 @@ dependencies = [
  "musicable-ui",
  "png",
  "raw-window-handle",
+ "realfft",
  "rfd",
  "rmcp",
  "rubato",

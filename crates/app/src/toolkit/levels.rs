@@ -25,7 +25,7 @@ fn loudness() -> AudioCommand {
                 short-term loudness, with its sample peak, true peak, RMS level, DC offset and \
                 clipped samples. With from or to, it measures that stretch of each file.",
         params,
-        positional: "files",
+        positional: &["files"],
         read_only: true,
         example: &["tone.wav", "voice.aif"],
         run: run_loudness,
@@ -172,7 +172,7 @@ fn find() -> AudioCommand {
                 ends too, to the frame. The quietest are looked for between the first sound and \
                 the last. With from or to, it looks in that stretch of the file.",
         params,
-        positional: "file",
+        positional: &["file"],
         read_only: true,
         example: &["tone.wav", "--what", "loudest", "--length", "0.5"],
         run: run_find,

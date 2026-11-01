@@ -42,6 +42,8 @@ log = "0.4"
 siphasher.workspace = true
 # audio.convert's resampler.
 rubato.workspace = true
+# audio.compare's correlation and spectra.
+realfft.workspace = true
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["eframe"] }

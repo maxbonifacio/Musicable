@@ -7,7 +7,9 @@ manual to the checks CI runs, and [docs](docs) says how each part works.
 ## Audio files: use the audio toolkit
 
 When you need to look into an audio file, cut, join or convert one,
-change its level, measure its loudness or find where its sound is, use
+change its level, measure its loudness or spectrum, find where its sound
+is, compare two renders or a recording with an export, line files up at
+one loudness for blind pairs, or make a test signal, use
 Musicable's own audio commands, rather than writing a script or reaching
 for ffmpeg or sox. They read and write WAV, AIFF and FLAC files exactly,
 measure loudness as EBU R 128 does, and say what they did as JSON.
@@ -22,6 +24,10 @@ measure loudness as EBU R 128 does, and say what they did as JSON.
 | `gain` | Makes a file louder or quieter, by decibels, or to a loudness or a peak |
 | `loudness` | Integrated loudness, loudness range, momentary and short-term maxima, sample and true peaks, RMS |
 | `find` | The loudest or quietest stretches of a length, or where sound and silence are |
+| `compare` | Lines B up with A and says how it differs: offset, gain, what's left and where, loudness, bands, onset timing, clicks |
+| `spectrum` | Levels in third octaves or octaves, centroid, roll-off, flatness, the strongest peaks as notes, and a pitch's partials: level, purity, beating |
+| `match` | Lines files up with a reference and writes them again at one loudness, as long as the reference |
+| `generate` | Writes a sine, sweep, white or pink noise, clicks at a tempo, an impulse or silence |
 
 Build the program once, then run them in a shell:
 
@@ -49,6 +55,15 @@ one in 20.
 - The same commands are MCP tools, `audio_info`, `audio_cut` and so on, in
   `musicable mcp`, which runs them itself, with Musicable closed. Give
   them whole paths.
+- `compare A B` is the check that one file plays another: `identical`
+  says whether every sample is the same, and otherwise it lines B up
+  (`offset_ms`), matches its level (`gain_db`) and says how loud what's
+  left is (`residual_db`, against A). `--no-align --no-match-level`
+  compares them as they are, as a recording against its export needs.
+  Its `onsets.median_lag_ms` says how early or late B's transients are,
+  and `clicks` lists the clicks one has and the other doesn't; `--at`
+  measures the high frequencies at positions you give, such as a slice's
+  loop turns.
 - For a file's tempo, beats, bars and transients, as warping finds them,
   run `musicable analyse FILE`. Without the network's model files, which
   `scripts/fetch-models.sh` fetches, give `--fast`. Its `--json` lists

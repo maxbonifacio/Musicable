@@ -245,6 +245,30 @@ fn examples() -> Vec<Example> {
             Some(Args::new().with("file", "/checks/output.wav"))
         }),
         leaves(debug::STOP_RECORDING_OUTPUT, bare),
+        leaves(debug::MAKE_BLIND_TEST, |_| {
+            Some(
+                Args::new()
+                    .with("folder", "/checks/round")
+                    .with("first", vec!["/checks/live.wav"])
+                    .with("second", vec!["/checks/ours.wav"])
+                    .with("first_name", "Live")
+                    .with("second_name", "Musicable"),
+            )
+        }),
+        leaves(debug::OPEN_BLIND_TEST, |_| {
+            Some(Args::new().with("folder", "/checks/round"))
+        }),
+        // Without a folder: the app asks for one.
+        leaves(debug::OPEN_BLIND_TEST, bare),
+        leaves(debug::MEASURE_RESPONSE, |s| {
+            let device = find_device(s, |d| !d.is_instrument() && !d.is_midi_effect())?;
+            Some(
+                Args::new()
+                    .with("device", device)
+                    .with("level_dbfs", -24.0)
+                    .with("at", vec![1000.0]),
+            )
+        }),
         leaves(browser::ADD_FOLDER, |_| {
             Some(Args::new().with("folder", "/samples"))
         }),

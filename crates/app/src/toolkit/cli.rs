@@ -181,24 +181,40 @@ pub(super) fn parse(command: &AudioCommand, texts: &[String]) -> Result<Parsed, 
         }
     }
     if !positional.is_empty() {
-        let param = find(command, command.positional).expect("a command has its positional one");
-        let value = match param.ty {
-            Type::List(_) => match args.value(&param.name) {
-                Some(Value::List(given)) => Value::List([given.clone(), positional].concat()),
-                _ => Value::List(positional),
-            },
-            _ => match <[Value; 1]>::try_from(positional) {
-                Ok([value]) if args.value(&param.name).is_none() => value,
-                _ => {
-                    return Err(format!(
-                        "musicable audio {} takes one {} before its options.",
-                        command.name(),
-                        param.name
-                    ));
-                }
-            },
+        let params: Vec<&Param> = (command.positional.iter())
+            .map(|name| find(command, name).expect("a command has its positional ones"))
+            .collect();
+        // A list last takes the rest; the others take one each.
+        let (singles, list) = match params.split_last() {
+            Some((last, rest)) if matches!(last.ty, Type::List(_)) => (rest, Some(*last)),
+            _ => (params.as_slice(), None),
         };
-        args.set(&param.name, value);
+        let given = singles
+            .iter()
+            .any(|param| args.value(&param.name).is_some());
+        let counts = match list {
+            Some(_) => positional.len() > singles.len(),
+            None => positional.len() == singles.len(),
+        };
+        if given || !counts {
+            return Err(format!(
+                "musicable audio {} takes {} before its options.",
+                command.name(),
+                before_options(&params)
+            ));
+        }
+        let mut positional = positional.into_iter();
+        for (param, value) in singles.iter().zip(positional.by_ref()) {
+            args.set(&param.name, value);
+        }
+        if let Some(param) = list {
+            let rest: Vec<Value> = positional.collect();
+            let value = match args.value(&param.name) {
+                Some(Value::List(given)) => Value::List([given.clone(), rest].concat()),
+                _ => Value::List(rest),
+            };
+            args.set(&param.name, value);
+        }
     }
     Ok(Parsed::Args(args))
 }
@@ -250,7 +266,6 @@ musicable audio <command> --help says what a command takes.
 
 /// What `musicable audio <command> --help` says.
 pub(super) fn help(command: &AudioCommand) -> String {
-    let positional = find(command, command.positional).expect("a command has its positional one");
     let files = files(command);
     let mut text = format!(
         "usage: musicable audio {} {files} [options] [--json]\n\n{}\n\n",
@@ -262,9 +277,16 @@ pub(super) fn help(command: &AudioCommand) -> String {
         ..26 => text += &format!("  {left:<26}{}\n", wrap(about, 28, 76).trim_start()),
         _ => text += &format!("  {left}\n{}\n", wrap(about, 28, 76)),
     };
-    line(files.to_owned(), &positional.about);
+    for name in command.positional {
+        let param = find(command, name).expect("a command has its positional ones");
+        let left = match command.positional {
+            [_] => files.clone(),
+            _ => first(command, name),
+        };
+        line(left, &param.about);
+    }
     for param in &command.params {
-        if param.name == command.positional {
+        if command.positional.contains(&param.name.as_ref()) {
             continue;
         }
         match param.optional {
@@ -283,11 +305,43 @@ pub(super) fn help(command: &AudioCommand) -> String {
 }
 
 /// What the command line calls `command`'s files, which it takes first:
-/// `FILE`, or `FILE...` for a command that takes more than one.
-pub(super) fn files(command: &AudioCommand) -> &'static str {
-    match find(command, command.positional).map(|param| param.ty) {
-        Some(Type::List(_)) => "FILE...",
-        _ => "FILE",
+/// `FILE`, `FILE...` for a command that takes any number, or their names,
+/// such as `A B`, for one that takes files for different things.
+pub(super) fn files(command: &AudioCommand) -> String {
+    match command.positional {
+        [name] => match find(command, name).map(|param| param.ty) {
+            Some(Type::List(_)) => "FILE...".to_owned(),
+            _ => "FILE".to_owned(),
+        },
+        names => (names.iter())
+            .map(|name| first(command, name))
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// What the command line calls the parameter `name` a command takes
+/// first, among others: its name in capitals, and `...` after a list.
+pub(super) fn first(command: &AudioCommand, name: &str) -> String {
+    match find(command, name).map(|param| param.ty) {
+        Some(Type::List(_)) => format!("{}...", name.to_uppercase()),
+        _ => name.to_uppercase(),
+    }
+}
+
+/// What `params`, the ones a command takes first, are, in an error.
+fn before_options(params: &[&Param]) -> String {
+    let names: Vec<&str> = params.iter().map(|param| param.name.as_ref()).collect();
+    match params {
+        [param] => format!("one {}", param.name),
+        [.., last] if matches!(last.ty, Type::List(_)) => {
+            format!(
+                "its {}, then its {}",
+                names[..names.len() - 1].join(", "),
+                last.name
+            )
+        }
+        params => format!("{} files, its {}", params.len(), names.join(" and ")),
     }
 }
 
@@ -298,6 +352,7 @@ pub(super) fn option(param: &Param) -> String {
         Type::Bool => option,
         Type::Choice(choices) => format!("{option} <{}>", choices.join("|")),
         Type::Int | Type::Number => format!("{option} <n>"),
+        Type::List(Type::Int | Type::Number) => format!("{option} <n>"),
         _ => format!("{option} <path>"),
     }
 }

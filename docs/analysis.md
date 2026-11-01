@@ -215,6 +215,82 @@ starts, loudness range, and true peaks between samples, up to the bursts
 of cases 20 to 23. The audio commands' tests check the command gives the
 same through files.
 
+## Comparing two files
+
+`audio.compare` ([`toolkit/compare.rs`](../crates/app/src/toolkit/compare.rs))
+says how B differs from A, for checks that a render plays a reference, a
+recording an export, or one warp mode another. It holds both files in
+memory, as 32-bit floats, up to 2^25 samples each, and works on their
+channels mixed to one for all but the residual and the gain:
+
+- **Identical** compares every sample as the files store them, without
+  lining them up, so it's exact for any encoding.
+- **Lining up** finds the offset from -`max_offset_ms` to `max_offset_ms`
+  where B correlates best with A, normalised over where they overlap, and
+  leaving at least half of the shorter overlapping. The correlation is
+  found a block of A at a time against the stretch of B it can line up
+  with, through FFTs, so a long file with a large offset stays quick. On
+  ties, the offset nearest 0 wins.
+- **The gain** is the least-squares gain that leaves least of B less A,
+  over every channel where they overlap.
+- **What's left** is B, lined up and at that gain, less A: its RMS level,
+  against A's (`residual_db`), and the 100 ms stretches where it's
+  loudest.
+- **Bands** come from the mean power spectrum of each, taken as
+  [Spectra](#spectra) describes, summed over the bands. Levels are RMS
+  levels, so a full-scale sine reads -3.01 dBFS.
+- **Onsets** are found in each as `analyse` finds them, through
+  `musicable_analysis::onsets`, and each of A's is matched with the
+  nearest of B's within 50 ms not taken already.
+- **Clicks** are found in the second difference of what's left, a
+  high-pass that rises 12 dB an octave: in blocks of 1 ms, a block whose
+  peak is `click_db` above the median of the blocks within 50 ms, and at
+  -80 dBFS or more, is a click, and clicks within 5 ms are one. Whichever
+  file's own second difference has more energy there has it. Its spread
+  is the share of its energy within 1 ms of its peak, of that within
+  5 ms.
+
+The pitch difference comes with the pitch command.
+
+`audio.match` lines files up with a reference as compare does, measures
+each one's integrated loudness lined up, over the reference's length, and
+writes each, and the reference, again into a folder, as long as the
+reference and at one loudness: the quietest's, the loudest's, or one
+given. It reads each file twice, once to measure and once to write, so
+it holds one file and the reference at a time.
+
+## Spectra
+
+`toolkit/spectra.rs` takes a sound's mean power spectrum a block at a
+time, by Welch's method, as compare's bands and `audio.spectrum` need:
+Hann windows of the power of two nearest 0.3 s above it, 16384 frames at
+44.1 and 48 kHz, overlapping by half, scaled so the bins add up to the
+mean square. A sound shorter than a window has one window of the largest
+power of two that fits. `audio.spectrum` averages its channels' spectra,
+and from them gives:
+
+- levels in IEC 61260's third octaves or octaves, each bin counting for
+  the share of its width in the band;
+- the centroid and the 85% roll-off, without the DC, and the flatness from
+  20 Hz to 20 kHz: the geometric mean of the bins over their arithmetic
+  mean;
+- the strongest peaks, bins higher than the 4 either side, placed between
+  bins by a parabola through their decibels, with the power of the 5 bins
+  around, which hold a tone's, and the note nearest each;
+- given a pitch, each harmonic's level, half the pitch either way, and its
+  purity, the share of that within 2.5 bins of it. Its beating comes from
+  the channels' mean turned down by the harmonic's frequency and
+  low-passed by four one-poles at a quarter of the pitch or 25 Hz,
+  whichever is lower: the envelope that leaves, read every 10 ms, ripples
+  as a partial split in two beats. Beating is the ripple from the
+  envelope's 10th percentile to its 90th. Harmonics 60 dB or more below
+  the loudest have neither.
+
+`audio.generate` writes the signals the tests and checks measure. Noise
+is xorshift64*, seeded by SplitMix64, a stream to each channel, and pink
+noise is Paul Kellet's filter on it, scaled to its RMS level by a first
+pass over the same noise.
+
 ## In the app
 
 `analyses.rs` in the app asks for the analysis of every audio file the

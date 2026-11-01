@@ -5,11 +5,14 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use musicable_commands::{Args, Editor, ExportOptions, Keymap, Registry, Request, Steps, arrange};
+use musicable_commands::{
+    Args, BlindRound, Editor, ExportOptions, Keymap, Registry, Request, Steps, arrange,
+};
 use musicable_engine::Lead;
 use musicable_mcp::pipe::Address;
 use musicable_mcp::{
-    CpuPart, CpuRow, Exporting, Host, Performance, PluginState, RenderingAhead, Reply, Run, Status,
+    CpuPart, CpuRow, Exporting, Host, Performance, PluginState, Readout, RenderingAhead, Reply,
+    Run, Status,
 };
 use musicable_model::param::ParamSpec;
 use musicable_model::time::Beats;
@@ -19,6 +22,7 @@ use serde_json::json;
 
 use super::{App, with_extension};
 use crate::audio_files::clip_path;
+use crate::blind_test;
 use crate::export::{Report, Stage};
 use crate::renders::RenderCache;
 
@@ -40,6 +44,8 @@ pub(super) struct Agents {
     asking: Option<Reply>,
     /// The agent's export that's under way.
     exporting: Option<Reply>,
+    /// The agent's measurement of a device's response that's under way.
+    measuring: Option<Reply>,
     /// The command that adds Musicable to Claude Code.
     claude_command: String,
 }
@@ -52,6 +58,7 @@ impl Agents {
             change: None,
             asking: None,
             exporting: None,
+            measuring: None,
             claude_command: claude_command(),
         }
     }
@@ -138,6 +145,7 @@ impl App {
             agents.change = None;
             agents.asking = None;
             agents.exporting = None;
+            agents.measuring = None;
             return;
         }
         if agents.host.is_some() {
@@ -291,6 +299,37 @@ impl App {
             )),
             Request::RecordOutput(file) => self.session.record_output(&file),
             Request::StopRecordingOutput => self.session.stop_recording_output(),
+            Request::MakeBlindTest(round) => match whole_paths(&round) {
+                Some(path) => Err(format!(
+                    "{} isn't a full path: give each file's full path, from the root of its \
+                     drive.",
+                    path.display()
+                )),
+                None => blind_test::make(&super::making(round)),
+            },
+            Request::OpenBlindTest(None) => Err("Give the round's folder.".into()),
+            Request::OpenBlindTest(Some(folder)) if !folder.is_absolute() => Err(format!(
+                "{} isn't a full path: give the folder's full path, from the root of its drive.",
+                folder.display()
+            )),
+            Request::OpenBlindTest(Some(folder)) => {
+                (self.blind_test.open(&folder, &mut self.session)).map(|round| {
+                    json!({
+                        "folder": folder,
+                        "name": round.file.name,
+                        "trials": round.file.trials.len(),
+                        "judged": round.judged_count(),
+                        "unsealed": round.results.is_some(),
+                    })
+                })
+            }
+            Request::MeasureResponse(probing) => {
+                match self.measure_response(probing, ctx) {
+                    Ok(()) => self.agents.measuring = Some(reply),
+                    Err(why) => reply.failed(full_stop(why)),
+                }
+                return;
+            }
             Request::SetAudioDevice(device) => self.set_audio_device(device),
             Request::SetKeys { command, keys } => self.set_keys(&command, keys),
             Request::ResetKeys(command) => self.reset_keys(&command),
@@ -426,6 +465,23 @@ impl App {
             Ok(()) => self.agents.exporting = Some(reply),
             Err(why) => reply.failed(why),
         }
+    }
+
+    /// Answers the agent whose measurement of a device's response just
+    /// finished with `result`, if an agent asked for it. Returns whether
+    /// one did.
+    pub(super) fn measured_for_agent(
+        &mut self,
+        result: &Result<serde_json::Value, String>,
+    ) -> bool {
+        let Some(reply) = self.agents.measuring.take() else {
+            return false;
+        };
+        match result {
+            Ok(result) => reply.done(json!({ "result": result })),
+            Err(why) => reply.failed(full_stop(why.clone())),
+        }
+        true
     }
 
     /// Answers the agent whose export just finished, as `report` says it
@@ -621,11 +677,27 @@ impl musicable_mcp::Window for Agent<'_> {
 
     fn plugin_state(&self, device: DeviceId) -> Option<PluginState> {
         let status = self.app.plugin_status.get(&device)?;
+        let readouts = match self.app.session.plugin(device) {
+            Some(instance) => (instance.params().iter())
+                .filter(|param| param.read_only && !param.hidden)
+                .filter_map(|param| {
+                    let value = instance.param_value(param.id)?;
+                    Some(Readout {
+                        param: param.id,
+                        name: param.name.clone(),
+                        value,
+                        text: instance.value_to_text(param.id, value),
+                    })
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         Some(PluginState {
             loaded: status.loaded,
             problem: status.problem.clone(),
             has_window: status.has_window,
             window_open: status.window_open,
+            readouts,
         })
     }
 
@@ -716,6 +788,9 @@ fn answers(request: &Request) -> bool {
             | Request::RenameWorkspace(_)
             | Request::RecordOutput(_)
             | Request::StopRecordingOutput
+            | Request::MeasureResponse(_)
+            | Request::MakeBlindTest(_)
+            | Request::OpenBlindTest(_)
     )
 }
 
@@ -736,6 +811,13 @@ fn relative_path(request: &Request) -> Option<&Path> {
         _ => Vec::new(),
     };
     paths.into_iter().find(|path| !path.is_absolute())
+}
+
+/// The first of a round's paths that isn't a full one, if there's one.
+fn whole_paths(round: &BlindRound) -> Option<&Path> {
+    let folder = std::iter::once(&round.folder);
+    let mut paths = folder.chain(&round.first).chain(&round.second);
+    paths.find(|path| !path.is_absolute()).map(PathBuf::as_path)
 }
 
 /// Answers `reply` with the file the project was saved to, or why it

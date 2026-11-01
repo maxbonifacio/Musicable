@@ -62,7 +62,7 @@ the bridge runs itself.
 | `run_commands` | `name`, `commands`: each an `id` and `args`? | Each one's result, in `results`, and `undo`: they're one step, called `name` |
 | `get_project` | nothing | The file and whether it's saved, the tempo map, the time signatures, the loop, the metronome and punch switches, the tracks with their mixer settings, devices, clips and takes, and their modulators and routings if they have any, the master, the wires, each from its tap to its device's port at its gain, the locators, and which parameters are automated. A track that takes its input from another track's tap has it as `mixer.set_input` takes it, `from` and `tap`, `after` or `resampling`, with the tap's `name`, and one that feeds nothing but its sends has the output `"sends_only"`. A bypassed device has `"bypassed": true`, and a deactivated one `"active": false`. A routing has the names the modulation commands take: `modulator`, `output`, `param`, `amount`, `curve`, `steps` if it's stepped, `scale` if it has one, `lag`, `"bypassed": true` if it is, and `"plays": false` while its parameter is out of its modulator's reach |
 | `get_clip` | `clip` | Where it is, and its notes with their expression and its controllers' curves, in the clip's own time, or its audio file, with its warp (its markers, mode, transpose, detune, Slice's settings, Spectral's Formants, High quality and Envelope, and Granular's Follow pitch, Grain Size and Fluctuation) and its curves, by parameter, if it has them. An audio clip's warp has its `transients`, each its `frame`, `strength` and whether you `added` it, once analysis found them, or null |
-| `get_device` | `device`, `filter`?, text the parameters' names hold | What it is and where, whether it's bypassed or deactivated, each parameter's number, name, value, range, default and unit (with a `filter`, only those whose names hold it, in any case), and its ports, a Compressor's or a Gate's Sidechain or a plugin's side inputs, by the plugin's ids and names for them, with the wires into each. A plugin's says whether it's `loaded`, the `problem` if it didn't load, whether it `has_window` and whether that's `window_open` |
+| `get_device` | `device`, `filter`?, text the parameters' names hold | What it is and where, whether it's bypassed or deactivated, each parameter's number, name, value, range, default and unit (with a `filter`, only those whose names hold it, in any case), and its ports, a Compressor's or a Gate's Sidechain or a plugin's side inputs, by the plugin's ids and names for them, with the wires into each. A plugin's says whether it's `loaded`, the `problem` if it didn't load, whether it `has_window` and whether that's `window_open`, and its `readouts`: what its read-only parameters say now, such as Test Load's Position, which the project doesn't keep |
 | `get_modulator` | `modulator` | What it is and where, each parameter's number, name, value, range, default and unit, a Macro's knobs and buttons with their kinds, and its outputs, each with its range |
 | `get_automation` | `param`, such as `track 3 volume`, `wire 1` or `modulator 6 param 2` | Its points, in beats and the parameter's units, and whether it's overridden |
 | `get_editor` | nothing | What's selected, the selected track, which panel has the focus, the start marker, the grid, what's in sight, the piano roll's clip and selected notes, the Sample Editor's clip, selected warp markers and the parameter its lane shows, and the devices selected in the devices panel, of the selected track's, in the order they play; the piano roll's and the Sample Editor's `in_sight`, and the Sample Editor's `time` selection; which panel the clip editor shows, `clip_editor`; the `track_heights` you set, the tracks showing their `take_lanes`, the `automation_lanes` shown, by track, and what's on the `clipboards`: `clips` (how many and how long), `notes` and `devices`, or null |
@@ -175,6 +175,49 @@ The code is in
 [`crates/app/src/app/changing_settings.rs`](../crates/app/src/app/changing_settings.rs)
 and [`changing_keys.rs`](../crates/app/src/app/changing_keys.rs).
 
+### Checking Musicable
+
+These commands are for the PC checks, and answer when they're done.
+
+- `debug.record_output` (`file`) records every frame Musicable hands the
+  audio device to a WAV file, a full path, with a timeline of what the
+  engine applied beside it ([engine.md](engine.md)), until
+  `debug.stop_recording_output`.
+- `debug.measure_response` (`device`, `level_dbfs`?, `at`?) plays a known
+  signal through a copy of a device that takes audio, offline, and answers
+  with its response, measured against the same signal with no device:
+  - `delay_frames`: how late it is once its latency is made up for, 0
+    unless it reports the wrong latency.
+  - `frequency`, from white noise at `level_dbfs` (-18 unless asked, an RMS
+    level): the gain, phase and coherence in each third octave (`bands`)
+    and at each frequency in `at`, and the `lowest` and `highest` gain bin
+    by bin from 20 Hz to 20 kHz, about 3 Hz apart, which is how the EQ's
+    0.2 dB bar is checked. Coherence near 1 says the output is the input
+    filtered; it falls with distortion, noise or a gain that moves.
+  - `dynamics`, from a 1 kHz sine: the gain at peaks from -60 to 0 dBFS in
+    6 dB steps (`curve`, each step's `in_dbfs` and `out_dbfs` RMS levels),
+    and a `jump` from -40 to -10 dBFS and back, with the gain before,
+    during and after, and the `attack_ms` and `release_ms`: how long the
+    gain takes to get 90% of the way. They're null for a gain that moves
+    less than 0.5 dB.
+
+  The copy has the device's settings, but none of its wires, a sidechain's
+  among them, or of what modulates or automates it, and the project isn't
+  changed. [app.md](app.md#measuring-a-devices-response) says how it's
+  done.
+- `debug.make_blind_test` (`folder`, `first`, `second`, `first_name`?,
+  `second_name`?, `name`?, `abx`?, `seed`?) makes a round of blind pairs in
+  a new or empty folder, each file of `first` paired with the one at its
+  place in `second`, all full paths: shuffled, copied as `NN A`, `NN B`
+  and, unless `abx` is false, `NN X`, with the key in `key.json`. Match the
+  files' loudness first with `audio_match`. `debug.open_blind_test`
+  (`folder`) opens it in the Blind Test window, for the user to judge, and
+  answers with how many trials there are and how many are judged. Never
+  read `key.json`, or tell the user anything that hints at it, until
+  `results.json` is there: the user unseals the round, in the window, once
+  every trial is judged. [Blind tests](../manual/src/using/blind-tests.md)
+  in the manual has the rest.
+
 ### One step for several commands
 
 `run_commands` runs commands in order, as one step in the undo history
@@ -189,8 +232,9 @@ and the file commands run alone, never among others.
 
 `musicable mcp` also has a tool for each audio command, which works on
 audio files rather than the project: `audio_info`, `audio_cut`,
-`audio_join`, `audio_convert`, `audio_gain`, `audio_loudness` and
-`audio_find`. It runs them itself, so they work while Musicable is closed
+`audio_join`, `audio_convert`, `audio_gain`, `audio_loudness`,
+`audio_find`, `audio_compare`, `audio_spectrum`, `audio_match` and
+`audio_generate`. It runs them itself, so they work while Musicable is closed
 or doesn't let agents in, and they never touch the open project. People
 run the same commands as `musicable audio <command>`, and the
 [manual](../manual/src/reference/audio-commands.md) describes each one, on
@@ -227,7 +271,9 @@ a page made from the code.
   mono file stereo copy them exactly, read the new file back, and say
   whether it's `exact`.
 
-Loudness is measured as [analysis.md](analysis.md#loudness) describes.
+Loudness is measured as [analysis.md](analysis.md#loudness) describes,
+and `audio_compare`, `audio_spectrum` and `audio_match` work as
+[analysis.md](analysis.md#comparing-two-files) describes.
 
 ## `musicable api`
 

@@ -82,6 +82,17 @@ impl Preview {
         self.id
     }
 
+    /// Starts it from the file's frame `frame` in place of its first, as
+    /// when switching between two takes of a sound at the same place.
+    pub fn starting_at(mut self, frame: u64) -> Self {
+        self.played = match &self.resampler {
+            None => frame,
+            Some(r) => (frame as f64 / r.step()).round() as u64,
+        }
+        .min(self.length);
+        self
+    }
+
     /// The file frame it's at.
     pub fn frame(&self) -> u64 {
         match &self.resampler {
@@ -109,8 +120,9 @@ impl Preview {
             let reach = self.resampler.map_or(1, |r| r.reach() as u64);
             stream.hint(self.frame().saturating_sub(reach - 1), None);
             if !self.started {
-                let first = CHUNK.min(stream.frames());
-                if !stream.is_loaded(0, first) {
+                let at = self.frame();
+                let first = CHUNK.min(stream.frames().saturating_sub(at));
+                if !stream.is_loaded(at, first) {
                     return;
                 }
                 self.started = true;
@@ -314,6 +326,25 @@ mod tests {
         // Played to its end, it goes back to be dropped.
         assert_eq!(engine.stats().preview, None);
         assert_eq!(handle.collect_garbage(), 1);
+    }
+
+    #[test]
+    fn a_preview_starts_where_it_is_asked_to() {
+        let (mut engine, mut handle) = engine();
+        let samples: Vec<f32> = (1..=200).map(|i| i as f32 / 256.0).collect();
+        let preview = Preview::new(3, file(48_000, samples.clone()), CONFIG).starting_at(150);
+        handle.preview(preview).unwrap();
+        let [left, _] = render(&mut engine, 64);
+        assert_eq!(left[..50], samples[150..]);
+        assert!(left[50..].iter().all(|&x| x == 0.0));
+        // At half the engine's rate, the file's frame 500 is the engine's
+        // 1000th of 2000.
+        let preview = Preview::new(4, file(24_000, vec![0.5; 1000]), CONFIG).starting_at(500);
+        assert_eq!(preview.frame(), 500);
+        handle.preview(preview).unwrap();
+        render(&mut engine, 64);
+        let at = engine.stats().preview.unwrap();
+        assert_eq!((at.id, at.frame), (4, 532));
     }
 
     #[test]

@@ -78,7 +78,8 @@ fn triangle(frame: usize, period: usize) -> f64 {
 
 /// The files the examples work on, in `folder`: `tone.wav`, 2 s of stereo
 /// 24-bit 44.1 kHz, silent for 0.5 s, then a 441 Hz tone at -12 dBFS for
-/// a second and at -6 dBFS for half a second; `loop.flac`, a second of
+/// a second and at -6 dBFS for half a second; `take.wav`, the same 10 ms
+/// later and 1 dB quieter, with a click at 1.2 s; `loop.flac`, a second of
 /// stereo 16-bit 44.1 kHz noise hits, four of them; and `voice.aif`, 1.5 s
 /// of mono 32-bit float 48 kHz, a 240 Hz tone that swells and fades.
 pub(super) fn fixtures(folder: &Path) {
@@ -99,6 +100,25 @@ pub(super) fn fixtures(folder: &Path) {
         44_100,
         2,
         &tone,
+    );
+    // The tone 10 ms later and 1 dB quieter, with a click at 1.2 s.
+    let quieter = 10f64.powf(-1.0 / 20.0);
+    let take: Vec<f64> = (0..88_200)
+        .flat_map(|i| {
+            let sample = match i {
+                52_920 => 0.3,
+                ..441 => 0.0,
+                i => quieter * tone[2 * (i - 441)],
+            };
+            [sample, sample]
+        })
+        .collect();
+    write(
+        &folder.join("take.wav"),
+        SampleFormat::Int24,
+        44_100,
+        2,
+        &take,
     );
     let mut noise = Noise(0x5EED);
     let hits: Vec<f64> = (0..44_100)
@@ -170,7 +190,16 @@ fn run(id: &str, words: &[&str], folder: &Path) -> Result<Json, String> {
 }
 
 /// The arguments the paths in which are file names in `folder`.
-const PATH_ARGUMENTS: [&str; 4] = ["file", "files", "out", "like"];
+const PATH_ARGUMENTS: [&str; 8] = [
+    "file",
+    "files",
+    "out",
+    "like",
+    "a",
+    "b",
+    "reference",
+    "out_dir",
+];
 
 /// `arguments` with the file names in them made whole paths in `folder`.
 fn in_folder(mut arguments: Map<String, Json>, folder: &Path) -> Map<String, Json> {
@@ -363,34 +392,37 @@ fn commands_have_ids_tools_and_schemas_of_their_own() {
     assert_eq!(
         ids,
         [
+            "audio.compare",
             "audio.convert",
             "audio.cut",
             "audio.find",
             "audio.gain",
+            "audio.generate",
             "audio.info",
             "audio.join",
-            "audio.loudness"
+            "audio.loudness",
+            "audio.match",
+            "audio.spectrum"
         ]
     );
     for command in &commands {
         assert!(command.tool().starts_with("audio_"));
-        assert!(
-            command
-                .params
-                .iter()
-                .any(|param| param.name == command.positional)
-        );
+        for name in command.positional {
+            let param = command.params.iter().find(|param| param.name == *name);
+            assert!(param.is_some_and(|param| !param.optional), "{}", command.id);
+        }
         let input = command.input_schema();
         assert_eq!(input["type"], "object");
         assert_eq!(input["additionalProperties"], false);
         let output = command.output_schema();
         assert_eq!(output["type"], "object", "{}", command.id);
-        let writes = command.params.iter().any(|param| param.name == "out");
+        let writes =
+            (command.params.iter()).any(|param| matches!(param.name.as_ref(), "out" | "out_dir"));
         assert_eq!(command.read_only, !writes, "{}", command.id);
     }
     let catalogue = super::catalogue();
     assert_eq!(catalogue.as_array().unwrap().len(), commands.len());
-    assert_eq!(catalogue[1]["tool"], "audio_cut");
+    assert_eq!(catalogue[2]["tool"], "audio_cut");
     let tools = Tools.tools();
     assert_eq!(tools.len(), commands.len());
     assert!(Tools.instructions().contains("audio_info"));
@@ -1349,5 +1381,365 @@ fn text_for_people_has_each_field_on_a_line_in_the_schema_s_order() {
                 "2b4b0cd6a1ee7a1e83c3ac8b2b8a2f62",
                 result["out"]["audio_md5"].as_str().unwrap()
             )
+    );
+}
+
+#[test]
+fn compare_lines_two_files_up_matches_their_levels_and_finds_a_click() {
+    let folder = Folder::new("compare");
+    fixtures(&folder.0);
+    let take = run("audio.compare", &["tone.wav", "take.wav"], &folder.0).unwrap();
+    assert_eq!(take["identical"], false);
+    assert_eq!(take["offset_frames"], 441);
+    assert_eq!(take["offset_ms"], 10.0);
+    assert_eq!(take["compared"]["from"]["frame"], 0);
+    assert_eq!(take["compared"]["to"]["frame"], 88_200 - 441);
+    let gain = take["gain_db"].as_f64().unwrap();
+    assert!((gain - 1.0).abs() < 0.05, "{gain}");
+    let mid = take["bands"][1]["difference_db"].as_f64().unwrap();
+    assert!(mid.abs() < 0.05, "{mid}");
+    // The click is all that's left, so it's where what's left is loudest.
+    assert_eq!(take["clicks"]["count"], 1, "{take:#}");
+    let click = &take["clicks"]["found"][0];
+    assert_eq!(click["at"]["frame"], 52_920 - 441);
+    assert_eq!(click["in"], "b");
+    assert!(click["spread"].as_f64().unwrap() > 0.9);
+    let loudest = &take["loudest_residual"][0];
+    assert!(loudest["from"]["frame"].as_u64().unwrap() <= 52_479);
+    assert!(loudest["to"]["frame"].as_u64().unwrap() > 52_479);
+    // The tone starts in both at the same time, once they're lined up.
+    let onsets = &take["onsets"];
+    assert!(onsets["matched"].as_u64().unwrap() >= 1, "{onsets:#}");
+    assert!(onsets["median_lag_ms"].as_f64().unwrap().abs() < 0.5);
+
+    let at = run(
+        "audio.compare",
+        &["tone.wav", "take.wav", "--at", "1.19", "--at", "0.7"],
+        &folder.0,
+    )
+    .unwrap();
+    let click = at["at"][0]["high_difference_db"].as_f64().unwrap();
+    let tone = at["at"][1]["high_difference_db"].as_f64().unwrap();
+    assert!(click > 15.0 && tone.abs() < 0.5, "{click} {tone}");
+
+    // Unaligned and unmatched, B is 10 ms late and 1 dB down.
+    let unaligned = run(
+        "audio.compare",
+        &["tone.wav", "take.wav", "--no-align", "--no-match-level"],
+        &folder.0,
+    )
+    .unwrap();
+    assert_eq!(unaligned["offset_frames"], 0);
+    assert_eq!(unaligned["gain_db"], 0.0);
+    let lag = unaligned["onsets"]["median_lag_ms"].as_f64().unwrap();
+    assert!((lag - 10.0).abs() < 0.5, "{lag}");
+    let loudness = unaligned["loudness_difference_lu"].as_f64().unwrap();
+    assert!((loudness + 1.0).abs() < 0.1, "{loudness}");
+
+    let same = run("audio.compare", &["tone.wav", "tone.wav"], &folder.0).unwrap();
+    assert_eq!(same["identical"], true);
+    assert_eq!(same["offset_frames"], 0);
+    assert_eq!(same["correlation"], 1.0);
+    assert_eq!(same["residual_dbfs"], Json::Null);
+    assert_eq!(same["clicks"]["count"], 0);
+
+    assert_eq!(
+        run("audio.compare", &["tone.wav", "voice.aif"], &folder.0),
+        Err(
+            "A is at 44100 Hz and B at 48000 Hz: convert one to the other's rate with \
+             audio.convert first."
+                .to_owned()
+        )
+    );
+    assert!(run("audio.compare", &["tone.wav"], &folder.0).is_err());
+}
+
+#[test]
+fn compare_finds_onsets_that_come_early() {
+    let folder = Folder::new("compare-early");
+    // Hits every half second, and the same 3 ms early.
+    let mut noise = Noise(0xC11C);
+    let noise: Vec<f64> = (0..88_200 + 132).map(|_| noise.next()).collect();
+    let hits = |early: usize| -> Vec<f64> {
+        (0..88_200)
+            .flat_map(|i| {
+                let j = i + early;
+                let level = match j < 22_050 {
+                    true => 0.0,
+                    false => 0.7 * (1.0 - (j % 22_050) as f64 / 4410.0).max(0.0),
+                };
+                let sample = level * noise[j];
+                [sample, sample]
+            })
+            .collect()
+    };
+    write(
+        &folder.path("a.wav"),
+        SampleFormat::Float32,
+        44_100,
+        2,
+        &hits(0),
+    );
+    write(
+        &folder.path("b.wav"),
+        SampleFormat::Float32,
+        44_100,
+        2,
+        &hits(132),
+    );
+    let early = run(
+        "audio.compare",
+        &["a.wav", "b.wav", "--no-align"],
+        &folder.0,
+    )
+    .unwrap();
+    let onsets = &early["onsets"];
+    assert_eq!(onsets["matched"], 3, "{onsets:#}");
+    let lag = onsets["median_lag_ms"].as_f64().unwrap();
+    assert!((lag + 3.0).abs() < 0.2, "{lag}");
+    // Lined up, they're the same.
+    let lined_up = run("audio.compare", &["a.wav", "b.wav"], &folder.0).unwrap();
+    assert_eq!(lined_up["offset_frames"], -132);
+    assert_eq!(lined_up["residual_dbfs"], Json::Null);
+    assert_eq!(lined_up["onsets"]["median_lag_ms"], 0.0);
+}
+
+#[test]
+fn generated_signals_measure_as_they_were_made() {
+    let folder = Folder::new("generate");
+    let generate = |words: &[&str]| run("audio.generate", words, &folder.0).unwrap();
+    let spectrum = |words: &[&str]| run("audio.spectrum", words, &folder.0).unwrap();
+
+    generate(&[
+        "sine.wav",
+        "--signal",
+        "sine",
+        "--level-dbfs",
+        "-6",
+        "--seconds",
+        "2",
+    ]);
+    let sine = spectrum(&["sine.wav", "--peaks", "1"]);
+    // A peak of -6.02 dBFS is an RMS level of -9.03.
+    let rms = sine["rms_dbfs"].as_f64().unwrap();
+    assert!((rms + 9.03).abs() < 0.02, "{rms}");
+    let peak = &sine["peaks"][0];
+    assert!(
+        (peak["hz"].as_f64().unwrap() - 1000.0).abs() < 0.5,
+        "{peak}"
+    );
+    assert!(
+        (peak["dbfs"].as_f64().unwrap() + 9.03).abs() < 0.05,
+        "{peak}"
+    );
+    assert_eq!(peak["note"], "B5");
+    let band = (sine["bands"].as_array().unwrap().iter())
+        .find(|band| band["centre_hz"] == 1000.0)
+        .unwrap();
+    assert!(
+        (band["dbfs"].as_f64().unwrap() + 9.03).abs() < 0.05,
+        "{band}"
+    );
+    assert!(sine["flatness"].as_f64().unwrap() < 0.01);
+
+    // White noise rises 3 dB an octave, and pink is as loud in each.
+    generate(&[
+        "white.wav",
+        "--signal",
+        "noise",
+        "--level-dbfs",
+        "-20",
+        "--seconds",
+        "4",
+    ]);
+    generate(&[
+        "pink.wav",
+        "--signal",
+        "pink",
+        "--level-dbfs",
+        "-20",
+        "--seconds",
+        "4",
+    ]);
+    let octave = |result: &Json, hz: f64| {
+        (result["bands"].as_array().unwrap().iter())
+            .find(|band| band["centre_hz"] == hz)
+            .and_then(|band| band["dbfs"].as_f64())
+            .unwrap()
+    };
+    let white = spectrum(&["white.wav", "--bands", "octaves"]);
+    assert!((white["rms_dbfs"].as_f64().unwrap() + 20.0).abs() < 0.05);
+    assert!(white["flatness"].as_f64().unwrap() > 0.5);
+    let rise = octave(&white, 4000.0) - octave(&white, 250.0);
+    assert!((rise - 12.0).abs() < 1.0, "{rise}");
+    let pink = spectrum(&["pink.wav", "--bands", "octaves"]);
+    let rise = octave(&pink, 4000.0) - octave(&pink, 250.0);
+    assert!(rise.abs() < 1.0, "{rise}");
+
+    // Clicks start on the beat, at their peak; an impulse is one sample.
+    generate(&[
+        "clicks.wav",
+        "--signal",
+        "clicks",
+        "--bpm",
+        "100",
+        "--seconds",
+        "2",
+        "--channels",
+        "1",
+        "--level-dbfs",
+        "0",
+    ]);
+    let clicks = samples(&folder.path("clicks.wav"));
+    for beat in [0, 28_800, 57_600, 86_400] {
+        assert_eq!(clicks[beat], 1.0, "{beat}");
+        assert_eq!(clicks[beat + 480], 0.0, "{beat}: 10 ms on");
+    }
+    let impulse = generate(&[
+        "impulse.flac",
+        "--signal",
+        "impulse",
+        "--seconds",
+        "0.1",
+        "--level-dbfs",
+        "-6",
+    ]);
+    assert_eq!(impulse["out"]["encoding"], "int24");
+    let impulse = samples(&folder.path("impulse.flac"));
+    assert!((impulse[0] - 0.5012).abs() < 0.0001 && impulse[1] == impulse[0]);
+    assert!(impulse[2..].iter().all(|sample| *sample == 0.0));
+    let sweep = generate(&["sweep.wav", "--signal", "sweep", "--from-hz", "100"]);
+    assert!((sweep["out"]["peak_dbfs"].as_f64().unwrap() + 12.0).abs() < 0.01);
+
+    assert!(generate_fails(
+        &folder,
+        &["x.wav", "--signal", "sine", "--hz", "30000"]
+    ));
+    assert!(generate_fails(
+        &folder,
+        &["x.flac", "--signal", "sine", "--encoding", "float32"]
+    ));
+}
+
+fn generate_fails(folder: &Folder, words: &[&str]) -> bool {
+    run("audio.generate", words, &folder.0).is_err()
+}
+
+#[test]
+fn a_spectrum_follows_a_pitch_s_partials_and_hears_one_beat() {
+    let folder = Folder::new("partials");
+    // 220 Hz, a clean second partial, and a third split in two 2 Hz apart.
+    let rate = 48_000.0;
+    let note: Vec<f64> = (0..96_000)
+        .map(|n| {
+            let t = n as f64 / rate;
+            0.4 * (TAU * 220.0 * t).sin()
+                + 0.2 * (TAU * 440.0 * t).sin()
+                + 0.1 * (TAU * 660.0 * t).sin()
+                + 0.05 * (TAU * 662.0 * t).sin()
+        })
+        .collect();
+    write(
+        &folder.path("note.wav"),
+        SampleFormat::Float32,
+        48_000,
+        1,
+        &note,
+    );
+    let result = run(
+        "audio.spectrum",
+        &["note.wav", "--fundamental-hz", "220", "--partials", "32"],
+        &folder.0,
+    )
+    .unwrap();
+    let partials = result["partials"].as_array().unwrap();
+    assert_eq!(partials.len(), 32);
+    let field = |i: usize, name: &str| partials[i][name].as_f64().unwrap();
+    assert!(field(0, "purity") > 0.99 && field(1, "purity") > 0.99);
+    assert!(field(0, "beating_db") < 0.2 && field(1, "beating_db") < 0.2);
+    let beating = field(2, "beating_db");
+    assert!((7.0..10.0).contains(&beating), "{beating}");
+    // The fourth is silent, so it has no purity or beating.
+    assert_eq!(partials[3]["purity"], Json::Null);
+    assert_eq!(partials[3]["beating_db"], Json::Null);
+    let first = field(0, "dbfs");
+    assert!((first + 10.97).abs() < 0.05, "{first}");
+}
+
+#[test]
+fn match_lines_files_up_with_a_reference_at_one_loudness() {
+    let folder = Folder::new("match");
+    fixtures(&folder.0);
+    let matched = run(
+        "audio.match",
+        &["tone.wav", "take.wav", "voice.aif", "--out-dir", "matched"],
+        &folder.0,
+    )
+    .unwrap();
+    let take = &matched["files"][0];
+    assert_eq!(take["offset_frames"], 441);
+    let target = matched["target_lufs"].as_f64().unwrap();
+    assert_eq!(target, take["lufs"].as_f64().unwrap(), "the quieter");
+    assert!(
+        (matched["reference"]["gain_db"].as_f64().unwrap() + 1.0).abs() < 0.1,
+        "{matched:#}"
+    );
+    let error = matched["files"][1]["error"].as_str().unwrap();
+    assert!(
+        error.contains("48000 Hz and the reference at 44100 Hz"),
+        "{error}"
+    );
+    assert!(!folder.path("matched/voice.aif").exists());
+
+    // Written again, they line up frame for frame, as loud as each other.
+    let compared = run(
+        "audio.compare",
+        &["matched/tone.wav", "matched/take.wav", "--no-align"],
+        &folder.0,
+    )
+    .unwrap();
+    assert_eq!(compared["b_frames"], 88_200);
+    let gain = compared["gain_db"].as_f64().unwrap();
+    assert!(gain.abs() < 0.05, "{gain}");
+    let lufs = compared["loudness_difference_lu"].as_f64().unwrap();
+    assert!(lufs.abs() < 0.02, "{lufs}");
+    let louder = run(
+        "audio.match",
+        &[
+            "tone.wav",
+            "take.wav",
+            "--out-dir",
+            "louder",
+            "--loudness",
+            "loudest",
+        ],
+        &folder.0,
+    )
+    .unwrap();
+    assert_eq!(louder["reference"]["gain_db"], 0.0);
+    let fixed = run(
+        "audio.match",
+        &[
+            "tone.wav",
+            "take.wav",
+            "--out-dir",
+            "fixed",
+            "--to-lufs",
+            "-20",
+        ],
+        &folder.0,
+    )
+    .unwrap();
+    assert_eq!(fixed["target_lufs"], -20.0);
+    assert_eq!(
+        run(
+            "audio.match",
+            &["tone.wav", "tone.wav", "--out-dir", "same"],
+            &folder.0
+        ),
+        Err(
+            "Two files are called tone.wav, and out_dir would hold one: rename one first."
+                .to_owned()
+        )
     );
 }

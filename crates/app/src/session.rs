@@ -19,8 +19,8 @@ use musicable_engine::nodes::{Gain, InputMonitor, Metronome};
 use musicable_engine::switch::Switch;
 use musicable_engine::{
     Compiled, Compiler, Devices, EngineConfig, EngineHandle, Event, Graph, InputLayout, Lead,
-    MAX_WRITERS, Meters, NodeKey, NodeLoads, ParamId, PreparedGraph, Preview, QueueFull, Stats,
-    SwapError, TapWriter, TransportCommand, compile_with_inputs, compile_with_stems,
+    MAX_WRITERS, Meters, NodeKey, NodeLoads, ParamId, PreparedGraph, Preview, PreviewAt, QueueFull,
+    Stats, SwapError, TapWriter, TransportCommand, compile_with_inputs, compile_with_stems,
 };
 use musicable_library::Busy;
 use musicable_model::clip::ClipContent;
@@ -1119,6 +1119,23 @@ impl Session {
     /// Uses `library` from now on, in place of one that has nothing.
     pub fn set_library(&mut self, library: Library) {
         self.library = library;
+    }
+
+    /// Plays `preview` in place of the one playing, as the browser's
+    /// previews play: for the Blind Test window. Returns whether the engine
+    /// had room for it.
+    pub fn play_sound(&mut self, preview: Preview) -> bool {
+        self.engine.handle.preview(preview).is_ok()
+    }
+
+    /// Stops the preview playing, if one is.
+    pub fn stop_sound(&mut self) {
+        let _ = self.engine.handle.stop_preview();
+    }
+
+    /// The preview playing, and where it is, if one is.
+    pub fn sound_at(&self) -> Option<PreviewAt> {
+        self.engine.handle.stats().preview
     }
 
     /// Plays previews at `gain` from now on: 1.0 plays them as they are.

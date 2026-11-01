@@ -50,6 +50,8 @@
 
 | Command | Id |
 |---|---|
+| Make Blind Test | `debug.make_blind_test` |
+| Measure Device Response | `debug.measure_response` |
 | Record Output | `debug.record_output` |
 
 ### Device

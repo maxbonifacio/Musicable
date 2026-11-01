@@ -28,8 +28,8 @@ use musicable_model::plugin::{PluginInput, PluginKind};
 use musicable_model::time::{BeatRange, Beats, TempoMap, TimeSignature};
 use musicable_test_plugins::testing::{self, Library, Lifecycle};
 use musicable_test_plugins::{
-    ARP_STEP, ARPEGGIATOR_ID, BYPASS, GAIN, GAIN_ID, LATENCY, LEVEL, SIDECHAIN, SYNTH_ID, THREADS,
-    TRANSPOSE, gui,
+    ARP_STEP, ARPEGGIATOR_ID, BYPASS, COST, GAIN, GAIN_ID, JITTER, LATENCY, LEVEL, LOAD_ID,
+    POSITION, SIDECHAIN, SYNTH_ID, THREADS, TRANSPOSE, gui,
 };
 
 use crate::clap::Instance;
@@ -156,6 +156,10 @@ impl TestPlugins {
 
     fn arpeggiator(&self) -> Instance {
         Instance::new(&self.path, ARPEGGIATOR_ID.to_str().unwrap(), None).unwrap()
+    }
+
+    fn load(&self) -> Instance {
+        Instance::new(&self.path, LOAD_ID.to_str().unwrap(), None).unwrap()
     }
 }
 
@@ -1742,6 +1746,66 @@ fn plugins_see_the_transport() {
 }
 
 #[test]
+fn the_load_passes_its_input_through_takes_its_time_and_says_where_it_is() {
+    let plugins = TestPlugins::new("load");
+    let mut instance = plugins.load();
+    let params: Vec<_> = instance.params().iter().map(|p| p.name.clone()).collect();
+    assert_eq!(params, ["Cost", "Jitter", "Position"]);
+    assert!(instance.params()[2].read_only);
+    instance.activate(CONFIG).unwrap();
+    let mut node = instance.node_source().node();
+    let input = ramp(256);
+    let playing = |position| Block {
+        transport: TransportState {
+            playing: true,
+            position,
+            ..TransportState::default()
+        },
+        tempo: TempoMap::new(120.0, TimeSignature::FOUR_FOUR),
+        ..Block::default()
+    };
+    let [left, right] = play(&mut node, &input, &playing(48_000));
+    assert_eq!((left, right), (input.clone(), scaled(&input, -1.0)));
+    // It says the position at the end of the block, a second and 256
+    // frames in, as the host polls it.
+    let end = 1.0 + 256.0 / 48_000.0;
+    let said: Vec<f64> = (instance.poll().into_iter())
+        .filter_map(|event| match event {
+            PluginEvent::ParamChanged { param, value } if param == POSITION => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!((said[0] - end).abs() < 1e-6, "{said:?}");
+    assert!((instance.param_value(POSITION).unwrap() - end).abs() < 1e-6);
+
+    // 2 ms for each 64 frames: 8 ms for 256.
+    instance.set_param(COST, 2000.0);
+    let took = |node: &mut _| {
+        let start = Instant::now();
+        play(node, &input, &playing(96_000));
+        start.elapsed()
+    };
+    took(&mut node);
+    let time = took(&mut node);
+    assert!(time >= Duration::from_millis(8), "{time:?}");
+    assert!(time < Duration::from_millis(80), "{time:?}");
+
+    // With Jitter, some blocks take longer: the same ones every run.
+    instance.set_param(COST, 100.0);
+    instance.set_param(JITTER, 1.0);
+    let mut spikes = Vec::new();
+    for block in 0..64 {
+        if took(&mut node) >= Duration::from_micros(400 * 5) {
+            spikes.push(block);
+        }
+    }
+    assert!((1..16).contains(&spikes.len()), "{spikes:?}");
+    drop((node, instance));
+    plugins.assert_alright();
+}
+
+#[test]
 fn plugins_get_the_main_thread_when_they_ask() {
     let plugins = TestPlugins::new("callback");
     let woken = Arc::new(AtomicU32::new(0));
@@ -1818,7 +1882,10 @@ fn the_scanner_finds_plugins_and_survives_bad_ones() {
         panic!("the good library wasn't found");
     };
     let names: Vec<_> = found.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(names, ["Test Gain", "Test Synth", "Test Arpeggiator"]);
+    assert_eq!(
+        names,
+        ["Test Gain", "Test Synth", "Test Arpeggiator", "Test Load"]
+    );
     assert!(found[1].features.iter().any(|f| f == "instrument"));
     let kinds: Vec<_> = found.iter().map(PluginInfo::kind).collect();
     assert_eq!(
@@ -1826,7 +1893,8 @@ fn the_scanner_finds_plugins_and_survives_bad_ones() {
         [
             PluginKind::AudioEffect,
             PluginKind::Instrument,
-            PluginKind::MidiEffect
+            PluginKind::MidiEffect,
+            PluginKind::AudioEffect
         ]
     );
     let crashed = scan_copy("crash", scan::TIMEOUT);

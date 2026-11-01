@@ -209,7 +209,9 @@ pub fn list() -> Vec<Tool> {
              into each: a Compressor's or a Gate's Sidechain, or a plugin's side inputs, by the \
              plugin's ids and names for them, and an instrument's or a MIDI effect's note \
              input, last, as wire.connect takes them. A plugin's says whether it loaded, why \
-             it plays nothing if it doesn't, and whether its window is open. filter keeps the \
+             it plays nothing if it doesn't, whether its window is open, and its readouts: \
+             what its read-only parameters say now, such as Test Load's Position, the last \
+             song position it rendered. filter keeps the \
              parameters whose names hold it, for a plugin with thousands.",
             object(
                 json!({

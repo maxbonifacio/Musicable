@@ -21,6 +21,9 @@ use musicable_model::clip::{ClipContent, MidiClip};
 use musicable_model::plugin::{PluginDevice, PluginKind, PluginSettings};
 use musicable_model::time::{BeatRange, Beats};
 use musicable_model::{DeviceKind, PluginFormat, Project, TrackKind};
+use musicable_plugins::scan::{self, Outcome, ScanCache};
+use musicable_test_plugins::testing::Library;
+use musicable_test_plugins::{GAIN, GAIN_ID, LATENCY, LOAD_ID, POSITION};
 use musicable_ui::PluginEntry;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, Implementation,
@@ -33,6 +36,8 @@ use tokio::task::JoinHandle;
 
 use super::App;
 use super::testing::{TempDir, window};
+use crate::blind_test::Side;
+use crate::plugin_scan::PLUGINS_FILE;
 use crate::settings::{SETTINGS_FILE, Settings};
 
 type Window = Harness<'static, App>;
@@ -1299,4 +1304,263 @@ fn agents_record_what_the_device_plays_with_a_timeline() {
     assert_eq!(volume["late_ms"], 10.67, "{volume}");
     let not = run(&mut window, "debug.stop_recording_output", json!({}));
     assert_eq!(not, Err("Musicable isn't recording its output.".into()));
+}
+
+/// Copies the test plugins to `folder`, and keeps what a scan of them
+/// finds in `config`, as if Musicable had scanned them.
+fn test_plugins(config: &Path, folder: &Path) -> Library {
+    let library = Library::copy(folder, "test-plugins");
+    let mut cache = ScanCache::default();
+    cache.update(&[library.path().to_owned()], false, |path| {
+        Outcome::Found(scan::scan_here(path).unwrap())
+    });
+    cache.write(&config.join(PLUGINS_FILE)).unwrap();
+    library
+}
+
+#[test]
+fn agents_read_what_a_plugin_says_as_it_plays() {
+    let dir = TempDir::new("agents-readouts");
+    let folder = TempDir::new("agents-readouts-song");
+    let _library = test_plugins(&dir.0, &folder.0);
+    let mut song = Project::new();
+    let bass = song.add_track("Bass", TrackKind::Audio);
+    let load = song.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: LOAD_ID.to_str().unwrap().into(),
+        name: "Test Load".into(),
+        kind: PluginKind::AudioEffect,
+        inputs: Vec::new(),
+        note_output: false,
+        settings: PluginSettings::default(),
+    }));
+    let id = load.id;
+    song.track_mut(bass).unwrap().devices.push(load);
+    let file = folder.0.join("Song.musicable");
+    project::save(&file, &song).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    wait_for(&mut window, "Test Load loading", |app| {
+        app.session.plugin(id).is_some()
+    });
+
+    // Test Load's Position, read-only, says where it last rendered to.
+    window.state_mut().output.play_idle(480);
+    window.run();
+    let device = agent.call(&mut window, "get_device", json!({"device": id.0}));
+    let device = device.unwrap();
+    let readouts = device["readouts"].as_array().unwrap();
+    assert_eq!(readouts.len(), 1, "{device}");
+    let position = &readouts[0];
+    assert_eq!(position["param"], POSITION, "{device}");
+    assert_eq!(position["name"], "Position", "{device}");
+    let seconds = position["value"].as_f64().unwrap();
+    assert!(seconds > 0.0 && seconds < 1.0, "{device}");
+    assert_eq!(position["text"], format!("{seconds:.3} s"), "{device}");
+    // It isn't a setting: automation doesn't list it, and the project
+    // keeps none of it, so nothing changed to save or undo.
+    let params = device["params"].as_array().unwrap();
+    assert!(
+        params.iter().all(|param| param["param"] != POSITION),
+        "{device}"
+    );
+    let project = window.state().session.project();
+    let (_, _, device) = project.find_device(id).unwrap();
+    assert_eq!(device.kind.plugin().unwrap().settings.param(POSITION), None);
+    assert!(!window.state().session.is_modified());
+}
+
+#[test]
+fn agents_measure_a_devices_response() {
+    let dir = TempDir::new("agents-response");
+    let folder = TempDir::new("agents-response-song");
+    let _library = test_plugins(&dir.0, &folder.0);
+    // Test Gain at half, 100 frames late, which the mix makes up for.
+    let mut song = song();
+    let mut settings = PluginSettings::default();
+    settings.set_param(GAIN, Some(0.5));
+    settings.set_param(LATENCY, Some(100.0));
+    let gain = song.new_device(DeviceKind::Plugin(PluginDevice {
+        format: PluginFormat::Clap,
+        id: GAIN_ID.to_str().unwrap().into(),
+        name: "Test Gain".into(),
+        kind: PluginKind::AudioEffect,
+        inputs: Vec::new(),
+        note_output: false,
+        settings,
+    }));
+    let id = gain.id;
+    let instrument = song.tracks[0].devices[0].id;
+    song.master.devices.push(gain);
+    let file = folder.0.join("Song.musicable");
+    project::save(&file, &song).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let run = |window: &mut Window, args: Json| {
+        let args = json!({"id": "debug.measure_response", "args": args});
+        agent.call(window, "run_command", args)
+    };
+
+    let measured = run(&mut window, json!({"device": id.0, "at": [100, 10000]}));
+    let result = measured.unwrap()["result"].clone();
+    assert_eq!(result["name"], "Test Gain", "{result}");
+    assert_eq!(result["delay_frames"], 0, "{result}");
+    let half = 20.0 * 0.5f64.log10();
+    let near = |value: &Json| (value.as_f64().unwrap() - half).abs() < 0.01;
+    let frequency = &result["frequency"];
+    assert!(near(&frequency["lowest"]["gain_db"]), "{frequency}");
+    assert!(near(&frequency["highest"]["gain_db"]), "{frequency}");
+    for at in frequency["at"].as_array().unwrap() {
+        assert!(near(&at["gain_db"]), "{at}");
+        assert!(at["phase_degrees"].as_f64().unwrap().abs() < 0.1, "{at}");
+    }
+    assert_eq!(frequency["bands"].as_array().unwrap().len(), 31);
+    let dynamics = &result["dynamics"];
+    for step in dynamics["curve"].as_array().unwrap() {
+        assert!(near(&step["gain_db"]), "{step}");
+    }
+    assert_eq!(dynamics["jump"]["attack_ms"], Json::Null, "{dynamics}");
+    // The project's own Test Gain wasn't touched.
+    assert!(!window.state().session.is_modified());
+
+    // An instrument has no response, and the level has its limits.
+    let refused = run(&mut window, json!({"device": instrument.0}));
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("plays notes")),
+        "{refused:?}"
+    );
+    let refused = run(&mut window, json!({"device": id.0, "level_dbfs": 0}));
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("level_dbfs")),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn agents_make_a_blind_test_and_the_user_judges_it() {
+    let dir = TempDir::new("agents-blind-test");
+    let mut window = window(&dir.0, None);
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let run = |window: &mut Window, id: &str, args: Json| {
+        agent.call(window, "run_command", json!({"id": id, "args": args}))
+    };
+    // Two pairs: a quiet and a loud second of a constant, each.
+    let mut files = Vec::new();
+    for (name, level) in [
+        ("live 1", 0.1),
+        ("ours 1", 0.2),
+        ("live 2", 0.3),
+        ("ours 2", 0.4),
+    ] {
+        let file = dir.0.join(format!("{name}.wav"));
+        let samples = vec![level; 48_000];
+        let format = musicable_io::audio::SampleFormat::Float32;
+        musicable_io::audio::save_wav(&file, 48_000, format, &[&samples]).unwrap();
+        files.push(file);
+    }
+    let folder = dir.0.join("Round");
+    let relative = run(
+        &mut window,
+        "debug.make_blind_test",
+        json!({"folder": "Round", "first": [files[0]], "second": [files[1]]}),
+    );
+    assert!(
+        relative
+            .as_ref()
+            .is_err_and(|why| why.contains("full path")),
+        "{relative:?}"
+    );
+    let made = run(
+        &mut window,
+        "debug.make_blind_test",
+        json!({
+            "folder": folder,
+            "first": [files[0], files[2]],
+            "second": [files[1], files[3]],
+            "first_name": "Live",
+            "second_name": "Musicable",
+            "name": "Levels",
+            "seed": 3,
+        }),
+    )
+    .unwrap();
+    assert_eq!(made["result"]["trials"], 2, "{made}");
+    let opened = run(
+        &mut window,
+        "debug.open_blind_test",
+        json!({"folder": folder}),
+    )
+    .unwrap();
+    assert_eq!(opened["result"]["judged"], 0, "{opened}");
+    window.run();
+    window.get_by_label("Trial 1 of 2");
+
+    // A plays, and B takes over where A was.
+    let level = |window: &mut Window| {
+        let played = window.state_mut().output.play_idle(256);
+        played[played.len() - 1]
+    };
+    window.get_by_label("Play A").click();
+    window.run();
+    let a = level(&mut window);
+    assert!(a > 0.0, "{a}");
+    let at = window.state().session.sound_at().unwrap();
+    assert!(at.frame >= 256, "{at:?}");
+    window.get_by_label("Play B").click();
+    window.run();
+    let b = level(&mut window);
+    assert!(b > 0.0 && b != a, "{a} {b}");
+    let later = window.state().session.sound_at().unwrap();
+    assert!(later.frame > at.frame, "{at:?} {later:?}");
+    // The transport's Stop comes first.
+    window.get_all_by_label("Stop").last().unwrap().click();
+    window.run();
+    level(&mut window);
+    assert_eq!(window.state().session.sound_at(), None);
+
+    // Each trial judged: X named, and the louder one better.
+    for trial in 0..2 {
+        let round = window.state().blind_test.round().unwrap().clone();
+        let samples = |side| {
+            let path = round.sound(trial, side).unwrap();
+            Decoder::open(&path).unwrap().read_all().unwrap()[0][0]
+        };
+        let (a, b, x) = (
+            samples(Some(Side::A)),
+            samples(Some(Side::B)),
+            samples(None),
+        );
+        let named = usize::from(x != a);
+        let better = if a > b { 0 } else { 2 };
+        assert_eq!(window.get_all_by_label("A").count(), 2);
+        let pick = |window: &mut Window, label: &str, index: usize| {
+            let node = window.get_all_by_label(label).nth(index).unwrap();
+            node.click();
+            window.run();
+        };
+        pick(&mut window, ["A", "B"][named], 0);
+        pick(
+            &mut window,
+            ["A", "Same", "B"][better],
+            usize::from(better != 1),
+        );
+        if trial == 0 {
+            window.get_by_label("Next").click();
+            window.run();
+        }
+    }
+    window.get_by_label("Unseal").click();
+    window.run();
+    let results: Json =
+        serde_json::from_str(&fs::read_to_string(folder.join("results.json")).unwrap()).unwrap();
+    assert_eq!(results["abx"]["correct"], 2, "{results:#}");
+    assert_eq!(results["preference"]["second"], 2, "{results:#}");
+    window.get_by_label_contains("X named right in 2 of 2");
 }
