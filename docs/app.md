@@ -282,7 +282,11 @@ list commands from the registry, which take their arguments from where the
 menu was opened: the clip, the track, the parameter, or the position. The
 playhead is drawn where the sound is: the engine's position less the
 latency of the plugins and the audio device
-([engine.md](engine.md#delay-compensation)).
+([engine.md](engine.md#delay-compensation)). Until a locate reaches the
+engine, which takes a device callback or more (and while the transport
+stands still, the 512 frames the engine renders ahead), the session gives
+where the locate puts it instead (`Session::heard_position`), so a click
+while stopped doesn't leave it drawn where the start marker was.
 
 **Themes and mouse maps.** The arrangement, the piano roll, the Sample
 Editor and the mixer draw every colour and size from a `musicable_ui::Theme`, and look up what

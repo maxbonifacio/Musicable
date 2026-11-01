@@ -139,9 +139,10 @@ fn wait_for_waveform(harness: &mut Harness<'static, App>, file: &str) {
 }
 
 /// A saved song with an audio track and a MIDI track and no clips yet, and
-/// a take to put on the audio track: four seconds, two bars at 120 BPM.
-fn song_folder() -> (TempDir, PathBuf, PathBuf) {
-    let folder = TempDir::new("arranging-song");
+/// a take to put on the audio track: four seconds, two bars at 120 BPM. In
+/// a folder called `name`, of the test's own: tests run side by side.
+fn song_folder(name: &str) -> (TempDir, PathBuf, PathBuf) {
+    let folder = TempDir::new(name);
     let take = folder.0.join("Take.wav");
     let samples: Vec<f32> = (0..4 * 48_000)
         .map(|i| (i as f32 * 0.05).sin() * 0.5)
@@ -158,7 +159,7 @@ fn song_folder() -> (TempDir, PathBuf, PathBuf) {
 #[test]
 fn the_demos_arranging_steps_work_with_the_mouse_and_the_keys() {
     let config = TempDir::new("arranging-config");
-    let (_folder, path, take) = song_folder();
+    let (_folder, path, take) = song_folder("arranging-song");
     let mut harness = window(&config.0, Some(path.clone()));
     // Tall enough for both tracks over the master track, under the
     // ruler, with the mixer and the devices under the arrangement.
@@ -310,4 +311,41 @@ fn the_demos_arranging_steps_work_with_the_mouse_and_the_keys() {
         ..arranged
     };
     assert_eq!(*song(&harness), saved);
+}
+
+/// Where the window draws the playhead: where the engine is, in what's
+/// heard.
+fn playhead(harness: &Harness<'static, App>) -> Beats {
+    let app = harness.state();
+    let heard = app.session.heard_position(app.output.latency());
+    app.session.beats_at(heard)
+}
+
+#[test]
+fn a_click_while_stopped_moves_the_playhead_with_the_start_marker() {
+    let config = TempDir::new("arranging-playhead-config");
+    let (_folder, path, _take) = song_folder("arranging-playhead-song");
+    let mut harness = window(&config.0, Some(path));
+    harness.set_size(vec2(1280.0, 960.0));
+    harness.run();
+    let start_marker =
+        |harness: &Harness<'static, App>| harness.state().session.editor().start_marker;
+
+    // The engine hasn't played a frame since the click, so it's still where
+    // it was, but the playhead goes with the start marker at once: it isn't
+    // drawn where the start marker was. Twice, before the engine catches up.
+    for (at, beat) in [(8.2, 8), (4.2, 4)] {
+        let point = lane(&harness, "Keys", at);
+        click(&mut harness, point);
+        assert_eq!(start_marker(&harness), Beats::new(beat));
+        assert_eq!(playhead(&harness), Beats::new(beat));
+    }
+    // Once the engine has taken the locates in, past what it renders ahead
+    // while the transport stands still, it's there too.
+    for _ in 0..4 {
+        harness.state_mut().output.play_idle(1024);
+        assert_eq!(playhead(&harness), Beats::new(4));
+    }
+    let stats = harness.state().session.stats();
+    assert_eq!(stats.position, 2 * 48_000, "{stats:?}");
 }

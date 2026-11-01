@@ -1,5 +1,6 @@
 //! The open project, wired to the engine.
 
+use std::cell::Cell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -247,6 +248,7 @@ impl Session {
         let mut engine = EngineLink {
             playing: handle.stats().playing,
             recording: false,
+            located: Cell::new(None),
             tempo: project.tempo.clone(),
             handle,
             compiler: Compiler::spawn(),
@@ -796,8 +798,15 @@ impl Session {
     /// left the clips the running graph's latency, and the audio device's
     /// `output_latency` frames, before the engine's position. See
     /// `docs/engine.md`, on delay compensation.
+    ///
+    /// Until a locate reaches the engine, it's where the locate puts the
+    /// playhead, so the playhead doesn't stay where it was for the frames
+    /// that takes.
     pub fn heard_position(&self, output_latency: u64) -> u64 {
         let stats = self.engine.handle.stats();
+        if let Some((_, frame)) = self.engine.located(&stats) {
+            return frame;
+        }
         match stats.playing {
             true => stats
                 .position
@@ -1635,6 +1644,10 @@ struct EngineLink {
     /// Whether recording is on, counting what hasn't reached the engine
     /// yet.
     recording: bool,
+    /// Where the last locate sent while the transport stood still puts the
+    /// playhead, until the engine says the playhead is there, or plays, or
+    /// a stop is sent: see [`located`](Self::located).
+    located: Cell<Option<Beats>>,
     /// The project's tempo map, for the playhead in beats.
     tempo: TempoMap,
     /// The meters the graphs measure into.
@@ -1676,6 +1689,26 @@ enum Message {
 impl EngineLink {
     fn push(&mut self, message: Message) {
         self.outbox.push_back(message);
+    }
+
+    /// Where the last locate sent puts the playhead, in beats and in
+    /// frames, while the engine, as its `stats` say, hasn't got there yet:
+    /// the locate waits in the outbox, say, or in the engine's queue for
+    /// its next block, or for the audio device to start. `None` once it
+    /// has, and the engine's position is the playhead's.
+    ///
+    /// The engine takes in what's sent in order, so once it plays the play
+    /// that went after the locate, it has located too. A stop sent after
+    /// that forgets the locate, in case nothing asked while it played.
+    fn located(&self, stats: &Stats) -> Option<(Beats, u64)> {
+        let at = self.located.get()?;
+        let rate = self.handle.config().sample_rate;
+        let frame = self.tempo.frame_at(at, rate).max(0) as u64;
+        if stats.position == frame || (self.playing && stats.playing) {
+            self.located.set(None);
+            return None;
+        }
+        Some((at, frame))
     }
 
     /// Where the engine's frame `position` is in the song.
@@ -1858,17 +1891,26 @@ impl Transport for EngineLink {
     fn stop(&mut self) {
         self.playing = false;
         self.recording = false;
+        // Whatever locate came before the play has reached the engine, or
+        // will before the stop does.
+        self.located.set(None);
         self.push(Message::Event(Event::Transport(TransportCommand::Stop)));
     }
 
     fn locate(&mut self, at: Beats) {
+        // While it plays, the playhead moves on from where the engine is.
+        self.located.set((!self.playing).then_some(at));
         self.push(Message::Event(Event::Transport(TransportCommand::Locate(
             at,
         ))));
     }
 
     fn playhead(&self) -> Beats {
-        self.beats_at(self.handle.stats().position)
+        let stats = self.handle.stats();
+        match self.located(&stats) {
+            Some((at, _)) => at,
+            None => self.beats_at(stats.position),
+        }
     }
 
     fn is_recording(&self) -> bool {
