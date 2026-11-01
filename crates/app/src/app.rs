@@ -1451,6 +1451,15 @@ impl App {
             }
             .into());
         };
+        // A folder that isn't there yet is made, as an agent's may be new.
+        if let Some(folder) = file
+            .parent()
+            .filter(|folder| !folder.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(folder).map_err(|error| {
+                format!("The folder {} can't be made: {error}.", folder.display())
+            })?;
+        }
         (self.start_job(file, range, settings, &tracks, ctx))
             .map_err(|error| format!("The export couldn't start: {error}."))
     }

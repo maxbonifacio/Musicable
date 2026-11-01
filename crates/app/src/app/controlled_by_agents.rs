@@ -295,8 +295,9 @@ fn opening_asks_the_user_about_unsaved_changes_first() {
     assert_eq!(window.state().session.project().tracks[0].name, "Keys");
     assert_eq!(window.state().path.as_deref(), Some(file.as_path()));
 
-    // An export says where it went, once it's written.
-    let mix = dir.0.join("Mix.flac");
+    // An export says where it went, once it's written, in a folder made
+    // for it if it isn't there yet.
+    let mix = dir.0.join("Exports").join("Mix.flac");
     let exported = agent.call(
         &mut window,
         "run_command",
@@ -1255,9 +1256,25 @@ fn agents_record_what_the_device_plays_with_a_timeline() {
         "{relative:?}"
     );
     let track = run(&mut window, "track.new_audio_track", json!({})).unwrap()["result"].clone();
-    let file = dir.0.join("Output.wav");
+    let file = dir.0.join("Checks").join("Output.wav");
+    // Its answer is the recording's, which a batch has no room for.
+    let batch = json!({
+        "name": "Record",
+        "commands": [
+            {"id": "transport.locate", "args": {"at": 0}},
+            {"id": "debug.record_output", "args": {"file": file}},
+        ],
+    });
+    let refused = agent.call(&mut window, "run_commands", batch);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("runs on its own")),
+        "{refused:?}"
+    );
+    assert!(!file.exists());
     let started = run(&mut window, "debug.record_output", json!({"file": file})).unwrap();
-    let timeline = dir.0.join("Output.timeline.json");
+    let timeline = dir.0.join("Checks").join("Output.timeline.json");
     assert_eq!(
         started["result"],
         json!({"file": file, "timeline": timeline})

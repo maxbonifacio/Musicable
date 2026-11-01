@@ -182,7 +182,9 @@ and [`changing_keys.rs`](../crates/app/src/app/changing_keys.rs).
 
 ### Checking Musicable
 
-These commands are for the PC checks, and answer when they're done.
+These commands are for the PC checks, and answer when they're done. Each
+runs alone, never in `run_commands`. A folder that a recording or an
+export goes to is made if it isn't there yet.
 
 - `debug.record_output` (`file`) records every frame Musicable hands the
   audio device to a WAV file, a full path, with a timeline of what the
@@ -230,8 +232,10 @@ under the name it's given, such as "Humanize", so you undo them at once.
 Each acts on what those before it left. If one fails, none of them
 changes anything, and the error says which one failed and why
 (`Registry::run_batch`, in
-[commands.md](commands.md#arguments-and-results)). Undo, Redo, Go to Step
-and the file commands run alone, never among others.
+[commands.md](commands.md#arguments-and-results)). Undo, Redo, Go to Step,
+the file commands, and the others whose outcome is their answer (settings,
+keys, workspaces, and the checking commands below) run alone, never among
+others.
 
 A command can use what one before it in the batch gave back. Its entry
 names its result with `as`, and the arguments of those after it use the
