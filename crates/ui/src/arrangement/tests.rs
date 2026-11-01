@@ -2390,3 +2390,49 @@ fn dragging_in_the_overview_scrolls_and_its_box_s_edge_zooms() {
     assert_eq!(after.start, viewport.start);
     assert!(harness.state().errors.is_empty());
 }
+
+#[test]
+fn the_heights_menus_size_tracks_fit_the_selected_and_auto_zoom() {
+    let (project, ids) = project();
+    let mut harness = harness(project);
+    let height = |harness: &Harness<'static, State>, id| {
+        harness.state().editor().height_of(Chain::Track(id))
+    };
+    // From the corner, with no track selected, every track.
+    harness.get_by_label("Track heights").click();
+    harness.run();
+    harness.get_by_label("Small Tracks").click();
+    harness.run();
+    for id in [ids.drums, ids.keys, ids.bass] {
+        assert_eq!(height(&harness, id), 24.0);
+    }
+    // From a track's header, the track it was opened on.
+    harness.get_by_label("Track Bass").click_secondary();
+    harness.run();
+    harness.get_by_label("Track Height").click();
+    harness.run();
+    harness.get_by_label("Huge Tracks").click();
+    harness.run();
+    assert_eq!(height(&harness, ids.bass), 200.0);
+    assert_eq!(height(&harness, ids.keys), 24.0);
+    // Auto Zoom makes the selected track Large, and saves none of it.
+    harness.get_by_label("Track heights").click();
+    harness.run();
+    let item = harness.get_by_label("Auto Zoom Tracks");
+    assert_eq!(item.accesskit_node().toggled(), Some(Toggled::False));
+    item.click();
+    harness.run();
+    let at = harness.get_by_label("Track Keys").rect().left_center() + vec2(12.0, 0.0);
+    click(&mut harness, at, Modifiers::NONE);
+    assert_eq!(
+        harness.state().editor().selected_track,
+        Some(Chain::Track(ids.keys))
+    );
+    assert_eq!(height(&harness, ids.keys), 120.0);
+    let editor = harness.state().editor();
+    assert_eq!(
+        editor.track_heights.get(&Chain::Track(ids.keys)),
+        Some(&24.0)
+    );
+    assert!(harness.state().errors.is_empty());
+}

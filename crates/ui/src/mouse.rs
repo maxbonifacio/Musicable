@@ -302,6 +302,8 @@ impl Target {
         Target::LoopBrace,
         Target::LoopEdge,
         Target::Locator,
+        Target::Overview,
+        Target::OverviewEdge,
         Target::TakeLane,
         Target::TakeHeader,
         Target::AutomationLane,
@@ -326,8 +328,6 @@ impl Target {
         Target::BypassButton,
         Target::DeviceTitle,
         Target::Timeline,
-        Target::Overview,
-        Target::OverviewEdge,
     ];
 
     /// Its name in mouse map files.

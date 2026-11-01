@@ -165,6 +165,12 @@
 | Fixed Grid | Ctrl+5 | `view.fixed_grid` |
 | Snap to Grid | Ctrl+4 | `view.toggle_snap` |
 | Command Palette... | Ctrl+Shift+P | `view.command_palette` |
+| Fit Selected Tracks |  | `view.fit_selected_tracks` |
+| Huge Tracks |  | `view.huge_tracks` |
+| Large Tracks |  | `view.large_tracks` |
+| Medium Tracks |  | `view.medium_tracks` |
+| Small Tracks |  | `view.small_tracks` |
+| Auto Zoom Tracks |  | `view.toggle_auto_zoom` |
 
 ### Workspaces
 

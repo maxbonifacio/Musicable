@@ -87,6 +87,20 @@ pub const TRACKS_SHORTER: CommandId = CommandId::new("view.tracks_shorter");
 /// Gives tracks their default height back: the selected tracks, or the
 /// track the panels show.
 pub const RESET_TRACK_HEIGHT: CommandId = CommandId::new("view.reset_track_height");
+/// Makes the selected tracks, or every track with none selected, the
+/// Small size.
+pub const SMALL_TRACKS: CommandId = CommandId::new("view.small_tracks");
+/// Makes the selected tracks, or every track, the Medium size.
+pub const MEDIUM_TRACKS: CommandId = CommandId::new("view.medium_tracks");
+/// Makes the selected tracks, or every track, the Large size.
+pub const LARGE_TRACKS: CommandId = CommandId::new("view.large_tracks");
+/// Makes the selected tracks, or every track, the Huge size.
+pub const HUGE_TRACKS: CommandId = CommandId::new("view.huge_tracks");
+/// Makes the selected tracks fill the arrangement's height together, and
+/// every other track as short as tracks go.
+pub const FIT_SELECTED_TRACKS: CommandId = CommandId::new("view.fit_selected_tracks");
+/// Turns on or off making the selected track Large while it's selected.
+pub const TOGGLE_AUTO_ZOOM: CommandId = CommandId::new("view.toggle_auto_zoom");
 /// Scrolls the view with the focus to the playhead, and lets Follow follow
 /// it again.
 pub const SCROLL_TO_PLAYHEAD: CommandId = CommandId::new("view.scroll_to_playhead");
@@ -133,7 +147,7 @@ type Handler = fn(&mut Context<'_>);
 
 /// The view commands that take no arguments, with their titles, when they
 /// apply and what they run.
-const COMMANDS: [(CommandId, &str, When, Handler); 19] = [
+const COMMANDS: [(CommandId, &str, When, Handler); 20] = [
     (ZOOM_IN, "Zoom In", When::Always, |ctx| zoom(ctx, ZOOM_STEP)),
     (ZOOM_OUT, "Zoom Out", When::Always, |ctx| {
         zoom(ctx, 1.0 / ZOOM_STEP)
@@ -175,6 +189,12 @@ const COMMANDS: [(CommandId, &str, When, Handler); 19] = [
         history.follow = !history.follow;
         // Turned on, it follows the playhead from the next frame.
         history.suspended = false;
+    }),
+    (TOGGLE_AUTO_ZOOM, "Auto Zoom Tracks", When::Always, |ctx| {
+        let editor = ctx.document.editor_mut();
+        editor.behaviour.auto_zoom_tracks = !editor.behaviour.auto_zoom_tracks;
+        editor.sized_by_hand = None;
+        ctx.requests.push(Request::SaveBehaviour);
     }),
     (
         SWITCH_FOLLOW_MODE,
@@ -262,6 +282,37 @@ const REQUESTS: [(CommandId, &str, Request); 12] = [
         Request::MoveToMainWindow,
     ),
 ];
+
+/// The height presets' commands, Small to Huge, in the order of
+/// [`Behaviour::presets`](crate::editor::Behaviour::presets).
+pub const PRESETS: [(CommandId, &str); 4] = [
+    (SMALL_TRACKS, "Small Tracks"),
+    (MEDIUM_TRACKS, "Medium Tracks"),
+    (LARGE_TRACKS, "Large Tracks"),
+    (HUGE_TRACKS, "Huge Tracks"),
+];
+
+/// The tracks a height preset run with `args` sizes: those it names, or
+/// every track with `all`, or else the selected tracks, or every track if
+/// none is selected.
+fn preset_tracks(ctx: &Context<'_>, args: &Args) -> Result<Vec<TrackId>, CommandError> {
+    let project = ctx.document.project();
+    let every = || project.tracks.iter().map(|t| t.id).collect();
+    if args.opt("all")? == Some(true) {
+        return Ok(every());
+    }
+    if let Some(tracks) = args.opt::<Vec<TrackId>>("tracks")? {
+        if let Some(id) = tracks.iter().find(|&&id| project.track(id).is_none()) {
+            return Err(CommandError::invalid(format!("there's no track {}", id.0)));
+        }
+        return Ok(tracks);
+    }
+    let selected = &ctx.document.editor().selection.tracks;
+    Ok(match selected.is_empty() {
+        true => every(),
+        false => selected.iter().copied().collect(),
+    })
+}
 
 /// The `history` argument the view-setting commands take: how the change
 /// counts in the view's history and for Follow.
@@ -447,9 +498,75 @@ pub fn register(registry: &mut Registry) {
             let editor = ctx.document.editor_mut();
             editor.navigate(Panel::Arrangement, record, playing, |editor| {
                 for chain in chains {
-                    editor.track_heights.insert(chain, height);
+                    editor.set_height(chain, Some(height));
                 }
             });
+            Ok(Value::None)
+        },
+    );
+    for (index, (id, title)) in PRESETS.into_iter().enumerate() {
+        registry.add(
+            Command::new(id, title).with_params(&[
+                Param::optional(
+                    "tracks",
+                    Type::TRACKS,
+                    "The tracks: the selected tracks without it, or every track if none is.",
+                ),
+                Param::optional("all", Type::Bool, "Every track, as with Alt held."),
+            ]),
+            move |ctx, args| {
+                let tracks = preset_tracks(ctx, args)?;
+                let playing = ctx.transport.is_playing();
+                let editor = ctx.document.editor_mut();
+                let height = editor.behaviour.presets()[index];
+                editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+                    for id in tracks {
+                        editor.set_height(Chain::Track(id), Some(height));
+                    }
+                });
+                Ok(Value::None)
+            },
+        );
+    }
+    registry.add(
+        Command::new(FIT_SELECTED_TRACKS, "Fit Selected Tracks")
+            .when(When::TracksSelected)
+            .with_params(&[Param::optional(
+                "tracks",
+                Type::TRACKS,
+                "The tracks to fit: the selected tracks without it.",
+            )]),
+        |ctx, args| {
+            let tracks: Vec<TrackId> = match args.opt("tracks")? {
+                Some(tracks) => tracks,
+                None => ctx
+                    .document
+                    .editor()
+                    .selection
+                    .tracks
+                    .iter()
+                    .copied()
+                    .collect(),
+            };
+            let project = ctx.document.project();
+            if let Some(id) = tracks.iter().find(|&&id| project.track(id).is_none()) {
+                return Err(CommandError::invalid(format!("there's no track {}", id.0)));
+            }
+            if tracks.is_empty() {
+                return Err(CommandError::invalid("no track is selected"));
+            }
+            let playing = ctx.transport.is_playing();
+            let (project, editor) = ctx.document.parts();
+            let mut fits = true;
+            editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
+                fits = editor.fit_selected_tracks(project, &tracks);
+            });
+            if !fits {
+                ctx.requests.push(Request::Notice(
+                    "The selected tracks don't fit at the smallest height. Scroll for the rest."
+                        .into(),
+                ));
+            }
             Ok(Value::None)
         },
     );
@@ -469,7 +586,7 @@ pub fn register(registry: &mut Registry) {
             let editor = ctx.document.editor_mut();
             editor.navigate(Panel::Arrangement, Record::Step, playing, |editor| {
                 for chain in chains {
-                    editor.track_heights.remove(&chain);
+                    editor.set_height(chain, None);
                 }
             });
             Ok(Value::None)
@@ -729,7 +846,7 @@ fn step_heights(ctx: &mut Context<'_>, taller: bool) {
                     .find(|&size| size < height - 0.5)
                     .unwrap_or(MIN_TRACK_HEIGHT),
             };
-            editor.track_heights.insert(chain, next);
+            editor.set_height(chain, Some(next));
         }
     });
 }
@@ -1212,6 +1329,109 @@ mod tests {
                 "20 of 30 tracks are in sight at the smallest height. Scroll for the rest.".into()
             )]
         );
+    }
+
+    #[test]
+    fn presets_size_the_selected_tracks_or_every_track() {
+        let (mut setup, bass, keys) = two_tracks();
+        let height = |setup: &Setup, track| setup.document.editor().height_of(Chain::Track(track));
+        // With none selected, every track.
+        setup.run(&SMALL_TRACKS);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (24.0, 24.0));
+        setup.select_tracks(&[keys]);
+        setup.run(&LARGE_TRACKS);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (24.0, 120.0));
+        // Alt in a menu gives every track the size.
+        let all = Args::new().with("all", true);
+        setup.run_with(&HUGE_TRACKS, all).unwrap();
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (200.0, 200.0));
+        // The sizes are the behaviour's.
+        setup.document.editor_mut().behaviour.medium_tracks = 80;
+        let tracks = Args::new().with("tracks", vec![bass]);
+        setup.run_with(&MEDIUM_TRACKS, tracks).unwrap();
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (80.0, 200.0));
+        // Each is a step back.
+        setup.run(&ZOOM_BACK);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (200.0, 200.0));
+        setup.run(&ZOOM_BACK);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (24.0, 120.0));
+        assert_eq!(setup.document.take_committed(), []);
+    }
+
+    #[test]
+    fn fit_selected_gives_the_selected_tracks_the_room() {
+        let mut project = Project::new();
+        let tracks: Vec<TrackId> = (0..30)
+            .map(|n| project.add_track(format!("T{n}"), TrackKind::Audio))
+            .collect();
+        let mut setup = Setup::new(project);
+        let height = |setup: &Setup, track| setup.document.editor().height_of(Chain::Track(track));
+        assert!(!setup.applies(&FIT_SELECTED_TRACKS));
+        // The other 28 take 672 points at the smallest, more than the
+        // 480 there are: the two are the smallest too, and the first of
+        // them comes to the top.
+        setup.select_tracks(&[tracks[27], tracks[29]]);
+        // Selecting them scrolled down to them.
+        let top = setup.document.editor().viewport.top;
+        setup.run(&FIT_SELECTED_TRACKS);
+        assert_eq!(height(&setup, tracks[27]), MIN_TRACK_HEIGHT);
+        assert_eq!(
+            setup.document.editor().viewport.top,
+            27.0 * MIN_TRACK_HEIGHT
+        );
+        assert_eq!(
+            setup.requests,
+            [Request::Notice(
+                "The selected tracks don't fit at the smallest height. Scroll for the rest.".into()
+            )]
+        );
+        setup.run(&ZOOM_BACK);
+        assert_eq!(height(&setup, tracks[27]), 60.0);
+        assert_eq!(setup.document.editor().viewport.top, top);
+
+        // With four tracks, the other two take 48 points and the selected
+        // ones share the rest.
+        let mut project = Project::new();
+        let tracks: Vec<TrackId> = (0..4)
+            .map(|n| project.add_track(format!("T{n}"), TrackKind::Audio))
+            .collect();
+        let mut setup = Setup::new(project);
+        let args = Args::new().with("tracks", vec![tracks[1], tracks[2]]);
+        setup.run_with(&FIT_SELECTED_TRACKS, args).unwrap();
+        assert_eq!(height(&setup, tracks[1]), (480.0 - 48.0) / 2.0);
+        assert_eq!(height(&setup, tracks[3]), MIN_TRACK_HEIGHT);
+        assert!(setup.requests.is_empty());
+    }
+
+    #[test]
+    fn auto_zoom_makes_the_selected_track_large_and_saves_none_of_it() {
+        let (mut setup, bass, keys) = two_tracks();
+        let height = |setup: &Setup, track| setup.document.editor().height_of(Chain::Track(track));
+        let show = |setup: &mut Setup, track| {
+            setup.document.editor_mut().selected_track = Some(Chain::Track(track));
+            // Any command lets Auto Zoom see the track selected.
+            setup.run(&SCROLL_TO_PLAYHEAD);
+        };
+        setup.run(&TOGGLE_AUTO_ZOOM);
+        assert!(setup.document.editor().behaviour.auto_zoom_tracks);
+        assert_eq!(setup.requests, [Request::SaveBehaviour]);
+        show(&mut setup, bass);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (120.0, 60.0));
+        assert!(setup.document.editor().track_heights.is_empty());
+        // Sizing the zoomed track by hand keeps the size given.
+        let args = Args::new().with("track", bass).with("height", 50.0);
+        setup.run_with(&SET_TRACK_HEIGHT, args).unwrap();
+        assert_eq!(height(&setup, bass), 50.0);
+        show(&mut setup, keys);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (50.0, 120.0));
+        // Selected again, it's zoomed again.
+        show(&mut setup, bass);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (120.0, 60.0));
+        // Off, the heights are the user's.
+        setup.run(&TOGGLE_AUTO_ZOOM);
+        assert_eq!((height(&setup, bass), height(&setup, keys)), (50.0, 60.0));
+        let heights = &setup.document.editor().track_heights;
+        assert_eq!(heights.len(), 1);
     }
 
     #[test]

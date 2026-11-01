@@ -157,7 +157,7 @@ four on the piano roll and the Sample Editor while they have it:
 | Ctrl+Shift+F | Follow, on or off, in the panel with the focus |
 | Home, End | Go to Start and Go to End of the song, scrolling there if it's out of sight |
 | H | Fit Track Heights: makes the tracks share the arrangement's height, as far as they can. If they can't all fit at the smallest size, it says how many are in sight |
-| Alt+Equals, Alt+Minus | Make Tracks Taller and Shorter: the selected tracks, or the selected track, a size at a time, through 24, 60, 120 and 200 points |
+| Alt+Equals, Alt+Minus | Make Tracks Taller and Shorter: the selected tracks, or the selected track, a size at a time, through the Small, Medium, Large and Huge sizes |
 | Ctrl+Alt+O | Shows or hides the overview |
 
 The **overview**, a strip over the ruler, shows the whole song: where the
@@ -168,6 +168,25 @@ zooms; it reaches past the song's end while the view or a recording does.
 Ctrl+Alt+O, or Overview in the View menu, shows and hides it, and
 workspaces keep which. It stays out of the way while the arrangement is
 shorter than 300 points, so the tracks keep their room.
+
+The **track heights** menu, the button at the left of the corner over the
+track headers, and **Track Height** in a track header's menu give tracks
+one of four sizes: Small, Medium, Large and Huge, 24, 60, 120 and 200
+points until you change them on the Behaviour page
+([Settings](../customising/settings.md#behaviour)). From the corner they
+size the selected tracks, or every track if none is selected; from a
+header, the track it was opened on, or the selected tracks if it's one of
+them; and with Alt held, every track. **Fit Selected Tracks** makes the
+selected tracks fill the arrangement's height together and every other
+track as short as tracks go; if even that leaves too little room, the
+selected tracks are the smallest too and the first of them scrolls to the
+top. **Auto Zoom Tracks**, in the same menus, makes the selected track
+Large while it's selected and gives it its own height back when another
+is. The heights it gives are never saved, so turning it off leaves the
+heights you set, and sizing the zoomed track yourself keeps the size you
+give it. Each size and fit is a step that X goes back over. The sizes,
+Fit Selected Tracks and Auto Zoom Tracks are commands, so they can be
+given keys.
 
 Each view keeps its own history of where it's been, up to 32 steps back. A
 gesture is one step: a burst of the wheel, a drag of the ruler or the

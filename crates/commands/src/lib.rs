@@ -687,7 +687,9 @@ impl Registry {
         if args.is_empty() && !command.when.applies(document.project(), document.editor()) {
             return Err(CommandError::NotNow(id.clone()));
         }
-        run(context, args)
+        let result = run(context, args);
+        context.document.editor_mut().settle_auto_zoom();
+        result
     }
 
     /// Runs `commands` in order, each with its arguments, as one step in

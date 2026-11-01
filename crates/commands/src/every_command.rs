@@ -1663,6 +1663,28 @@ fn examples() -> Vec<Example> {
             let track = find_track(s, |_| true)?.id;
             Some(Args::new().with("track", track))
         }),
+        // Without a selection, every track.
+        leaves(view::SMALL_TRACKS, bare),
+        leaves(view::MEDIUM_TRACKS, |s| {
+            let track = find_track(s, |_| true)?.id;
+            s.select_tracks(&[track]);
+            Some(Args::new())
+        }),
+        leaves(view::LARGE_TRACKS, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(Args::new().with("tracks", vec![track]))
+        }),
+        leaves(view::HUGE_TRACKS, |_| Some(Args::new().with("all", true))),
+        leaves(view::FIT_SELECTED_TRACKS, |s| {
+            let track = find_track(s, |_| true)?.id;
+            s.select_tracks(&[track]);
+            Some(Args::new())
+        }),
+        leaves(view::FIT_SELECTED_TRACKS, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(Args::new().with("tracks", vec![track]))
+        }),
+        leaves(view::TOGGLE_AUTO_ZOOM, bare),
         // Every track's.
         leaves(view::RESET_TRACK_HEIGHT, |_| {
             Some(Args::new().with("all", true))

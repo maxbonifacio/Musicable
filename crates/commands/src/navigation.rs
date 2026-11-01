@@ -420,7 +420,46 @@ impl Editor {
 
     /// The height of `chain`'s row in the arrangement.
     pub fn height_of(&self, chain: Chain) -> f32 {
-        (self.track_heights.get(&chain).copied()).unwrap_or(self.lanes.track)
+        let height = (self.track_heights.get(&chain).copied()).unwrap_or(self.lanes.track);
+        self.auto_height(chain, height)
+    }
+
+    /// The height `chain`'s row is shown at, when the user gave it
+    /// `height`: Large while Auto Zoom zooms it, if that's taller.
+    pub fn auto_height(&self, chain: Chain, height: f32) -> f32 {
+        match self.auto_zoomed() == Some(chain) {
+            true => height.max(self.behaviour.presets()[2]),
+            false => height,
+        }
+    }
+
+    /// The track Auto Zoom makes Large: the selected track, unless the
+    /// user has set its height since it was selected.
+    pub fn auto_zoomed(&self) -> Option<Chain> {
+        let chain = self
+            .selected_track
+            .filter(|chain| chain.track().is_some())?;
+        (self.behaviour.auto_zoom_tracks && self.sized_by_hand != Some(chain)).then_some(chain)
+    }
+
+    /// Sets the user's height of `chain`'s row, or gives it the default
+    /// with `None`. Auto Zoom then leaves the row as the user set it.
+    pub fn set_height(&mut self, chain: Chain, height: Option<f32>) {
+        match height {
+            Some(height) => self.track_heights.insert(chain, height),
+            None => self.track_heights.remove(&chain),
+        };
+        if self.auto_zoomed() == Some(chain) {
+            self.sized_by_hand = Some(chain);
+        }
+    }
+
+    /// Lets Auto Zoom zoom the selected track again once another track is
+    /// selected than the one the user sized.
+    pub fn settle_auto_zoom(&mut self) {
+        if self.sized_by_hand.is_some() && self.sized_by_hand != self.selected_track {
+            self.sized_by_hand = None;
+        }
     }
 
     /// Each track's rows, top to bottom, as the arrangement lays them out
@@ -484,13 +523,48 @@ impl Editor {
         let each = budget / count as f32;
         let height = each.clamp(crate::view::MIN_TRACK_HEIGHT, crate::view::MAX_TRACK_HEIGHT);
         for track in &project.tracks {
-            self.track_heights.insert(Chain::Track(track.id), height);
+            self.set_height(Chain::Track(track.id), Some(height));
         }
         self.viewport.top = 0.0;
         let shown = (self.track_rows(project).iter())
             .filter(|rows| rows.top + rows.height <= self.lanes.height + 0.5)
             .count();
         (shown, count)
+    }
+
+    /// Makes the tracks `selected` fill the tracks' part of the arrangement
+    /// together, and every other track as short as tracks go, with their
+    /// take and automation lanes as tall as they are, as Cubase's Zoom
+    /// Tracks does. When the selected tracks can't fit, they're as short
+    /// as tracks go too, and the first of them scrolls to the top. Returns
+    /// whether they fit.
+    pub fn fit_selected_tracks(&mut self, project: &Project, selected: &[TrackId]) -> bool {
+        let (min, max) = (crate::view::MIN_TRACK_HEIGHT, crate::view::MAX_TRACK_HEIGHT);
+        let count = (project.tracks.iter())
+            .filter(|track| selected.contains(&track.id))
+            .count();
+        if count == 0 {
+            return false;
+        }
+        let rows = self.track_rows(project);
+        let fixed: f32 = rows.iter().map(|rows| rows.lanes).sum();
+        let others = (project.tracks.len() - count) as f32 * min;
+        let each = (self.lanes.height - fixed - others) / count as f32;
+        for track in &project.tracks {
+            let height = match selected.contains(&track.id) {
+                true => each.clamp(min, max),
+                false => min,
+            };
+            self.set_height(Chain::Track(track.id), Some(height));
+        }
+        let fits = each >= min;
+        self.viewport.top = match fits {
+            true => 0.0,
+            false => (self.track_rows(project).iter())
+                .find(|rows| selected.contains(&rows.id))
+                .map_or(0.0, |rows| rows.top),
+        };
+        fits
     }
 }
 

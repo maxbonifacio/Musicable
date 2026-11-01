@@ -654,6 +654,34 @@ fn behaviour(ui: &mut Ui, cx: &Cx<'_>) -> Option<Asked> {
         });
     });
     ui.add_space(8.0);
+    ui.label(RichText::new("Track heights").strong());
+    ui.horizontal_wrapped(|ui| {
+        let sizes = [
+            (&mut new.small_tracks, "Small"),
+            (&mut new.medium_tracks, "Medium"),
+            (&mut new.large_tracks, "Large"),
+            (&mut new.huge_tracks, "Huge"),
+        ];
+        for (size, name) in sizes {
+            ui.label(name);
+            ui.add(DragValue::new(size).range(24..=400).suffix(" pt"))
+                .on_hover_text(format!("The {name} size, in points"));
+        }
+    });
+    ui.checkbox(
+        &mut new.snap_track_heights,
+        "Dragging a track's edge snaps to these sizes",
+    )
+    .on_hover_text("As Cubase's Snap Track Heights does");
+    ui.checkbox(
+        &mut new.auto_zoom_tracks,
+        "Auto Zoom: the selected track is Large while it's selected",
+    )
+    .on_hover_text(
+        "As in Bitwig, Cubase and Logic. The heights it gives are never saved, and turning it \
+         off leaves the heights you set.",
+    );
+    ui.add_space(8.0);
     ui.label(RichText::new("Auto-warp").strong());
     let rules = [
         (

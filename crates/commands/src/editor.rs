@@ -39,6 +39,10 @@ pub struct Editor {
     /// The height of each track in the arrangement, and of the master's
     /// row, in points, where it isn't the theme's.
     pub track_heights: BTreeMap<Chain, f32>,
+    /// The track whose height the user set while Auto Zoom made it Large,
+    /// which Auto Zoom then leaves at that height until another track is
+    /// selected.
+    pub sized_by_hand: Option<Chain>,
     /// The sizes the arrangement drew its lanes at last.
     pub lanes: Lanes,
     /// Each timeline panel's history of views, and its Follow state.
@@ -87,6 +91,7 @@ impl Default for Editor {
             grid: Grid::default(),
             viewport: Viewport::default(),
             track_heights: BTreeMap::new(),
+            sized_by_hand: None,
             lanes: Lanes::default(),
             navigation: Navigation::default(),
             behaviour: Behaviour::default(),
@@ -929,6 +934,10 @@ pub struct Behaviour {
     /// Whether dragging a track's edge snaps its height to those sizes, as
     /// Cubase's Snap Track Heights does.
     pub snap_track_heights: bool,
+    /// Whether the selected track is made Large while it's selected, and
+    /// given its own height back when another is, as Bitwig's, Cubase's
+    /// and Logic's Auto Zoom do. The heights it gives are never saved.
+    pub auto_zoom_tracks: bool,
     /// How Follow keeps the playhead in sight while the song plays, in
     /// every panel that follows it.
     pub follow_mode: FollowMode,
@@ -940,7 +949,15 @@ impl Behaviour {
     /// The sizes tracks can be given at once, smallest first, kept within
     /// the heights tracks can have.
     pub fn track_sizes(&self) -> [f32; 4] {
-        let mut sizes = [
+        let mut sizes = self.presets();
+        sizes.sort_by(f32::total_cmp);
+        sizes
+    }
+
+    /// Small, Medium, Large and Huge, in that order, kept within the
+    /// heights tracks can have.
+    pub fn presets(&self) -> [f32; 4] {
+        [
             self.small_tracks,
             self.medium_tracks,
             self.large_tracks,
@@ -948,9 +965,7 @@ impl Behaviour {
         ]
         .map(|size| {
             f32::from(size).clamp(crate::view::MIN_TRACK_HEIGHT, crate::view::MAX_TRACK_HEIGHT)
-        });
-        sizes.sort_by(f32::total_cmp);
-        sizes
+        })
     }
 }
 
@@ -971,6 +986,7 @@ impl Default for Behaviour {
             large_tracks: 120,
             huge_tracks: 200,
             snap_track_heights: false,
+            auto_zoom_tracks: false,
             follow_mode: FollowMode::default(),
             follow_place: FollowPlace::default(),
         }

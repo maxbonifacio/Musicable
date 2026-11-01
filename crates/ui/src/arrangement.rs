@@ -563,7 +563,7 @@ impl Layout {
             };
         let height_of = |chain: Chain| {
             let height = editor.track_heights.get(&chain).copied();
-            height.unwrap_or(theme.track_height)
+            editor.auto_height(chain, height.unwrap_or(theme.track_height))
         };
         for (index, track) in project.tracks.iter().enumerate() {
             let height = height_of(Chain::Track(track.id));
@@ -2079,6 +2079,7 @@ impl Arrangement {
             paint_toggle(ui, button.rect, &button.response, face, on, colour, theme);
         }
         paint::corner(&painter.with_clip_rect(scene.layout.corner), &scene);
+        self.heights_button(ui, &scene, id, actions);
         if ui.input(|i| !i.raw.hovered_files.is_empty()) {
             paint::drop_hint(&painter, &scene);
         }
@@ -2504,6 +2505,31 @@ impl Arrangement {
             _ => send(actions, &plan),
         }
         Some(plan)
+    }
+
+    /// The button in the corner over the headers that opens the menu of
+    /// track heights.
+    fn heights_button(&self, ui: &mut Ui, scene: &Scene<'_>, id: Id, actions: &mut Vec<Action>) {
+        let theme = scene.theme;
+        let corner = scene.layout.corner;
+        let side = (corner.height() - 4.0).min(theme.ruler_height);
+        if side < 8.0 {
+            return;
+        }
+        let rect = Rect::from_min_size(corner.left_top() + vec2(3.0, 2.0), vec2(side, side));
+        let response = ui.interact(rect, id.with("heights"), Sense::click());
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Track heights"));
+        let response = response.on_hover_text("Track heights");
+        paint_toggle(
+            ui,
+            rect,
+            &response,
+            Face::Menu,
+            false,
+            theme.ruler_text,
+            theme,
+        );
+        Popup::menu(&response).show(|ui| menu::heights(ui, scene, None, actions));
     }
 
     /// The buttons in the header of each automation lane in sight. Returns

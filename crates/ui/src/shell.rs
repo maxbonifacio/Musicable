@@ -1675,6 +1675,7 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
         (view::TOGGLE_SNAP, editor.grid.snap),
         (view::TRIPLET_GRID, editor.grid.triplet),
         (view::FIXED_GRID, editor.grid.fixed.is_some()),
+        (view::TOGGLE_AUTO_ZOOM, editor.behaviour.auto_zoom_tracks),
         (notes::TOGGLE_DRAW, editor.piano_roll.draw),
         (warp::SET_WARP, warped),
         (

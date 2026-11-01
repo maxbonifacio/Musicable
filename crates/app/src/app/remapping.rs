@@ -60,6 +60,11 @@ fn new_chords(count: usize) -> Vec<KeyChord> {
         "Comma",
         "Period",
         "Slash",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+        "Insert",
     ]
     .map(|mark| format!("Ctrl+Alt+Shift+{mark}"));
     let functions = ["Ctrl+Alt+Shift", "Ctrl+Shift", "Alt+Shift", "Ctrl+Alt"]
