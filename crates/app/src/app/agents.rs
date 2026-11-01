@@ -200,8 +200,11 @@ impl App {
             return;
         }
         self.handle_requests(ctx, frame);
-        // The plugins' parameters, as of now.
+        // The plugins' parameters, and the meters and CPU figures, as of now:
+        // the frame before can be long ago while the window is behind
+        // others.
         self.update_plugin_status();
+        self.take_readings_for_agents();
         for call in calls {
             let mut agent = Agent {
                 app: self,

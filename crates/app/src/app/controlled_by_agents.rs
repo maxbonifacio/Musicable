@@ -1571,3 +1571,44 @@ fn agents_make_a_blind_test_and_the_user_judges_it() {
     assert_eq!(results["preference"]["second"], 2, "{results:#}");
     window.get_by_label_contains("X named right in 2 of 2");
 }
+
+#[test]
+fn the_status_playhead_moves_on_as_the_song_plays() {
+    let dir = TempDir::new("agents-status-playhead");
+    let file = dir.0.join("Song.musicable");
+    project::save(&file, &song()).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let run = |window: &mut Window, id: &str, args: Json| {
+        agent.call(window, "run_command", json!({"id": id, "args": args}))
+    };
+    let seconds = |window: &mut Window| {
+        let status = agent.call(window, "get_status", json!({})).unwrap();
+        (
+            status["playing"].as_bool().unwrap(),
+            status["playhead_seconds"].as_f64().unwrap(),
+        )
+    };
+    run(&mut window, "transport.locate", json!({"at": 4})).unwrap();
+    for _ in 0..4 {
+        window.state_mut().output.play_idle(1024);
+    }
+    let (_, before) = seconds(&mut window);
+    run(&mut window, "transport.play", json!({})).unwrap();
+    let mut last = before;
+    for read in 0..40 {
+        window.state_mut().output.play_idle(4800);
+        let (playing, now) = seconds(&mut window);
+        assert!(playing);
+        // Once the engine plays, a tenth of a second at a time.
+        if read > 2 {
+            assert!(
+                (now - last - 0.1).abs() < 0.002,
+                "read {read}: {last} then {now}"
+            );
+        }
+        assert!(now >= before - 0.001, "read {read}: {now}, from {before}");
+        last = now;
+    }
+}
