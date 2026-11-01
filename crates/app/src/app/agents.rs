@@ -11,13 +11,14 @@ use musicable_commands::{
 use musicable_engine::Lead;
 use musicable_mcp::pipe::Address;
 use musicable_mcp::{
-    CpuPart, CpuRow, Exporting, Host, Performance, PluginState, Readout, RenderingAhead, Reply,
-    Run, Status,
+    Choice, CpuPart, CpuRow, Exporting, Host, Performance, PluginState, Readout, RenderingAhead,
+    Reply, Run, Status, Unsaved,
 };
 use musicable_model::param::ParamSpec;
 use musicable_model::time::Beats;
 use musicable_model::{DeviceId, Project, TrackId};
 use musicable_ui::Row;
+use musicable_ui::SaveChoice;
 use serde_json::json;
 
 use super::{App, with_extension};
@@ -25,6 +26,14 @@ use crate::audio_files::clip_path;
 use crate::blind_test;
 use crate::export::{Report, Stage};
 use crate::renders::RenderCache;
+
+/// How long Musicable waits to close once it has said it will quit, for
+/// the answer to reach the agent.
+const QUITTING: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// What agents hear when they ask headless Musicable for what needs a
+/// window.
+const HEADLESS: &str = "Musicable runs headless, with no window.";
 
 /// What an agent's command hears while the window asks the user something.
 const ASKING: &str = "Musicable is waiting for the user to answer a question in its window. Try \
@@ -101,6 +110,11 @@ impl Agents {
             problem: self.problem.as_deref(),
             claude_command: &self.claude_command,
         }
+    }
+
+    /// Why Musicable can't let agents in, if it can't.
+    pub(super) fn problem(&self) -> Option<String> {
+        self.problem.clone()
     }
 
     /// Forgets agents' last change once none is connected, so the next
@@ -248,7 +262,7 @@ impl App {
                 }
             }
             Run::Batch(name, commands) => {
-                let result = self.session.run_batch(&name, &commands);
+                let result = self.session.run_linked(&name, &commands);
                 let ran = result.is_ok();
                 // Commands that run alone, as those that ask for files or
                 // change settings do, can't be part of a batch.
@@ -400,6 +414,8 @@ impl App {
     /// are saved or the user let them go, and answers.
     pub(super) fn replace_for_agent(&mut self, request: Request, reply: Reply) {
         match request {
+            // Saved by now, if the user said to save.
+            Request::Quit => return self.quit_soon(reply, !self.session.is_modified()),
             Request::New => self.open_project(Project::new(), None),
             Request::NewDemo => self.open_project(crate::demo_project(), None),
             Request::Open(Some(path)) => {
@@ -502,6 +518,64 @@ impl App {
             answer["problems"] = json!(report.problems);
         }
         reply.done(answer);
+    }
+
+    /// Quits for an agent, once the changes are saved or let go as
+    /// `unsaved` says, or else as the user says, and answers before the
+    /// window closes.
+    fn quit_for_agent(
+        &mut self,
+        unsaved: Option<Unsaved>,
+        reply: Reply,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        if self.pending.is_some() {
+            return reply.failed(ASKING);
+        }
+        if self.quit_at.is_some() {
+            return reply.failed("Musicable is quitting already.");
+        }
+        let modified = self.session.is_modified();
+        let saved = match (modified, unsaved) {
+            (false, _) | (true, Some(Unsaved::Discard)) => false,
+            (true, Some(Unsaved::Save)) => {
+                let Some(path) = self.path.clone() else {
+                    return reply.failed(
+                        "The project has no file yet: save it with file.save_as, giving a \
+                         file, or quit with unsaved discard.",
+                    );
+                };
+                if let Err(why) = self.save_to(path) {
+                    return reply.failed(full_stop(why));
+                }
+                true
+            }
+            (true, None) if self.is_headless() => {
+                return reply.failed(
+                    "The project has unsaved changes, and headless Musicable has no one to ask \
+                     about them: say unsaved save or discard.",
+                );
+            }
+            (true, None) => {
+                // The window asks the user, and the agent hears once they
+                // have answered.
+                self.pending = Some(Request::Quit);
+                self.agents.asking = Some(reply);
+                let attention = egui::UserAttentionType::Informational;
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(attention));
+                return;
+            }
+        };
+        let _ = frame;
+        self.quit_soon(reply, saved);
+    }
+
+    /// Answers `reply` that Musicable quits, having saved the changes if
+    /// `saved`, and closes a moment later, once the answer has gone.
+    pub(super) fn quit_soon(&mut self, reply: Reply, saved: bool) {
+        reply.done(json!({ "quitting": true, "saved": saved }));
+        self.quit_at = Some(std::time::Instant::now() + QUITTING);
     }
 
     /// Answers the agent whose New or Open waited for the user to say
@@ -609,6 +683,8 @@ impl musicable_mcp::Window for Agent<'_> {
             render_ahead,
             rows,
             total: figures.total,
+            frames: self.app.frame_load.lately(std::time::Instant::now()),
+            memory: crate::memory::used(),
         }
     }
 
@@ -672,6 +748,7 @@ impl musicable_mcp::Window for Agent<'_> {
             reading_folders: folders(library.reading()),
             finding_presets: library.is_finding_presets(),
             revision: session.revision(),
+            headless: app.is_headless(),
         }
     }
 
@@ -735,6 +812,46 @@ impl musicable_mcp::Window for Agent<'_> {
 
     fn run(&mut self, run: Run, reply: Reply) {
         self.app.run_for_agent(run, reply, self.ctx, self.frame);
+    }
+
+    fn quit(&mut self, unsaved: Option<Unsaved>, reply: Reply) {
+        self.app
+            .quit_for_agent(unsaved, reply, self.ctx, self.frame);
+    }
+
+    fn focus(&mut self, reply: Reply) {
+        if self.app.is_headless() {
+            return reply.failed(HEADLESS);
+        }
+        let ctx = self.ctx;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        // Over other apps' windows for a frame, as the system may not let
+        // Musicable take the focus from the app the user last used.
+        let top = egui::WindowLevel::AlwaysOnTop;
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(top));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.app.raised = true;
+        ctx.request_repaint();
+        reply.done(json!({ "window": "main" }));
+    }
+
+    fn answer_question(&mut self, choice: Choice, reply: Reply) {
+        if !self.app.is_headless() {
+            return reply.failed(
+                "Only the user answers the window's questions: wait_for with until answered \
+                 waits until they have.",
+            );
+        }
+        let Some(question) = self.status().question else {
+            return reply.failed("The window asks nothing now.");
+        };
+        let choice = match choice {
+            Choice::Save => SaveChoice::Save,
+            Choice::Discard => SaveChoice::Discard,
+            Choice::Cancel => SaveChoice::Cancel,
+        };
+        let went_ahead = self.app.answer_question(choice, self.ctx, self.frame);
+        reply.done(json!({ "question": question, "went_ahead": went_ahead }));
     }
 
     fn windows(&self) -> serde_json::Value {

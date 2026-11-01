@@ -32,8 +32,8 @@ use crate::local::{LocalTool, LocalTools};
 use crate::pipe::Address;
 use crate::tools::{self, Agents, Link, Tools};
 use crate::{
-    Call, CpuPart, CpuRow, Exporting, Host, Performance, RenderingAhead, Reply, Run, Status,
-    Window, answer, host,
+    Call, CpuPart, CpuRow, Exporting, Frames, Host, Memory, Performance, RenderingAhead, Reply,
+    Run, Status, Window, answer, host,
 };
 
 /// A transport that plays along, and does nothing else.
@@ -171,7 +171,7 @@ impl Window for TestWindow {
                 reply.ran(result, undo.as_deref());
             }
             Run::Batch(name, commands) => {
-                let result = self.commands.run_batch(&name, &commands, &mut context);
+                let result = self.commands.run_linked(&name, &commands, &mut context);
                 let undo = made_step(&mut self.document);
                 reply.ran_batch(result, undo.as_deref());
             }
@@ -335,6 +335,9 @@ fn agents_see_the_tools_and_how_to_use_them() {
             "get_levels",
             "get_command_log",
             "list_audio_devices",
+            "quit_app",
+            "focus_app",
+            "answer_question",
         ]
     );
     let server = rig
@@ -517,6 +520,30 @@ fn a_batch_is_one_step_to_undo_or_none_at_all() {
                 .into()
         )
     );
+}
+
+#[test]
+fn a_command_in_a_batch_uses_what_one_before_it_gave_back() {
+    let mut rig = Rig::new(Project::new());
+    let made = rig
+        .call(
+            "run_commands",
+            json!({"name": "Add a Bass", "commands": [
+                {"id": "track.new_audio_track"},
+                {"id": "track.new_midi_track", "as": "bass"},
+                {"id": "track.rename", "args": {"track": "$bass", "name": "Bass"}},
+                {"id": "mixer.set_mute", "args": {"track": "$bass", "muted": true}},
+            ]}),
+        )
+        .unwrap();
+    assert_eq!(
+        made,
+        json!({"results": [0, 1, null, null], "undo": "Add a Bass"})
+    );
+    let project = rig.call("get_project", json!({})).unwrap();
+    assert_eq!(project["tracks"][1]["name"], "Bass");
+    assert_eq!(project["tracks"][1]["muted"], true);
+    assert_eq!(project["tracks"][0]["muted"], false);
 }
 
 #[test]
@@ -1111,6 +1138,8 @@ fn the_performance_says_what_each_device_costs_the_cpu() {
             "render_ahead": null,
             "total": 0.0,
             "rows": [],
+            "frames": null,
+            "memory": null,
         })
     );
     let row = |part, average, longest| CpuRow {
@@ -1135,6 +1164,16 @@ fn the_performance_says_what_each_device_costs_the_cpu() {
             row(CpuPart::Metronome, 0.0, 0.0),
         ],
         total: 0.547,
+        frames: Some(Frames {
+            count: 41,
+            seconds: 5.03,
+            average_ms: 2.345,
+            longest_ms: 17.06,
+        }),
+        memory: Some(Memory {
+            resident_mb: 412.345,
+            private_mb: Some(388.0),
+        }),
     };
     let performance = rig.call("get_performance", json!({})).unwrap();
     assert_eq!(
@@ -1152,6 +1191,8 @@ fn the_performance_says_what_each_device_costs_the_cpu() {
                 {"part": "modulators", "chain": "master", "renders": "live", "average": 0.001, "longest": 0.002},
                 {"part": "metronome", "renders": "live", "average": 0.0, "longest": 0.0},
             ],
+            "frames": {"count": 41, "seconds": 5.0, "average_ms": 2.3, "longest_ms": 17.1},
+            "memory": {"resident_mb": 412.3, "private_mb": 388.0},
         })
     );
     // Rendering ahead, a block has only to be ready before the lead runs
@@ -1219,6 +1260,8 @@ fn the_status_says_what_plays_and_whats_under_way() {
             "scanning_plugins": false,
             "library": {"scanning": [], "reading": [], "finding_presets": false},
             "revision": 0,
+            "headless": false,
+            "process": std::process::id(),
         })
     );
     rig.window.status = Status {
@@ -1246,6 +1289,7 @@ fn the_status_says_what_plays_and_whats_under_way() {
         reading_folders: vec![("/Loops".into(), 7)],
         finding_presets: true,
         revision: 12,
+        headless: true,
     };
     let status = rig.call("get_status", json!({})).unwrap();
     assert_eq!(
@@ -1269,6 +1313,8 @@ fn the_status_says_what_plays_and_whats_under_way() {
                 "finding_presets": true,
             },
             "revision": 12,
+            "headless": true,
+            "process": std::process::id(),
         })
     );
     // Each piece of work alone keeps it busy.
@@ -1632,11 +1678,13 @@ fn the_bridge_runs_its_own_tools_with_musicable_closed() {
     let client = (runtime.block_on(client_called("claude-code").serve(agent)))
         .expect("the agent connects to the bridge");
 
-    // They come after the app's tools, as read-only as they are.
+    // They come after the app's tools and the bridge's lifecycle tools,
+    // as read-only as they are.
     let listed = runtime.block_on(client.list_all_tools()).unwrap();
     let names: Vec<&str> = listed.iter().map(|tool| tool.name.as_ref()).collect();
-    let app = tools::list().len();
+    let app = tools::list().len() + 2;
     assert_eq!(names.len(), app + 2, "{names:?}");
+    assert_eq!(names[app - 2..app], ["launch_app", "restart_app"]);
     assert_eq!(names[app..], ["audio_echo", "audio_wait"]);
     let read_only = |i: usize| (listed[i].annotations.as_ref()).and_then(|a| a.read_only_hint);
     assert_eq!(
@@ -1661,6 +1709,27 @@ fn the_bridge_runs_its_own_tools_with_musicable_closed() {
     let refused = read(call(&runtime, &client, "get_project", json!({}), || {}));
     let refused = refused.unwrap_err();
     assert!(refused.starts_with("Musicable isn't running"), "{refused}");
+    // Launching checks what it's given before it starts anything.
+    let missing = dir.0.join("musicable-nope");
+    let launched = read(call(
+        &runtime,
+        &client,
+        "launch_app",
+        json!({"build": missing, "headless": true}),
+        || {},
+    ));
+    assert_eq!(
+        launched,
+        Err(format!("There's no file {}.", missing.display()))
+    );
+    let launched = read(call(
+        &runtime,
+        &client,
+        "restart_app",
+        json!({"unsaved": "keep"}),
+        || {},
+    ));
+    assert_eq!(launched, Err("unsaved is save or discard.".to_owned()));
 }
 
 #[test]

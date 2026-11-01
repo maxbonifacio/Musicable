@@ -9,8 +9,8 @@ use std::time::Instant;
 use musicable_audio::{InputBuffer, MidiBuffer};
 use musicable_commands::{
     Args, BatchError, CommandError, CommandId, Context, Document, Edit, Editor, KeyChord, Keymap,
-    Registry, Request, Steps, Transport, UnknownCommand, Value, auto_warp, mixer, take, transport,
-    warp,
+    Linked, Registry, Request, Steps, Transport, UnknownCommand, Value, auto_warp, mixer, take,
+    transport, warp,
 };
 use musicable_engine::compile::keys;
 use musicable_engine::media::Media;
@@ -901,6 +901,32 @@ impl Session {
         let result = self.commands.run_batch(name, commands, &mut context);
         let error = result.as_ref().err().map(ToString::to_string);
         self.command_log.add(Ran::Batch(name, commands), error);
+        self.sync();
+        result
+    }
+
+    /// Runs `commands` as an agent's batch, as [`run_batch`](Self::run_batch)
+    /// does, each using what those before it gave back if it says. See
+    /// [`Registry::run_linked`].
+    pub fn run_linked(
+        &mut self,
+        name: &str,
+        commands: &[Linked],
+    ) -> Result<Vec<Value>, BatchError> {
+        let mut library = LibraryLink {
+            library: &mut self.library,
+            plugins: &mut self.plugins,
+            folder: self.engine.folder.clone(),
+        };
+        let mut context = Context {
+            document: &mut self.document,
+            transport: &mut self.engine,
+            requests: &mut self.requests,
+            library: &mut library,
+        };
+        let result = self.commands.run_linked(name, commands, &mut context);
+        let error = result.as_ref().err().map(ToString::to_string);
+        self.command_log.add(Ran::Linked(name, commands), error);
         self.sync();
         result
     }

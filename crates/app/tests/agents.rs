@@ -83,7 +83,7 @@ impl Window for SessionWindow {
                 reply.ran(result, self.step_since(revision, &run));
             }
             Run::Batch(name, commands) => {
-                let result = self.session.run_batch(name, commands);
+                let result = self.session.run_linked(name, commands);
                 reply.ran_batch(result, self.step_since(revision, &run));
             }
         }

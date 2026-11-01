@@ -1,6 +1,7 @@
 //! The window: the UI crate's shell, wired to the session, the audio device
 //! and the project's file.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,7 +36,7 @@ use crate::blind_test::{self, Making};
 use crate::blind_test_window::BlindTestWindow;
 use crate::export::{self, Bits, Export, ExportSettings, FileFormat, Job, Report, Span};
 use crate::export_window::{Asked, ExportWindow};
-use crate::frame_times::FrameTimes;
+use crate::frame_times::{FrameLoad, FrameTimes};
 use crate::keymap_file::UserKeymap;
 use crate::library::{self, LIBRARY_FILE, Library, Listing};
 use crate::log_file;
@@ -49,8 +50,8 @@ use crate::profiles_page::Asked as ProfilesAsked;
 use crate::renders::RenderCache;
 use crate::response::{self, Probe};
 use crate::settings::{
-    self, ANALYSIS_FOLDER, KEYMAP_FILE, MOUSE_FILE, PluginsSettings, ProfileSettings,
-    RENDER_FOLDER, SETTINGS_FILE, Settings, THEMES_FOLDER,
+    self, ANALYSIS_FOLDER, AgentSettings, KEYMAP_FILE, MOUSE_FILE, PluginsSettings,
+    ProfileSettings, RENDER_FOLDER, SETTINGS_FILE, Settings, THEMES_FOLDER,
 };
 use crate::settings_window::{self, SettingsWindow};
 use crate::theme_file::{Choice, UserTheme, show_folder};
@@ -167,6 +168,18 @@ pub struct App {
     title: String,
     /// Agents controlling the app, while the user lets them.
     agents: Agents,
+    /// Running headless, with no window and no user: the settings file's
+    /// own agent settings, which saving keeps, as headless Musicable lets
+    /// agents in whatever they say.
+    headless: Option<AgentSettings>,
+    /// When to close, now that an agent asked Musicable to quit and has
+    /// heard it will.
+    quit_at: Option<Instant>,
+    /// Whether the main window was raised over others, to put it back
+    /// with the next frame.
+    raised: bool,
+    /// How long frames took on the CPU lately.
+    frame_load: FrameLoad,
 }
 
 impl App {
@@ -201,6 +214,53 @@ impl App {
             place.apply(window);
         }
         app
+    }
+
+    /// Opens the project at `path`, or a new project, as [`new`](Self::new)
+    /// does, with no window and no user, for agents: `musicable
+    /// --headless`. It lets agents in whatever the settings say, and plays
+    /// through the audio device they name if `audio`, or through none.
+    /// Fails if it can't let agents in, as when another Musicable listens
+    /// for them with the same settings.
+    pub(crate) fn headless(
+        path: Option<PathBuf>,
+        audio: bool,
+        ctx: &egui::Context,
+    ) -> Result<Self, String> {
+        let mut messages = Vec::new();
+        let config_dir = settings::config_dir();
+        let mut settings = match &config_dir {
+            Some(dir) => Settings::read(&dir.join(SETTINGS_FILE))
+                .map_err(|error| capital(error.to_string().trim_end()))?,
+            None => {
+                return Err(
+                    "The system doesn't say where Musicable's settings go, so agents \
+                            can't reach it: set MUSICABLE_CONFIG_DIR to a folder for them."
+                        .to_owned(),
+                );
+            }
+        };
+        let kept = settings.agents.clone();
+        settings.agents.enabled = true;
+        settings.agents.mouse_and_keys = true;
+        let (output, handle) = match audio {
+            true => Output::open(settings.audio.request(), &mut messages),
+            false => Output::none(),
+        };
+        let mut app = Self::with_output(path, config_dir, settings, output, handle, messages, ctx);
+        app.headless = Some(kept);
+        if let Some(problem) = app.agents.problem() {
+            return Err(problem);
+        }
+        app.scan_plugins(false, ctx);
+        app.start_analysing(ctx);
+        app.start_rendering(ctx);
+        Ok(app)
+    }
+
+    /// Whether it runs headless, with no window and no user.
+    pub(crate) fn is_headless(&self) -> bool {
+        self.headless.is_some()
     }
 
     /// Opens the project at `path`, or a new project, playing through
@@ -318,6 +378,10 @@ impl App {
             closing: false,
             title: String::new(),
             agents: Agents::new(),
+            headless: None,
+            quit_at: None,
+            raised: false,
+            frame_load: FrameLoad::default(),
         };
         app.use_theme(ctx);
         app.shell.set_mouse_map(mouse);
@@ -403,6 +467,10 @@ impl App {
     /// they were last saved. A window being moved about is saved once it
     /// stays put, unless `now`.
     fn save_workspace(&mut self, now: bool) {
+        // Headless, the layout is no screen's.
+        if self.is_headless() {
+            return;
+        }
         let changed = if now {
             self.shell.unsaved_workspace()
         } else {
@@ -1760,7 +1828,13 @@ impl App {
         let Some(path) = self.config_dir.as_ref().map(|dir| dir.join(SETTINGS_FILE)) else {
             return;
         };
-        if let Err(error) = self.settings.write(&path) {
+        // Headless Musicable lets agents in whatever the file says, and
+        // leaves what it says alone.
+        let mut settings = Cow::Borrowed(&self.settings);
+        if let Some(kept) = &self.headless {
+            settings.to_mut().agents = kept.clone();
+        }
+        if let Err(error) = settings.write(&path) {
             self.messages.push(format!(
                 "Couldn't save the settings to {}: {error}",
                 path.display()
@@ -1789,13 +1863,28 @@ impl App {
     /// Asks whether to save the changes, while a request waits for that, and
     /// carries the request out once the user says.
     fn ask_to_save(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        let Some(request) = self.pending.clone() else {
+        // Headless, there's no one to ask: an agent answers.
+        if self.pending.is_none() || self.is_headless() {
             return;
-        };
+        }
         let Some(choice) = musicable_ui::ask_to_save(ctx, &self.name()) else {
             return;
         };
-        self.pending = None;
+        self.answer_question(choice, ctx, frame);
+    }
+
+    /// Answers the question whether to save the changes first as `choice`
+    /// says, and goes ahead with what asked it unless that's Cancel, or
+    /// saving failed. Returns whether it went ahead.
+    fn answer_question(
+        &mut self,
+        choice: SaveChoice,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) -> bool {
+        let Some(request) = self.pending.take() else {
+            return false;
+        };
         let go_ahead = match choice {
             SaveChoice::Save => self.save(false, frame),
             SaveChoice::Discard => true,
@@ -1805,6 +1894,7 @@ impl App {
         if !self.answered_for_agent(request.clone(), go_ahead) && go_ahead {
             self.carry_out(request, ctx, frame);
         }
+        go_ahead
     }
 
     /// Lists the monitors again, now and then, as they come and go.
@@ -1867,6 +1957,17 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.theme_file.poll() {
             self.use_theme(ctx);
+        }
+        // An agent asked Musicable to quit, and has heard it will.
+        if let Some(at) = self.quit_at {
+            let now = Instant::now();
+            if now >= at {
+                self.quit_at = None;
+                self.closing = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                ctx.request_repaint_after(at - now);
+            }
         }
         // Here, rather than in `ui`, as it runs while the window is
         // minimized too.
@@ -2126,6 +2227,14 @@ impl eframe::App for App {
         }
         self.ask_to_save(&ctx, frame);
         self.update_title(&ctx);
+        self.frame_load
+            .frame(Instant::now(), frame.info().cpu_usage);
+        // Raised over other apps' windows for a frame, to come to the
+        // front.
+        if std::mem::take(&mut self.raised) {
+            let normal = egui::WindowLevel::Normal;
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(normal));
+        }
         if let Some(times) = &mut self.frame_times {
             times.frame(frame.info().cpu_usage, self.shell.windows() + 1);
             ctx.request_repaint();
@@ -2385,6 +2494,7 @@ mod controlled_by_agents;
 mod exporting;
 #[cfg(test)]
 mod focusing;
+pub mod headless;
 #[cfg(test)]
 mod laying_out;
 #[cfg(test)]

@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use musicable_commands::{Args, CommandId, json};
+use musicable_commands::{Args, CommandId, Linked, json};
 use serde_json::{Value as Json, json};
 
 use crate::log_file;
@@ -28,6 +28,9 @@ const KEPT: usize = 10_000;
 pub(crate) enum Ran<'a> {
     One(&'a CommandId, &'a Args),
     Batch(&'a str, &'a [(CommandId, Args)]),
+    /// An agent's batch, with its arguments as the agent gave them,
+    /// references to earlier commands' results and all.
+    Linked(&'a str, &'a [Linked]),
 }
 
 /// This session's commands, as they ran.
@@ -99,6 +102,18 @@ impl CommandLog {
                     .map(
                         |(id, args)| json!({ "id": id.as_str(), "args": json::args_to_json(args) }),
                     )
+                    .collect();
+            }
+            Ran::Linked(name, commands) => {
+                entry["batch"] = name.into();
+                entry["commands"] = (commands.iter())
+                    .map(|linked| {
+                        let mut command = json!({ "id": linked.id.as_str(), "args": linked.args });
+                        if let Some(named) = &linked.named {
+                            command["as"] = named.as_str().into();
+                        }
+                        command
+                    })
                     .collect();
             }
         }

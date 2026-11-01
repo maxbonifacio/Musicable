@@ -255,6 +255,20 @@ impl Setup {
         self.registry.run_batch(name, commands, &mut ctx)
     }
 
+    pub fn run_linked(
+        &mut self,
+        name: &str,
+        commands: &[crate::Linked],
+    ) -> Result<Vec<Value>, BatchError> {
+        let mut ctx = Context {
+            document: &mut self.document,
+            transport: &mut self.transport,
+            requests: &mut self.requests,
+            library: &mut self.library,
+        };
+        self.registry.run_linked(name, commands, &mut ctx)
+    }
+
     /// Whether `id` applies without arguments.
     pub fn applies(&self, id: &CommandId) -> bool {
         self.registry.applies(id, &self.document)

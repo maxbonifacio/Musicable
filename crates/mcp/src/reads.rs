@@ -1037,6 +1037,16 @@ pub(crate) fn performance(window: &impl Window) -> Json {
         "render_ahead": ahead,
         "total": share(performance.total),
         "rows": rows,
+        "frames": performance.frames.map(|frames| json!({
+            "count": frames.count,
+            "seconds": tenth(frames.seconds),
+            "average_ms": tenth(frames.average_ms),
+            "longest_ms": tenth(frames.longest_ms),
+        })),
+        "memory": performance.memory.map(|memory| json!({
+            "resident_mb": (memory.resident_mb * 10.0).round() / 10.0,
+            "private_mb": memory.private_mb.map(|mb| (mb * 10.0).round() / 10.0),
+        })),
     })
 }
 
@@ -1089,6 +1099,8 @@ pub(crate) fn status(window: &impl Window) -> Json {
             "finding_presets": status.finding_presets,
         },
         "revision": status.revision,
+        "headless": status.headless,
+        "process": std::process::id(),
     })
 }
 

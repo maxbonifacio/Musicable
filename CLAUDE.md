@@ -73,3 +73,17 @@ one in 20.
 The manual's [Audio commands](manual/src/reference/audio-commands.md) page
 has every option and field, with examples, and
 [docs/agents.md](docs/agents.md#the-audio-tools) says how they're built.
+
+## Checking Musicable without a window
+
+To check what Musicable does, run it headless and drive it through the
+same tools: `musicable --headless --no-audio [PROJECT]`, with a config
+folder of its own (`MUSICABLE_CONFIG_DIR`) so it doesn't meet the user's,
+until `quit_app` with `unsaved` quits it. Or write the check as a scenario
+in `acceptance/scenarios` and run it with `musicable check FILE`, which
+starts and quits a headless Musicable for each. `musicable soak` watches a
+long run of the Musicable that's open. In `musicable mcp`, `launch_app`,
+`restart_app` and `quit_app` start and stop the app, a new build of it
+too, and `run_commands` can pass one command's result to the next as
+`$name`. [docs/agents.md](docs/agents.md#without-you) has the scenario
+format and the rest.

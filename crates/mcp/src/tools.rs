@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use musicable_commands::{Args, Command, CommandError, CommandId, Registry, json};
+use musicable_commands::{Args, Command, CommandError, CommandId, Linked, Registry, json};
 use musicable_model::DeviceId;
 use musicable_model::clip::ClipId;
 use musicable_model::modulation::ModulatorId;
@@ -27,7 +27,7 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::hands::{Hands, Watch};
 use crate::waiting::{self, Until};
-use crate::{Asked, Call, Reply, Run, Shot, Tree, reads};
+use crate::{Asked, Call, Choice, Reply, Run, Shot, Tree, Unsaved, reads};
 
 pub const LIST_COMMANDS: &str = "list_commands";
 pub const DESCRIBE_COMMAND: &str = "describe_command";
@@ -55,6 +55,9 @@ pub const GET_SCREENSHOT: &str = "get_screenshot";
 pub const GET_UI_TREE: &str = "get_ui_tree";
 pub const USE_MOUSE_AND_KEYS: &str = "use_mouse_and_keys";
 pub const PLAY_MIDI: &str = "play_midi";
+pub const QUIT_APP: &str = "quit_app";
+pub const FOCUS_APP: &str = "focus_app";
+pub const ANSWER_QUESTION: &str = "answer_question";
 
 /// What the server tells agents as they connect: what Musicable is, and how
 /// its tools go together.
@@ -155,8 +158,11 @@ pub fn list() -> Vec<Tool> {
             "Run Commands",
             "Runs several commands in order, as one step in the undo history under a name, \
              such as \"Humanize\", and gives back each one's result. Each acts on what those \
-             before it left. If one fails, none of them changes anything, and the error says \
-             which one failed and why.",
+             before it left. A command named with \"as\", such as \"bass\", lends its result \
+             to those after it: an argument that is \"$bass\" is that result, such as the new \
+             track's id, and \"$made.0\" or \"$made.device\" a part of it. Write \"$$\" for a \
+             text that starts with \"$\". If one fails, none of them changes anything, and the \
+             error says which one failed and why.",
             object(
                 json!({
                     "name": {
@@ -166,7 +172,19 @@ pub fn list() -> Vec<Tool> {
                     "commands": {
                         "type": "array",
                         "minItems": 1,
-                        "items": object(json!({ "id": id_schema(), "args": args }), &["id"]),
+                        "items": object(
+                            json!({
+                                "id": id_schema(),
+                                "args": args,
+                                "as": {
+                                    "type": "string",
+                                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                                    "description": "A name for the command's result, which the \
+                                                    commands after it use as \"$name\".",
+                                },
+                            }),
+                            &["id"],
+                        ),
                     },
                 }),
                 &["name", "commands"],
@@ -286,7 +304,9 @@ pub fn list() -> Vec<Tool> {
              keep up, and the dropouts, and while Render Ahead is on, how far ahead of the \
              device the engine rendered lately and aimed to, the share of a core of what \
              rendered ahead, and the blocks the audio thread had to render itself as the lead \
-             ran out, which come before dropouts.",
+             ran out, which come before dropouts. frames says how long the window's frames \
+             took on the CPU over the last few seconds, and memory how much memory Musicable \
+             uses, in megabytes: resident in RAM, and private, which a leak grows.",
             object(json!({}), &[]),
         ),
         read(
@@ -299,7 +319,8 @@ pub fn list() -> Vec<Tool> {
              still to render, a graph compiling, an export, with how much of it is done, and \
              the plugins' and the library's scans. idle is true once none of that work is \
              under way, and wait_for waits until then. revision goes up with every change to \
-             the project.",
+             the project. headless is true in Musicable started with --headless, which has no \
+             window and no user, and process is its process id.",
             object(json!({}), &[]),
         ),
         read(
@@ -597,6 +618,50 @@ pub fn list() -> Vec<Tool> {
              and the MIDI inputs, with their ids, for mixer.set_input.",
             object(json!({}), &[]),
         ),
+        run(
+            QUIT_APP,
+            "Quit Musicable",
+            "Quits Musicable, as File > Quit does, so a new build can replace it, and answers \
+             before it closes. unsaved says what to do with unsaved changes: save them, to the \
+             project's file, or discard them. Without it, the window asks the user, and this \
+             answers once they have, or fails in headless Musicable, which has no one to ask. \
+             launch_app starts it again.",
+            object(
+                json!({
+                    "unsaved": {
+                        "type": "string",
+                        "enum": ["save", "discard"],
+                        "description": "What to do with unsaved changes, if there are any.",
+                    }
+                }),
+                &[],
+            ),
+        ),
+        run(
+            FOCUS_APP,
+            "Bring Musicable to the Front",
+            "Brings Musicable's main window to the front, over other apps' windows, and \
+             restores it if it's minimized, so pictures and the mouse and keys see it.",
+            object(json!({}), &[]),
+        ),
+        run(
+            ANSWER_QUESTION,
+            "Answer the Window's Question",
+            "Answers the question the window asks, such as whether to save the changes before \
+             a new project opens, as get_status's question says: save, discard or cancel, \
+             which keeps the project open and doesn't go ahead. Only in headless Musicable, \
+             where there's no user to ask: elsewhere, only the user answers.",
+            object(
+                json!({
+                    "answer": {
+                        "type": "string",
+                        "enum": ["save", "discard", "cancel"],
+                        "description": "The answer.",
+                    }
+                }),
+                &["answer"],
+            ),
+        ),
     ]
 }
 
@@ -672,6 +737,9 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         GET_UI_TREE => &["window", "panel", "filter", "limit"],
         USE_MOUSE_AND_KEYS => &["window", "steps", "watch"],
         PLAY_MIDI => &["events"],
+        QUIT_APP => &["unsaved"],
+        ANSWER_QUESTION => &["answer"],
+        FOCUS_APP => &[],
         GET_PROJECT | GET_EDITOR | GET_HISTORY | GET_PERFORMANCE | GET_STATUS | GET_SETTINGS
         | LIST_AUDIO_DEVICES | GET_LAYOUT | GET_LEVELS => &[],
         _ => return Err(Refused::NoTool(name.to_owned())),
@@ -702,18 +770,22 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
             if list.is_empty() {
                 return Err(Refused::Arguments("There are no commands to run.".into()));
             }
-            let mut batch = Vec::with_capacity(list.len());
+            let mut batch: Vec<Linked> = Vec::with_capacity(list.len());
             for (index, entry) in list.iter().enumerate() {
                 let Json::Object(entry) = entry else {
                     let problem = format!("Command {} must be an object.", index + 1);
                     return Err(Refused::Arguments(problem));
                 };
-                let call = command(entry, commands).map_err(|refused| match refused {
-                    Refused::Arguments(why) => {
-                        Refused::Arguments(format!("Command {}: {why}", index + 1))
-                    }
-                    other => other,
-                })?;
+                let earlier = batch.iter().filter_map(|linked| linked.named.as_deref());
+                let call =
+                    linked(entry, earlier.collect(), commands).map_err(
+                        |refused| match refused {
+                            Refused::Arguments(why) => {
+                                Refused::Arguments(format!("Command {}: {why}", index + 1))
+                            }
+                            other => other,
+                        },
+                    )?;
                 batch.push(call);
             }
             Asked::Run(Run::Batch(name.to_owned(), batch))
@@ -745,6 +817,25 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
             })
         }
         PLAY_MIDI => Asked::Midi(crate::midi::messages(arguments)?),
+        QUIT_APP => Asked::Quit(match optional_text(arguments, "unsaved")?.as_deref() {
+            None => None,
+            Some("save") => Some(Unsaved::Save),
+            Some("discard") => Some(Unsaved::Discard),
+            Some(_) => {
+                let problem = "unsaved is save or discard.";
+                return Err(Refused::Arguments(problem.into()));
+            }
+        }),
+        FOCUS_APP => Asked::Focus,
+        ANSWER_QUESTION => Asked::AnswerQuestion(match text(arguments, "answer")? {
+            "save" => Choice::Save,
+            "discard" => Choice::Discard,
+            "cancel" => Choice::Cancel,
+            _ => {
+                let problem = "answer is save, discard or cancel.";
+                return Err(Refused::Arguments(problem.into()));
+            }
+        }),
         USE_MOUSE_AND_KEYS => Asked::Hands(Hands {
             window: window(arguments)?,
             steps: crate::hands::steps(arguments)?,
@@ -799,6 +890,75 @@ fn asked(name: &str, arguments: &JsonObject, commands: &Commands) -> Result<Aske
         _ => unreachable!("every tool is matched above"),
     };
     Ok(asked)
+}
+
+/// The command `entry` names among others in `run_commands`, with its
+/// arguments, which can use the results of those before it, named
+/// `earlier`, and the name it gives its own. Arguments that use none are
+/// checked now, and the others once the commands before them have run.
+fn linked(entry: &JsonObject, earlier: Vec<&str>, commands: &Commands) -> Result<Linked, Refused> {
+    if let Some(unknown) = entry
+        .keys()
+        .find(|key| !["id", "args", "as"].contains(&key.as_str()))
+    {
+        let problem = format!("A command has its id, args and as, not {unknown}.");
+        return Err(Refused::Arguments(problem));
+    }
+    let named = optional_text(entry, "as")?;
+    if let Some(named) = &named {
+        let word = named.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && named.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !word {
+            let problem = format!(
+                "as must be a name of letters, digits and _, starting with a letter, not \"{named}\"."
+            );
+            return Err(Refused::Arguments(problem));
+        }
+        if earlier.contains(&named.as_str()) {
+            let problem = format!("Another command before it is named {named} already.");
+            return Err(Refused::Arguments(problem));
+        }
+    }
+    let args = match entry.get("args") {
+        None | Some(Json::Null) => Map::new(),
+        Some(Json::Object(args)) => args.clone(),
+        Some(_) => {
+            let problem = "args must be an object, of the command's arguments by name.";
+            return Err(Refused::Arguments(problem.into()));
+        }
+    };
+    let references = json::references(&args);
+    let id = if !references.is_empty() {
+        // What they stand for is known only as the commands run, but not
+        // the names of the results they can use.
+        if let Some(name) = references.iter().find(|name| !earlier.contains(name)) {
+            let problem = match earlier.is_empty() {
+                true => format!("${name} names no earlier command's result."),
+                false => format!(
+                    "${name} names no earlier command's result: those named are {}.",
+                    (earlier.iter().map(|name| format!("${name}")))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            return Err(Refused::Arguments(problem));
+        }
+        let id = CommandId::from(text(entry, "id")?);
+        let Some(command) = commands.get(&id) else {
+            let problem = format!("There's no command called {id}: list_commands lists them.");
+            return Err(Refused::Arguments(problem));
+        };
+        if !command.agents {
+            let why = format!("{}.", CommandError::NotForAgents(id));
+            return Err(Refused::Arguments(crate::sentence(&why)));
+        }
+        id
+    } else {
+        let mut plain = entry.clone();
+        plain.remove("as");
+        command(&plain, commands)?.0
+    };
+    Ok(Linked { id, args, named })
 }
 
 /// The command `entry` names with its id, and its arguments from its args.
@@ -1163,7 +1323,15 @@ mod tests {
                  transport.set_tempo gives its arguments."
             )
         );
-        let tempo = |bpm: i64| ("transport.set_tempo".into(), Args::new().with("bpm", bpm));
+        let linked = |id: &str, args: Json, named: Option<&str>| Linked {
+            id: id.into(),
+            args: match args {
+                Json::Object(args) => args,
+                _ => panic!("arguments are an object"),
+            },
+            named: named.map(str::to_owned),
+        };
+        let tempo = |bpm: i64| linked("transport.set_tempo", json!({"bpm": bpm}), None);
         assert_eq!(
             call(
                 RUN_COMMANDS,
@@ -1176,6 +1344,55 @@ mod tests {
                 "Two".into(),
                 vec![tempo(92), tempo(93)]
             )))
+        );
+        // A command can use what one before it gave back, by its name.
+        let bass = json!({"name": "Bass", "commands": [
+            {"id": "track.new_midi_track", "as": "bass"},
+            {"id": "mixer.set_mute", "args": {"track": "$bass", "muted": true}},
+        ]});
+        assert_eq!(
+            call(RUN_COMMANDS, bass),
+            Ok(Asked::Run(Run::Batch(
+                "Bass".into(),
+                vec![
+                    linked("track.new_midi_track", json!({}), Some("bass")),
+                    linked(
+                        "mixer.set_mute",
+                        json!({"track": "$bass", "muted": true}),
+                        None
+                    ),
+                ]
+            )))
+        );
+        assert_eq!(
+            call(
+                RUN_COMMANDS,
+                json!({"name": "Bass", "commands": [
+                    {"id": "track.new_midi_track", "as": "bass"},
+                    {"id": "mixer.set_mute", "args": {"track": "$drums", "muted": true}},
+                ]})
+            ),
+            refused("Command 2: $drums names no earlier command's result: those named are $bass.")
+        );
+        assert_eq!(
+            call(
+                RUN_COMMANDS,
+                json!({"name": "Bass", "commands": [
+                    {"id": "track.new_midi_track", "as": "bass"},
+                    {"id": "track.new_midi_track", "as": "bass"},
+                ]})
+            ),
+            refused("Command 2: Another command before it is named bass already.")
+        );
+        assert_eq!(
+            call(
+                RUN_COMMANDS,
+                json!({"name": "Bass", "commands": [{"id": "track.new_midi_track", "as": "2b"}]})
+            ),
+            refused(
+                "Command 1: as must be a name of letters, digits and _, starting with a letter, \
+                 not \"2b\"."
+            )
         );
         assert_eq!(
             call(RUN_COMMANDS, json!({"name": " ", "commands": []})),
@@ -1439,7 +1656,7 @@ mod tests {
     #[test]
     fn every_tool_has_a_schema_of_its_arguments() {
         let tools = list();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 29);
         for tool in &tools {
             assert_eq!(tool.input_schema["type"], "object", "{}", tool.name);
             assert!(tool.description.is_some() && tool.title.is_some());

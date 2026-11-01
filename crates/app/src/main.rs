@@ -27,6 +27,8 @@ static ALLOC: musicable_engine::rt::CheckedAlloc = musicable_engine::rt::Checked
 
 const USAGE: &str = "\
 usage: musicable [PROJECT]                open the app, with PROJECT if given
+       musicable --headless [PROJECT]     run the app with no window, for agents, until one
+                                          quits it: see docs/agents.md
        musicable keymap [FILE]            print the keys, with the changes in the keymap FILE
        musicable null-test [PROJECT]      check that the parallel scheduler plays PROJECT, or
                                           the demo, exactly as the reference renderer does
@@ -37,6 +39,11 @@ usage: musicable [PROJECT]                open the app, with PROJECT if given
        musicable mcp                      let the agent whose client starts it control the
                                           Musicable that's running, over MCP on the standard
                                           input and output: see docs/agents.md
+       musicable check FILE...            run the scenarios FILE..., each in a headless
+                                          Musicable of its own: see check --help
+       musicable soak [OPTION]...         watch a long run of the Musicable that's open:
+                                          CPU, frame times, memory, the log and crashes:
+                                          see soak --help
        musicable api                      print the commands agents can run, with their
                                           arguments' JSON Schema, as JSON
        musicable audio <command> FILE...  cut, convert or measure audio files, as agents'
@@ -70,6 +77,14 @@ fn main() -> ExitCode {
             attach_console();
             print_api()
         }
+        Some("check") => {
+            attach_console();
+            musicable_app::check::command_line(args)
+        }
+        Some("soak") => {
+            attach_console();
+            musicable_app::soak::command_line(args)
+        }
         Some("analyse") => {
             attach_console();
             analyse(args)
@@ -77,6 +92,10 @@ fn main() -> ExitCode {
         Some("audio") => {
             attach_console();
             musicable_app::toolkit::command_line(args)
+        }
+        Some("--headless") => {
+            attach_console();
+            headless(args)
         }
         Some("-h" | "--help") => {
             attach_console();
@@ -137,6 +156,43 @@ fn run(path: Option<PathBuf>) -> ExitCode {
         }
     }
 }
+
+/// `musicable --headless [--no-audio] [PROJECT]`: runs the app with no
+/// window, with PROJECT open if given, letting agents in, until one quits
+/// it. With `--no-audio`, it plays through no audio device.
+fn headless(args: impl Iterator<Item = OsString>) -> ExitCode {
+    let mut audio = true;
+    let mut project = None;
+    for arg in args {
+        match arg.to_str() {
+            Some("--no-audio") => audio = false,
+            Some("-h" | "--help") => {
+                println!("{HEADLESS_USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            Some(option) if option.starts_with('-') => {
+                eprintln!("unknown option \"{option}\"\n{HEADLESS_USAGE}");
+                return ExitCode::FAILURE;
+            }
+            _ if project.is_some() => {
+                eprintln!("headless opens one project\n{HEADLESS_USAGE}");
+                return ExitCode::FAILURE;
+            }
+            _ => project = Some(PathBuf::from(arg)),
+        }
+    }
+    musicable_app::headless::run(project, audio)
+}
+
+const HEADLESS_USAGE: &str = "\
+usage: musicable --headless [--no-audio] [PROJECT]
+
+Runs Musicable with no window, with PROJECT open if given, for agents. It lets
+them in whatever the settings say, and runs until one quits it with quit_app.
+Its settings are the app's, unless MUSICABLE_CONFIG_DIR names another folder,
+which it needs while the app lets agents in.
+
+  --no-audio   plays through no audio device; exports still render";
 
 /// How eframe draws with wgpu: as it would, but with Direct3D 12 on Windows,
 /// unless the `WGPU_BACKEND` environment variable picks another backend,

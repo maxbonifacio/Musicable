@@ -1,0 +1,40 @@
+# A compressor added to the bass, by the id it comes back with, and the
+# bass muted: the project says both, and the kick plays on.
+about = "Steps use what earlier ones gave back, and get_project reads the result."
+project = "kick-and-bass"
+
+[[run]]
+command = "device.add"
+args = { kind = "compressor", track = 1 }
+as = "comp"
+
+[[run]]
+command = "device.set_bypass"
+args = { devices = ["$comp"], bypassed = true }
+
+[[run]]
+command = "mixer.set_mute"
+args = { track = 1, muted = true }
+
+[[run]]
+command = "device.add"
+args = { kind = "theremin", track = 1 }
+fails = "theremin"
+
+[[expect]]
+at = "tracks.1.muted"
+equals = true
+
+[[expect]]
+at = "tracks.0.muted"
+equals = false
+
+[[expect]]
+tool = "get_device"
+args = { device = "$comp" }
+at = "bypassed"
+equals = true
+
+[[expect]]
+at = "tracks.1.devices.1.id"
+equals = "$comp"
