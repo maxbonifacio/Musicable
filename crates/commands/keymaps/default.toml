@@ -13,6 +13,7 @@ version = 1
 "transport.play_stop" = ["Space"]
 "transport.play" = ["Shift+Space"]
 "transport.go_to_start" = ["Home"]
+"transport.go_to_end" = ["End"]
 "transport.toggle_loop" = ["Ctrl+L"]
 "transport.toggle_metronome" = ["O"]
 "transport.record" = ["F9"]
@@ -44,12 +45,20 @@ version = 1
 # grid.
 "edit.quantize" = ["Ctrl+U"]
 
-# Live's keys for the arrangement's zoom, the grid and Follow, for showing
-# take lanes, for showing the mixer and the devices (Live's Detail View)
+# Live's keys for the arrangement's zoom, its way back (X), fitting the song
+# across (W) and the tracks down (H), the tracks' heights, the grid and
+# Follow, for showing take lanes, for showing the mixer and the devices (Live's Detail View)
 # under the arrangement, and for showing the browser and searching in it.
 "view.zoom_in" = ["Equals", "NumpadAdd"]
 "view.zoom_out" = ["Minus", "NumpadSubtract"]
 "view.zoom_to_selection" = ["Z"]
+"view.zoom_back" = ["X"]
+"view.zoom_forward" = ["Shift+X"]
+"view.fit_song_width" = ["W"]
+"view.fit_track_heights" = ["H"]
+"view.toggle_overview" = ["Ctrl+Alt+O"]
+"view.tracks_taller" = ["Alt+Equals"]
+"view.tracks_shorter" = ["Alt+Minus"]
 "view.narrow_grid" = ["Ctrl+1"]
 "view.widen_grid" = ["Ctrl+2"]
 "view.triplet_grid" = ["Ctrl+3"]

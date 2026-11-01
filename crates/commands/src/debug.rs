@@ -27,12 +27,14 @@ pub const OPEN_BLIND_TEST: CommandId = CommandId::new("debug.open_blind_test");
 /// Registers the debug commands.
 pub fn register(registry: &mut Registry) {
     registry.add(
-        Command::new(RECORD_OUTPUT, "Record Output").with_params(&[Param::required(
-            "file",
-            Type::Text,
-            "The WAV file to record to, a full path. The timeline goes beside it, with \
-             .timeline.json in place of .wav.",
-        )]),
+        Command::new(RECORD_OUTPUT, "Record Output")
+            .with_params(&[Param::required(
+                "file",
+                Type::Text,
+                "The WAV file to record to, a full path. The timeline goes beside it, with \
+                 .timeline.json in place of .wav.",
+            )])
+            .alone(),
         |ctx, args| {
             let file = PathBuf::from(args.get::<String>("file")?);
             if !(file.extension()).is_some_and(|extension| extension.eq_ignore_ascii_case("wav")) {
@@ -45,28 +47,34 @@ pub fn register(registry: &mut Registry) {
             Ok(Value::None)
         },
     );
-    registry.register(STOP_RECORDING_OUTPUT, "Stop Recording Output", |ctx| {
-        ctx.requests.push(Request::StopRecordingOutput);
-    });
     registry.add(
-        Command::new(MEASURE_RESPONSE, "Measure Device Response").with_params(&[
-            Param::required(
-                "device",
-                Type::Device,
-                "The device: one that takes audio, not an instrument or a MIDI effect.",
-            ),
-            Param::optional(
-                "level_dbfs",
-                Type::Number,
-                "The noise's RMS level, in dBFS, from -60 to -6. Without it, -18.",
-            ),
-            Param::optional(
-                "at",
-                Type::List(&Type::Number),
-                "Frequencies, in hertz, to give the gain and phase at, as well as the third \
+        Command::new(STOP_RECORDING_OUTPUT, "Stop Recording Output").alone(),
+        |ctx, _| {
+            ctx.requests.push(Request::StopRecordingOutput);
+            Ok(Value::None)
+        },
+    );
+    registry.add(
+        Command::new(MEASURE_RESPONSE, "Measure Device Response")
+            .alone()
+            .with_params(&[
+                Param::required(
+                    "device",
+                    Type::Device,
+                    "The device: one that takes audio, not an instrument or a MIDI effect.",
+                ),
+                Param::optional(
+                    "level_dbfs",
+                    Type::Number,
+                    "The noise's RMS level, in dBFS, from -60 to -6. Without it, -18.",
+                ),
+                Param::optional(
+                    "at",
+                    Type::List(&Type::Number),
+                    "Frequencies, in hertz, to give the gain and phase at, as well as the third \
                  octaves.",
-            ),
-        ]),
+                ),
+            ]),
         |ctx, args| {
             let device: DeviceId = args.get("device")?;
             if ctx.document.project().find_device(device).is_none() {
@@ -89,48 +97,50 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
-        Command::new(MAKE_BLIND_TEST, "Make Blind Test").with_params(&[
-            Param::required(
-                "folder",
-                Type::Text,
-                "A new or empty folder for the round, a full path.",
-            ),
-            Param::required(
-                "first",
-                Type::List(&Type::Text),
-                "Files, full paths: each is paired with the file at the same place in second.",
-            ),
-            Param::required(
-                "second",
-                Type::List(&Type::Text),
-                "Their partners, as many, full paths.",
-            ),
-            Param::optional(
-                "first_name",
-                Type::Text,
-                "What the first files are, such as Live, for the results. Without it, first.",
-            ),
-            Param::optional(
-                "second_name",
-                Type::Text,
-                "What the second files are, such as Musicable. Without it, second.",
-            ),
-            Param::optional(
-                "name",
-                Type::Text,
-                "The round's name, which the window shows.",
-            ),
-            Param::optional(
-                "abx",
-                Type::Bool,
-                "Whether each trial has an X, a copy of A or of B, to name. Without it, true.",
-            ),
-            Param::optional(
-                "seed",
-                Type::Int,
-                "The seed the order and sides are shuffled with. Without it, the time.",
-            ),
-        ]),
+        Command::new(MAKE_BLIND_TEST, "Make Blind Test")
+            .alone()
+            .with_params(&[
+                Param::required(
+                    "folder",
+                    Type::Text,
+                    "A new or empty folder for the round, a full path.",
+                ),
+                Param::required(
+                    "first",
+                    Type::List(&Type::Text),
+                    "Files, full paths: each is paired with the file at the same place in second.",
+                ),
+                Param::required(
+                    "second",
+                    Type::List(&Type::Text),
+                    "Their partners, as many, full paths.",
+                ),
+                Param::optional(
+                    "first_name",
+                    Type::Text,
+                    "What the first files are, such as Live, for the results. Without it, first.",
+                ),
+                Param::optional(
+                    "second_name",
+                    Type::Text,
+                    "What the second files are, such as Musicable. Without it, second.",
+                ),
+                Param::optional(
+                    "name",
+                    Type::Text,
+                    "The round's name, which the window shows.",
+                ),
+                Param::optional(
+                    "abx",
+                    Type::Bool,
+                    "Whether each trial has an X, a copy of A or of B, to name. Without it, true.",
+                ),
+                Param::optional(
+                    "seed",
+                    Type::Int,
+                    "The seed the order and sides are shuffled with. Without it, the time.",
+                ),
+            ]),
         |ctx, args| {
             let paths = |name: &str| -> Result<Vec<PathBuf>, CommandError> {
                 let list: Vec<String> = args.get(name)?;
@@ -153,11 +163,13 @@ pub fn register(registry: &mut Registry) {
         },
     );
     registry.add(
-        Command::new(OPEN_BLIND_TEST, "Open Blind Test...").with_params(&[Param::asked(
-            "folder",
-            Type::Text,
-            "The round's folder, a full path: the app asks which without it.",
-        )]),
+        Command::new(OPEN_BLIND_TEST, "Open Blind Test...")
+            .alone()
+            .with_params(&[Param::asked(
+                "folder",
+                Type::Text,
+                "The round's folder, a full path: the app asks which without it.",
+            )]),
         |ctx, args| {
             let folder = args.opt::<String>("folder")?.map(PathBuf::from);
             ctx.requests.push(Request::OpenBlindTest(folder));

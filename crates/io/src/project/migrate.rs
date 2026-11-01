@@ -43,6 +43,7 @@ const STEPS: [Step; VERSION as usize - 1] = [
     note_wires,
     note_outputs,
     always_live,
+    view,
     note_timings,
 ];
 
@@ -479,6 +480,12 @@ fn note_outputs(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     no_note_output(master, "master.devices")
 }
 
+/// Version 27 added the arrangement's view the project was saved with.
+/// Version 26 files have none, so they open as a new project does.
+fn view(file: &mut Map<String, Value>) -> Result<(), Invalid> {
+    add(file, "", "view", Value::Null)
+}
+
 /// Version 26 added Always Live, which has a track render live while the
 /// rest of the project renders ahead. Version 25 tracks render live only
 /// as they monitor their inputs, so none is Always Live.
@@ -492,8 +499,8 @@ fn always_live(file: &mut Map<String, Value>) -> Result<(), Invalid> {
     Ok(())
 }
 
-/// Version 27 added when the notes a plugin plays come, against its
-/// latency, and whether someone chose it. Version 26 plugins take what's
+/// Version 28 added when the notes a plugin plays come, against its
+/// latency, and whether someone chose it. Version 27 plugins take what's
 /// assumed for their kind, as the app has it until it knows better: an
 /// instrument's as it plays them, and an effect's with its sound.
 fn note_timings(file: &mut Map<String, Value>) -> Result<(), Invalid> {
@@ -1218,16 +1225,29 @@ mod tests {
     }
 
     #[test]
-    fn version_26_plugins_take_the_note_timing_assumed_for_their_kind() {
+    fn version_26_files_have_no_view() {
+        let mut file = json!({"version": 26, "tracks": []});
+        run(&STEPS[..26], &mut file, 26).unwrap();
+        assert_eq!(file, json!({"version": 27, "tracks": [], "view": null}));
+        let mut file = json!({"version": 26, "view": null});
+        assert_eq!(
+            run(&STEPS[..26], &mut file, 26).unwrap_err().path,
+            "view",
+            "a view in a version 26 file"
+        );
+    }
+
+    #[test]
+    fn version_27_plugins_take_the_note_timing_assumed_for_their_kind() {
         let synth = json!({"kind": {"plugin": {"kind": "instrument"}}});
         let arp = json!({"kind": {"plugin": {"kind": "midi_effect"}}});
         let native = json!({"kind": {"native": {"kind": "eq"}}});
         let mut file = json!({
-            "version": 26,
+            "version": 27,
             "tracks": [{"devices": [arp, synth, native.clone()]}],
             "master": {"devices": [{"kind": {"plugin": {"kind": "audio_effect"}}}]},
         });
-        run(&STEPS[..26], &mut file, 26).unwrap();
+        run(&STEPS[..27], &mut file, 27).unwrap();
         let timing = |device: &Value| {
             let plugin = &device["kind"]["plugin"];
             (
@@ -1241,15 +1261,15 @@ mod tests {
         assert_eq!(devices[2], native);
         let master = &file["master"]["devices"][0];
         assert_eq!(timing(master), (json!("with_sound"), json!(false)));
-        assert_eq!(file["version"], json!(27));
+        assert_eq!(file["version"], json!(28));
         let mut file = json!({
-            "version": 26,
+            "version": 27,
             "master": {"devices": [{"kind": {"plugin": {"note_timing": "as_played"}}}]},
         });
         assert_eq!(
-            run(&STEPS[..26], &mut file, 26).unwrap_err().path,
+            run(&STEPS[..27], &mut file, 27).unwrap_err().path,
             "master.devices[0].kind.plugin.note_timing",
-            "a plugin's note timing in a version 26 file"
+            "a plugin's note timing in a version 27 file"
         );
     }
 

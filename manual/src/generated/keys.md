@@ -6,7 +6,10 @@
 |---|---|
 | A | Automation: Show/Hide Automation |
 | B | Notes: Draw Mode |
+| H | View: Fit Track Heights |
 | O | Transport: Toggle Metronome |
+| W | View: Fit Song Width |
+| X | View: Zoom Back |
 | Z | View: Zoom to Selection |
 | F9 | Transport: Record |
 | F12 | View: Switch Devices and Clip Editor |
@@ -14,10 +17,12 @@
 | Backspace | Edit: Delete |
 | Delete | Edit: Delete |
 | Home | Transport: Go to Start |
+| End | Transport: Go to End |
 | Minus | View: Zoom Out |
 | Equals | View: Zoom In |
 | NumpadAdd | View: Zoom In |
 | NumpadSubtract | View: Zoom Out |
+| Shift+X | View: Zoom Forward |
 | Shift+Space | Transport: Play |
 | Alt+1 | Workspace: Switch to Workspace 1 |
 | Alt+2 | Workspace: Switch to Workspace 2 |
@@ -28,6 +33,8 @@
 | Alt+7 | Workspace: Switch to Workspace 7 |
 | Alt+8 | Workspace: Switch to Workspace 8 |
 | Alt+9 | Workspace: Switch to Workspace 9 |
+| Alt+Minus | View: Make Tracks Shorter |
+| Alt+Equals | View: Make Tracks Taller |
 | Ctrl+A | Edit: Select All |
 | Ctrl+C | Edit: Copy |
 | Ctrl+D | Edit: Duplicate |
@@ -69,6 +76,7 @@
 | Ctrl+Alt+I | View: Routing |
 | Ctrl+Alt+L | View: Devices |
 | Ctrl+Alt+M | View: Mixer |
+| Ctrl+Alt+O | View: Overview |
 | Ctrl+Alt+T | Track: New Return Track |
 | Ctrl+Alt+U | View: Show/Hide Take Lanes |
 | Ctrl+Alt+3 | View: Clip Editor |

@@ -43,6 +43,7 @@ use crate::log_file;
 use crate::mouse_file::UserMouse;
 use crate::mouse_page::Asked as MouseAsked;
 use crate::performance::{Figures, LiveMarks};
+use crate::playhead::Playhead;
 use crate::plugin_scan::{PLUGINS_FILE, PluginScan};
 use crate::plugin_timing::{PluginTimings, TIMINGS_FILE};
 use crate::plugin_windows::PluginWindows;
@@ -122,11 +123,16 @@ pub struct App {
     messages: Vec<String>,
     /// The mixer's meters, as last read.
     levels: Levels,
+    /// Where the playhead is drawn between the engine's reports of it.
+    playhead: Playhead,
     /// The CPU figures, as last worked out.
     performance: Figures,
     /// The tracks that render live while the rest of the project renders
     /// ahead, for their headers' Live marks.
     live: LiveMarks,
+    /// Whether a modulator moved in the readings taken for an agent, for
+    /// the frame's own to count.
+    modulated: bool,
     /// Where the settings, the user's keymap, mouse map, themes, workspaces
     /// and profiles live.
     config_dir: Option<PathBuf>,
@@ -366,8 +372,10 @@ impl App {
             folder,
             messages,
             levels: Levels::default(),
+            playhead: Playhead::default(),
             performance: Figures::default(),
             live: LiveMarks::default(),
+            modulated: false,
             config_dir,
             settings,
             profiles,
@@ -949,6 +957,11 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Request::CommandPalette => self.shell.open_palette(),
+            Request::Notice(notice) => self.messages.push(notice),
+            Request::SaveBehaviour => {
+                self.profile.behaviour = self.session.editor().behaviour;
+                self.save_profile();
+            }
             Request::Settings => self.settings_window.open(None),
             Request::AudioSettings => self.settings_window.open(Some(settings_window::AUDIO)),
             Request::KeyboardShortcuts => self.settings_window.open(Some(settings_window::KEYS)),
@@ -979,6 +992,7 @@ impl App {
                 self.shell.toggle_panel(panel);
                 self.focus_in_sight();
             }
+            Request::ToggleOverview => self.shell.toggle_overview(),
             Request::ShowPanel(panel) => {
                 self.shell.show_panel(panel);
                 self.focus_in_sight();
@@ -1354,6 +1368,9 @@ impl App {
     fn save_to(&mut self, path: PathBuf) -> Result<PathBuf, String> {
         let mut project = self.session.saved_project();
         project.workspace = Some(self.workspaces.current_name().to_owned());
+        // Where the arrangement is, written with the project but never a
+        // change to it.
+        project.view = Some(self.session.editor().saved_view(&project));
         match project::save(&path, &project) {
             Ok(()) => {
                 self.session.mark_saved();
@@ -1476,6 +1493,15 @@ impl App {
             }
             .into());
         };
+        // A folder that isn't there yet is made, as an agent's may be new.
+        if let Some(folder) = file
+            .parent()
+            .filter(|folder| !folder.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(folder).map_err(|error| {
+                format!("The folder {} can't be made: {error}.", folder.display())
+            })?;
+        }
         (self.start_job(file, range, settings, &tracks, ctx))
             .map_err(|error| format!("The export couldn't start: {error}."))
     }
@@ -1951,6 +1977,50 @@ impl App {
     }
 }
 
+impl App {
+    /// Reads the meters, the CPU figures and the Live marks from the engine
+    /// as they are now. Agents' reads are answered with them, so they're
+    /// read again before an agent's call too, which can come after a long
+    /// wait while the window is behind others. Returns whether a modulator
+    /// moved since the last reading, here or for an agent.
+    fn take_readings(&mut self) -> bool {
+        self.output.read_meters(&self.session);
+        let playing = self.output.info().is_some();
+        // As of the frame the device plays, while the engine renders ahead.
+        let played = self.session.stats().time;
+        let mut levels = levels(self.session.meters(), self.session.project(), played);
+        // Without a stream, nothing moves the modulators, and their
+        // readings are only where they stopped.
+        if !playing {
+            levels.outputs.clear();
+            levels.moved.clear();
+        }
+        // An LFO runs on whether the song plays or not, and a modulated
+        // control's dot with it.
+        let modulating = levels.outputs != self.levels.outputs || levels.moved != self.levels.moved;
+        let modulating = std::mem::take(&mut self.modulated) || modulating;
+        self.levels = levels;
+        let stats = self.session.stats();
+        let config = self.session.engine_config();
+        let (loads, project) = (self.session.loads(), self.session.project());
+        let period = self.output.info().map(|info| info.period);
+        let figured = loads.map(Arc::as_ref);
+        (self.performance).update(Instant::now(), figured, period, &stats, config, project);
+        // Only some of the project renders live while the rest renders ahead.
+        let ahead = playing && self.session.lead() != Lead::Off;
+        let session = &self.session;
+        let asks = |device| session.plugin_must_render_live(device);
+        self.live.update(loads.filter(|_| ahead), project, asks);
+        modulating
+    }
+
+    /// Takes the readings for an agent's call, keeping whether a modulator
+    /// moved for the frame's own reading.
+    pub(super) fn take_readings_for_agents(&mut self) {
+        self.modulated = self.take_readings();
+    }
+}
+
 impl eframe::App for App {
     /// Key presses go to the keymap before egui sees them, so a bound key
     /// runs its command wherever the focus is, unless a text field has it.
@@ -2025,31 +2095,9 @@ impl eframe::App for App {
             self.pending.get_or_insert(Request::Quit);
         }
         self.read_audio_files(ctx);
+        let modulating = self.take_readings();
         let playing = self.output.info().is_some();
-        // As of the frame the device plays, while the engine renders ahead.
-        let played = self.session.stats().time;
-        let mut levels = levels(self.session.meters(), self.session.project(), played);
-        // Without a stream, nothing moves the modulators, and their
-        // readings are only where they stopped.
-        if !playing {
-            levels.outputs.clear();
-            levels.moved.clear();
-        }
-        // An LFO runs on whether the song plays or not, and a modulated
-        // control's dot with it.
-        let modulating = levels.outputs != self.levels.outputs || levels.moved != self.levels.moved;
-        self.levels = levels;
         let stats = self.session.stats();
-        let config = self.session.engine_config();
-        let (loads, project) = (self.session.loads(), self.session.project());
-        let period = self.output.info().map(|info| info.period);
-        let figured = loads.map(Arc::as_ref);
-        (self.performance).update(Instant::now(), figured, period, &stats, config, project);
-        // Only some of the project renders live while the rest renders ahead.
-        let ahead = playing && self.session.lead() != Lead::Off;
-        let session = &self.session;
-        let asks = |device| session.plugin_must_render_live(device);
-        self.live.update(loads.filter(|_| ahead), project, asks);
         // The meters fall back for a few seconds after the music stops. They
         // only move while a device plays.
         let metering = playing && (self.levels.moving() || modulating);
@@ -2060,6 +2108,10 @@ impl eframe::App for App {
         // dropped and a lost device gets tried again.
         let mut frame = if self.session.compiling() {
             COMPILING_FRAME
+        } else if plays && continuous(self.session.editor()) {
+            // The song moves under the playhead every frame the screen
+            // shows.
+            Duration::ZERO
         } else if plays || stats.preview.is_some() || metering {
             PLAYING_FRAME
         } else {
@@ -2096,8 +2148,14 @@ impl eframe::App for App {
         self.list_monitors(frame);
 
         let stats = self.session.stats();
-        let heard = self.session.heard_position(self.output.latency());
+        let reported = self.session.heard_position(self.output.latency());
         let rate = self.session.engine_config().sample_rate;
+        let project = self.session.project();
+        let loop_end = (project.looping)
+            .then(|| project.tempo.frame_at(project.loop_region.end, rate).max(0) as u64);
+        let period = self.output.info().map_or(0, |info| u64::from(info.period));
+        let now = Instant::now();
+        let heard = (self.playhead).at(reported, stats.playing, now, rate, period, loop_end);
         let summary = self.output.summary();
         let details = self.output.details();
         let name = self.name();
@@ -2403,6 +2461,18 @@ fn levels(meters: &Meters, project: &Project, time: u64) -> Levels {
 }
 
 /// What the armed tracks have recorded so far, in the song's beats.
+/// Whether Continuous Follow keeps the playhead still in a panel, moving
+/// its view every frame while the song plays.
+fn continuous(editor: &musicable_commands::Editor) -> bool {
+    use musicable_commands::editor::FollowMode;
+    use musicable_commands::navigation::Panel;
+    let panels = [Panel::Arrangement, Panel::PianoRoll, Panel::SampleEditor];
+    editor.behaviour.follow_mode == FollowMode::Continuous
+        && panels
+            .iter()
+            .any(|&panel| editor.follows(panel) && !editor.navigation.of(panel).suspended)
+}
+
 fn recordings(session: &Session) -> Vec<musicable_ui::Recording> {
     let recordings = session.recordings().into_iter();
     recordings

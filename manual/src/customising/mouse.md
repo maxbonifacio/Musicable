@@ -16,6 +16,15 @@ modifiers that have no action of their own there do.
 - **Reset** puts one back as it was at first, and **Reset All** puts them
   all back.
 - Gestures with Cmd show on a Mac only.
+- **REAPER Navigation** gets around the arrangement as REAPER does: the
+  wheel zooms, Ctrl and the wheel scroll up and down, Shift and the wheel
+  scroll along, and a middle-button drag pans, which it does at first too.
+  The rest stays as it is in Live, and **Reset All** goes back.
+
+Besides clicks, double-clicks, drags with the left button and the wheel,
+there are drags with the **middle button** and the **right button**. At
+first a middle-drag pans the arrangement and a right-drag does nothing; a
+right click that doesn't drag still opens the context menu.
 
 The changes go to your mouse map file at once. [The
 arrangement](../window/arrangement.md#the-mouse), [the piano

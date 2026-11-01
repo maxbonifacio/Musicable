@@ -1526,6 +1526,7 @@ fn examples() -> Vec<Example> {
         leaves(transport::RESET_DROPOUTS, bare),
         leaves(mixer::CLEAR_PEAKS, bare),
         leaves(transport::GO_TO_START, bare),
+        leaves(transport::GO_TO_END, bare),
         leaves(transport::LOCATE, |_| {
             Some(Args::new().with("at", Beats::new(8)))
         }),
@@ -1614,6 +1615,15 @@ fn examples() -> Vec<Example> {
         leaves(view::SET_TRACK_HEIGHT, |_| {
             Some(Args::new().with("master", true).with("height", 120.0))
         }),
+        // Every track's, as part of a gesture.
+        leaves(view::SET_TRACK_HEIGHT, |_| {
+            Some(
+                Args::new()
+                    .with("all", true)
+                    .with("height", 90.0)
+                    .with("history", "gesture"),
+            )
+        }),
         leaves(view::SET_VIEWPORT, |_| {
             Some(
                 Args::new()
@@ -1628,7 +1638,9 @@ fn examples() -> Vec<Example> {
         leaves(view::TOGGLE_CLIP_EDITOR, bare),
         leaves(view::TOGGLE_DEVICES, bare),
         leaves(view::TOGGLE_FOLLOW, bare),
+        leaves(view::SWITCH_FOLLOW_MODE, bare),
         leaves(view::TOGGLE_HISTORY, bare),
+        leaves(view::TOGGLE_OVERVIEW, bare),
         leaves(view::TOGGLE_MIXER, bare),
         leaves(view::TOGGLE_PERFORMANCE, bare),
         leaves(view::TOGGLE_PIANO_ROLL, bare),
@@ -1643,6 +1655,96 @@ fn examples() -> Vec<Example> {
         leaves(view::WIDEN_GRID, bare),
         leaves(view::ZOOM_IN, bare),
         leaves(view::ZOOM_OUT, bare),
+        // After a zoom, back, and forward again after going back.
+        leaves(view::ZOOM_BACK, |s| {
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::ZOOM_FORWARD, |s| {
+            s.run(&view::ZOOM_IN);
+            s.run(&view::ZOOM_BACK);
+            Some(Args::new())
+        }),
+        leaves(view::FIT_SONG_WIDTH, bare),
+        leaves(view::FIT_TRACK_HEIGHTS, bare),
+        leaves(view::TRACKS_TALLER, |s| {
+            let track = find_track(s, |_| true)?.id;
+            s.select_tracks(&[track]);
+            Some(Args::new())
+        }),
+        leaves(view::TRACKS_SHORTER, |s| {
+            let track = find_track(s, |_| true)?.id;
+            s.select_tracks(&[track]);
+            Some(Args::new())
+        }),
+        leaves(view::RESET_TRACK_HEIGHT, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(Args::new().with("track", track))
+        }),
+        // Without a selection, every track.
+        leaves(view::SMALL_TRACKS, bare),
+        leaves(view::MEDIUM_TRACKS, |s| {
+            let track = find_track(s, |_| true)?.id;
+            s.select_tracks(&[track]);
+            Some(Args::new())
+        }),
+        leaves(view::LARGE_TRACKS, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(Args::new().with("tracks", vec![track]))
+        }),
+        leaves(view::HUGE_TRACKS, |_| Some(Args::new().with("all", true))),
+        leaves(view::FIT_SELECTED_TRACKS, |s| {
+            let track = find_track(s, |_| true)?.id;
+            s.select_tracks(&[track]);
+            Some(Args::new())
+        }),
+        leaves(view::FIT_SELECTED_TRACKS, |s| {
+            let track = find_track(s, |_| true)?.id;
+            Some(Args::new().with("tracks", vec![track]))
+        }),
+        leaves(view::TOGGLE_AUTO_ZOOM, bare),
+        leaves(view::SAVE_VIEW_1, bare),
+        leaves(view::SAVE_VIEW_2, bare),
+        leaves(view::SAVE_VIEW_3, bare),
+        leaves(view::SAVE_VIEW_4, bare),
+        leaves(view::SAVE_VIEW_5, bare),
+        // A slot kept by Save View, after zooming away from it.
+        leaves(view::RECALL_VIEW_1, |s| {
+            s.run(&view::SAVE_VIEW_1);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::RECALL_VIEW_2, |s| {
+            s.run(&view::SAVE_VIEW_2);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::RECALL_VIEW_3, |s| {
+            s.run(&view::SAVE_VIEW_3);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::RECALL_VIEW_4, |s| {
+            s.run(&view::SAVE_VIEW_4);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::RECALL_VIEW_5, |s| {
+            s.run(&view::SAVE_VIEW_5);
+            s.run(&view::ZOOM_IN);
+            Some(Args::new())
+        }),
+        leaves(view::ZOOM_TO_LOCATORS, |s| {
+            (!project(s).locators.is_empty()).then(Args::new)
+        }),
+        // Every track's.
+        leaves(view::RESET_TRACK_HEIGHT, |_| {
+            Some(Args::new().with("all", true))
+        }),
+        leaves(view::SCROLL_TO_PLAYHEAD, bare),
+        leaves(view::SET_LANE_SIZES, |_| {
+            Some(Args::new().with("height", 400.0).with("track", 72.0))
+        }),
         leaves(view::ZOOM_TO_SELECTION, clip_selected),
         // The markers selected in the Sample Editor.
         leaves(view::ZOOM_TO_SELECTION, marker_selected),
@@ -2825,6 +2927,14 @@ fn agents_run_each_command_as_the_ui_does() {
         assert_eq!(args, same, "{what} gets ready the same way twice");
         let command = ui.registry.get(what).expect("it has an example").clone();
         let ran = ui.run_with(what, args.clone());
+        // A command whose outcome is its answer runs on its own: a batch
+        // has no answer to give it.
+        if let Some(request) = ui.requests.iter().find(|request| request.answers()) {
+            assert!(
+                command.alone,
+                "{what} asks for {request:?}, so it runs alone"
+            );
+        }
         // What only the user can see or answer is the user's.
         if ui.requests.iter().any(|request| !request.for_agents()) {
             let asked = &ui.requests;

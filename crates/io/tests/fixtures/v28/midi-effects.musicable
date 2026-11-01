@@ -1,0 +1,251 @@
+{
+  "format": "musicable-project",
+  "version": 28,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 2,
+  "next_send_id": 0,
+  "next_device_id": 5,
+  "next_clip_id": 0,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Keys",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 0,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "plugin": {
+              "format": "clap",
+              "id": "com.example.arp",
+              "name": "Arp",
+              "kind": "midi_effect",
+              "inputs": [],
+              "note_output": false,
+              "note_timing": "with_sound",
+              "note_timing_chosen": false,
+              "state": null,
+              "params": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "bypassed": true,
+          "active": true,
+          "kind": {
+            "plugin": {
+              "format": "vst3",
+              "id": "0123456789ABCDEF0123456789ABCDEF",
+              "name": "Chord",
+              "kind": "midi_effect",
+              "inputs": [],
+              "note_output": false,
+              "note_timing": "with_sound",
+              "note_timing_chosen": false,
+              "state": null,
+              "params": []
+            }
+          }
+        },
+        {
+          "id": 2,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "plugin": {
+              "format": "clap",
+              "id": "com.example.synth",
+              "name": "Synth",
+              "kind": "instrument",
+              "inputs": [],
+              "note_output": false,
+              "note_timing": "as_played",
+              "note_timing_chosen": false,
+              "state": null,
+              "params": []
+            }
+          }
+        },
+        {
+          "id": 3,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "native": {
+              "kind": "eq",
+              "sample": null,
+              "params": {
+                "band1_on": 0.0,
+                "band1_shape": 1.0,
+                "band1_freq": 30.0,
+                "band1_gain": 0.0,
+                "band1_q": 0.7071067811865476,
+                "band2_on": 1.0,
+                "band2_shape": 3.0,
+                "band2_freq": 100.0,
+                "band2_gain": 0.0,
+                "band2_q": 0.7071067811865476,
+                "band3_on": 1.0,
+                "band3_shape": 4.0,
+                "band3_freq": 250.0,
+                "band3_gain": 0.0,
+                "band3_q": 0.7071067811865476,
+                "band4_on": 1.0,
+                "band4_shape": 4.0,
+                "band4_freq": 800.0,
+                "band4_gain": 0.0,
+                "band4_q": 0.7071067811865476,
+                "band5_on": 1.0,
+                "band5_shape": 4.0,
+                "band5_freq": 2500.0,
+                "band5_gain": 0.0,
+                "band5_q": 0.7071067811865476,
+                "band6_on": 1.0,
+                "band6_shape": 4.0,
+                "band6_freq": 6000.0,
+                "band6_gain": 0.0,
+                "band6_q": 0.7071067811865476,
+                "band7_on": 1.0,
+                "band7_shape": 6.0,
+                "band7_freq": 10000.0,
+                "band7_gain": 0.0,
+                "band7_q": 0.7071067811865476,
+                "band8_on": 0.0,
+                "band8_shape": 8.0,
+                "band8_freq": 18000.0,
+                "band8_gain": 0.0,
+                "band8_q": 0.7071067811865476,
+                "output": 0.0
+              }
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    },
+    {
+      "id": 1,
+      "name": "Sketch",
+      "kind": "midi",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "midi": {
+          "device": "",
+          "name": "",
+          "channel": null
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [],
+      "takes": [],
+      "devices": [
+        {
+          "id": 4,
+          "bypassed": false,
+          "active": true,
+          "kind": {
+            "plugin": {
+              "format": "clap",
+              "id": "com.example.arp",
+              "name": "Arp",
+              "kind": "midi_effect",
+              "inputs": [],
+              "note_output": false,
+              "note_timing": "with_sound",
+              "note_timing_chosen": false,
+              "state": null,
+              "params": []
+            }
+          }
+        }
+      ],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "wires": [],
+  "workspace": null,
+  "view": null
+}

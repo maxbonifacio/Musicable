@@ -32,6 +32,7 @@ mod mixer;
 mod modulators;
 mod mouse;
 mod native;
+mod navigate;
 mod palette;
 mod panels;
 mod parts;

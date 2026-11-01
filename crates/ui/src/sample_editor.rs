@@ -33,6 +33,7 @@ use egui::{
     RichText, Role, ScrollArea, Sense, Ui, UiBuilder, WidgetInfo, pos2,
 };
 use musicable_commands::editor::{Grid, Viewport};
+use musicable_commands::navigation::{Panel, Record};
 use musicable_commands::{
     Args, CommandId, Editor, Focus, Modifiers, auto_warp, automation, transient, transport,
     view as views, warp, warp_mode,
@@ -50,6 +51,7 @@ use musicable_model::warp::{
 use crate::arrangement::{distance_to_segment, simplified};
 use crate::mixer::{decibels, name_menu};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
+use crate::navigate::{self, Navigating};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
 use crate::waveform::Peaks;
@@ -67,9 +69,9 @@ const GAIN_FLOOR: f64 = -70.0;
 #[derive(Debug, Default)]
 pub(crate) struct SampleEditor {
     drag: Option<Drag>,
-    /// Set when the user scrolls away from the playhead while it plays, so
-    /// Follow doesn't scroll back until the playhead is in sight again.
-    follow_paused: bool,
+    /// The wheel's gesture, the last drag and the playhead, for Follow
+    /// and the view's history.
+    navigating: Navigating,
     /// Where the context menu that's open was opened.
     menu: Option<Spot>,
 }
@@ -172,8 +174,9 @@ struct Drag {
     /// pointer was, and whether each holds for a step: a drag goes off the
     /// grid and back as Alt is pressed and let go.
     drawn: BTreeMap<Beats, (f64, bool)>,
-    /// Where the pointer was when it last drew.
-    last: Option<Pos2>,
+    /// Where the pointer was when it last drew, and where the view started
+    /// then, as it may scroll under the drag.
+    last: Option<(Pos2, Beats)>,
 }
 
 /// What a drag would do if it ended now.
@@ -506,7 +509,23 @@ impl Scene<'_> {
     /// now, each snapped to the grid unless the drag kept off it then.
     fn ends(&self, drag: &Drag) -> (Beats, Beats) {
         let at = |x, free| self.snap(self.layout.beats_at(x), free).max(Beats::ZERO);
-        (at(drag.from.x, drag.started_free), at(drag.to.x, drag.free))
+        (
+            at(self.origin(drag), drag.started_free),
+            at(drag.to.x, drag.free),
+        )
+    }
+
+    /// Where `drag` started across the view as it is now, which may have
+    /// scrolled under it.
+    fn origin(&self, drag: &Drag) -> f32 {
+        let layout = &self.layout;
+        navigate::origin(
+            drag.from,
+            drag.viewport,
+            layout.viewport,
+            layout.wave.left(),
+        )
+        .x
     }
 
     /// The lane's value at `y`.
@@ -630,7 +649,11 @@ impl Scene<'_> {
     /// now.
     fn draw(&self, drag: &mut Drag) {
         let layout = &self.layout;
-        let (from, to) = (drag.last.unwrap_or(drag.to), drag.to);
+        let from = match drag.last {
+            Some((last, start)) => pos2(last.x + layout.viewport.x_of(start), last.y),
+            None => drag.to,
+        };
+        let to = drag.to;
         // The value along the way from `from` to `to`, at `x`.
         let value = |x: f32| {
             let along = match to.x - from.x {
@@ -668,7 +691,7 @@ impl Scene<'_> {
             values.insert(beats(from.x), (value(from.x), false));
             values.insert(beats(to.x), (value(to.x), false));
         }
-        drag.last = Some(to);
+        drag.last = Some((to, layout.viewport.start));
     }
 
     /// The curve once what `drag` drew takes the place of what was there,
@@ -706,7 +729,8 @@ impl Scene<'_> {
     /// What `drag` would do if it ended now.
     fn plan(&self, drag: &Drag) -> Option<Plan> {
         let layout = &self.layout;
-        let moved = layout.viewport.beats_in(drag.to.x - drag.from.x);
+        let (then, now, left) = (drag.viewport, layout.viewport, layout.wave.left());
+        let moved = navigate::moved(drag.from.x, drag.to.x, then, now, left);
         match (drag.action, drag.hit) {
             (MouseAction::MoveMarker | MouseAction::MoveMarkerFree, Hit::Marker(i)) => {
                 let warp = self.warp()?;
@@ -723,7 +747,7 @@ impl Scene<'_> {
                 // as far before the marker as the pointer went plays at it.
                 let warp = self.warp()?;
                 let marker = *warp.markers.get(i)?;
-                let beats = f64::from(drag.to.x - drag.from.x) / layout.viewport.zoom;
+                let beats = moved.to_f64();
                 let frame = warp
                     .frame_at(marker.beat.to_f64() - beats, self.rate)
                     .round();
@@ -750,7 +774,7 @@ impl Scene<'_> {
                 // It goes with the pointer, between the transients either
                 // side, in the file.
                 let (before, after) = self.warp()?.onsets.as_ref()?.room(frame)?;
-                let x = self.x_of_frame(self.audio, frame as f64) + drag.to.x - drag.from.x;
+                let x = self.x_of_frame(self.audio, frame as f64) + drag.to.x - self.origin(drag);
                 let to = self.frame_at(self.audio, x).round().max(0.0) as u64;
                 let low = before.map_or(0, |before| before + 1);
                 let end = self
@@ -915,7 +939,7 @@ fn send(actions: &mut Vec<Action>, scene: &Scene<'_>, plan: &Plan) {
             run(actions, warp::SELECT_TIME, args);
         }
         Plan::Points(points) => set_points(actions, scene, points),
-        Plan::Viewport(viewport) => set_viewport(actions, viewport),
+        Plan::Viewport(viewport) => set_viewport(actions, viewport, Record::Gesture),
     }
 }
 
@@ -936,11 +960,14 @@ fn set_points(actions: &mut Vec<Action>, scene: &Scene<'_>, points: &[Point]) {
     run(actions, automation::SET_POINTS, args);
 }
 
-fn set_viewport(actions: &mut Vec<Action>, viewport: &Viewport) {
+/// Asks for the Sample Editor's view to be `viewport`, counting it in the
+/// view's history as `record` says.
+fn set_viewport(actions: &mut Vec<Action>, viewport: &Viewport, record: Record) {
     let args = Args::new()
         .with("start", viewport.start)
         .with("zoom", viewport.zoom)
-        .with("width", viewport.width);
+        .with("width", viewport.width)
+        .with("history", record.name());
     run(actions, views::SET_SAMPLE_EDITOR_VIEWPORT, args);
 }
 
@@ -1050,10 +1077,18 @@ impl SampleEditor {
         for (response, area) in &responses {
             self.respond(ui, &scene, response, *area, actions);
         }
-        self.wheel(ui, &scene, &mut viewport);
-        self.follow(&scene, &mut viewport);
-        if viewport != editor.sample_editor.viewport {
-            set_viewport(actions, &viewport);
+        let wheeled = self.wheel(ui, &scene, &mut viewport);
+        self.edge_scroll(ui, &scene, &mut viewport);
+        let (record, force) = self.navigating.frame(
+            ui,
+            &view.playback,
+            editor,
+            Panel::SampleEditor,
+            &mut viewport,
+            (wheeled, self.drag.is_some()),
+        );
+        if viewport != editor.sample_editor.viewport || force {
+            set_viewport(actions, &viewport, record);
             scene.layout = Layout::new(rect, theme, viewport);
         }
         scene.free = self.drag.as_ref().is_some_and(|drag| drag.free);
@@ -1241,15 +1276,16 @@ impl SampleEditor {
         self.drag = Some(drag);
     }
 
-    /// Scrolls and zooms with the wheel, over the Sample Editor.
-    fn wheel(&mut self, ui: &Ui, scene: &Scene<'_>, viewport: &mut Viewport) {
+    /// Scrolls and zooms with the wheel, over the Sample Editor. Returns
+    /// whether it changed the view.
+    fn wheel(&mut self, ui: &Ui, scene: &Scene<'_>, viewport: &mut Viewport) -> bool {
         let layout = &scene.layout;
         let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
-            return;
+            return false;
         };
         let parts = [layout.ruler, layout.wave, layout.time, layout.lane];
         if !(parts.iter()).any(|rect| rect.contains(pos) && ui.rect_contains_pointer(*rect)) {
-            return;
+            return false;
         }
         let line = ui.ctx().options(|o| o.input_options.line_scroll_speed);
         let x = pos.x.clamp(layout.wave.left(), layout.wave.right());
@@ -1291,25 +1327,30 @@ impl SampleEditor {
             }
         }
         viewport.start = viewport.start.max(Beats::ZERO);
-        let sideways = viewport.start != before.start || viewport.zoom != before.zoom;
-        if sideways && scene.view.playback.playing {
-            self.follow_paused = true;
-        }
+        *viewport != before
     }
 
-    /// Scrolls to keep the playhead in sight while it plays, a page at a
-    /// time, if Follow is on, as the arrangement does.
-    fn follow(&mut self, scene: &Scene<'_>, viewport: &mut Viewport) {
-        let playback = scene.view.playback;
-        if !playback.playing || !scene.editor().follow {
-            self.follow_paused = false;
+    /// Scrolls the waveform sideways while a drag along it is held at its
+    /// left or right edge.
+    fn edge_scroll(&self, ui: &Ui, scene: &Scene<'_>, viewport: &mut Viewport) {
+        let Some(drag) = &self.drag else {
             return;
-        }
-        let in_sight = viewport.visible().contains(playback.playhead);
-        if self.follow_paused {
-            self.follow_paused = !in_sight;
-        } else if self.drag.is_none() {
-            viewport.follow(playback.playhead);
+        };
+        let along = matches!(
+            drag.action,
+            MouseAction::MoveMarker
+                | MouseAction::MoveMarkerFree
+                | MouseAction::MoveAudio
+                | MouseAction::MoveTransient
+                | MouseAction::SelectTime
+                | MouseAction::MovePoint
+                | MouseAction::MovePointFree
+                | MouseAction::Draw
+                | MouseAction::DrawFree
+        );
+        if along {
+            let wave = scene.layout.wave;
+            navigate::edge_scroll_sideways(ui, wave, Some(drag.from.x), drag.to.x, viewport);
         }
     }
 
@@ -1364,8 +1405,11 @@ fn drag_stopped(scene: &Scene<'_>, drag: &Drag, actions: &mut Vec<Action>) {
         return;
     };
     match &plan {
+        // The view was asked for as the drag went: its end makes the drag
+        // one step of the view's history.
+        Plan::Viewport(viewport) => set_viewport(actions, viewport, Record::Step),
         // Asked for as the drag went.
-        Plan::Viewport(_) | Plan::Time { .. } => {
+        Plan::Time { .. } => {
             if drag.sent.as_ref() != Some(&plan) {
                 send(actions, scene, &plan);
             }
@@ -1431,6 +1475,14 @@ fn clicked(
         }
         (MouseAction::Locate, _) => {
             run(actions, transport::LOCATE, Args::new().with("at", at));
+        }
+        // The selected markers, or with none selected the whole clip.
+        (MouseAction::ZoomToFit, Hit::Ruler) => {
+            let zoom = match scene.editor().sample_editor.markers.is_empty() || !warped {
+                true => views::FIT_SONG_WIDTH,
+                false => views::ZOOM_TO_SELECTION,
+            };
+            actions.push(Action::Run(zoom));
         }
         (MouseAction::AddPoint, Hit::Lane(part)) => {
             let own = scene.own_of(at);

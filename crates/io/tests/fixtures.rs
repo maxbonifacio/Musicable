@@ -35,7 +35,7 @@ use musicable_model::warp::{
 };
 use musicable_model::{
     AudioInput, Chain, ClipType, DeviceKind, Input, MidiInput, Monitor, PluginFormat, Project,
-    TestTone, Track, TrackId, TrackKind,
+    SavedView, TestTone, Track, TrackId, TrackKind, ViewPlace,
 };
 
 fn fixtures() -> Vec<(&'static str, Project)> {
@@ -69,6 +69,7 @@ fn fixtures() -> Vec<(&'static str, Project)> {
         ("midi-to", midi_to()),
         ("made-notes", made_notes()),
         ("always-live", always_live()),
+        ("view", view()),
         ("note-timing", note_timing()),
     ]
 }
@@ -1648,9 +1649,42 @@ fn always_live() -> Project {
     project
 }
 
-/// When plugins' notes come, against their latency: a MIDI effect someone
-/// chose to play its notes as it plays them, a synth that plays notes out
-/// with its sound, chosen too, and a MIDI effect left to what's assumed.
+/// The arrangement's view as the project was saved, from version 27:
+/// scrolled and zoomed in, with a track and the master given heights,
+/// Follow off in the piano roll, and two of the five slots filled.
+fn view() -> Project {
+    let mut project = Project::new();
+    let vocal = project.add_track("Vocal", TrackKind::Audio);
+    let keys = project.add_track("Keys", TrackKind::Midi);
+    let place = |start: i64, zoom: f64, top: f32, heights: &[(Chain, f32)]| ViewPlace {
+        start: Beats::new(start),
+        zoom,
+        top,
+        heights: heights.iter().copied().collect(),
+    };
+    project.view = Some(SavedView {
+        place: place(
+            32,
+            24.5,
+            60.0,
+            &[(Chain::Track(keys), 120.0), (Chain::Master, 90.0)],
+        ),
+        follow: [true, false, true],
+        slots: [
+            Some(place(0, 6.0, 0.0, &[])),
+            None,
+            None,
+            Some(place(64, 48.0, 0.0, &[(Chain::Track(vocal), 200.0)])),
+            None,
+        ],
+    });
+    project
+}
+
+/// When plugins' notes come, against their latency, from version 28: a
+/// MIDI effect left to what's assumed, one someone chose to play its notes
+/// as it plays them, and a synth that plays notes out with its sound,
+/// chosen too.
 fn note_timing() -> Project {
     let mut project = Project::new();
     let plugin = |id: &str, name: &str, kind, note_output, timing: Option<NoteTiming>| {

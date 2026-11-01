@@ -295,8 +295,9 @@ fn opening_asks_the_user_about_unsaved_changes_first() {
     assert_eq!(window.state().session.project().tracks[0].name, "Keys");
     assert_eq!(window.state().path.as_deref(), Some(file.as_path()));
 
-    // An export says where it went, once it's written.
-    let mix = dir.0.join("Mix.flac");
+    // An export says where it went, once it's written, in a folder made
+    // for it if it isn't there yet.
+    let mix = dir.0.join("Exports").join("Mix.flac");
     let exported = agent.call(
         &mut window,
         "run_command",
@@ -1259,9 +1260,25 @@ fn agents_record_what_the_device_plays_with_a_timeline() {
         "{relative:?}"
     );
     let track = run(&mut window, "track.new_audio_track", json!({})).unwrap()["result"].clone();
-    let file = dir.0.join("Output.wav");
+    let file = dir.0.join("Checks").join("Output.wav");
+    // Its answer is the recording's, which a batch has no room for.
+    let batch = json!({
+        "name": "Record",
+        "commands": [
+            {"id": "transport.locate", "args": {"at": 0}},
+            {"id": "debug.record_output", "args": {"file": file}},
+        ],
+    });
+    let refused = agent.call(&mut window, "run_commands", batch);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("runs on its own")),
+        "{refused:?}"
+    );
+    assert!(!file.exists());
     let started = run(&mut window, "debug.record_output", json!({"file": file})).unwrap();
-    let timeline = dir.0.join("Output.timeline.json");
+    let timeline = dir.0.join("Checks").join("Output.timeline.json");
     assert_eq!(
         started["result"],
         json!({"file": file, "timeline": timeline})
@@ -1578,4 +1595,110 @@ fn agents_make_a_blind_test_and_the_user_judges_it() {
     assert_eq!(results["abx"]["correct"], 2, "{results:#}");
     assert_eq!(results["preference"]["second"], 2, "{results:#}");
     window.get_by_label_contains("X named right in 2 of 2");
+}
+
+#[test]
+fn the_status_playhead_moves_on_as_the_song_plays() {
+    let dir = TempDir::new("agents-status-playhead");
+    let file = dir.0.join("Song.musicable");
+    project::save(&file, &song()).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    let agent = Agent::connect(&dir.0);
+    let run = |window: &mut Window, id: &str, args: Json| {
+        agent.call(window, "run_command", json!({"id": id, "args": args}))
+    };
+    let seconds = |window: &mut Window| {
+        let status = agent.call(window, "get_status", json!({})).unwrap();
+        (
+            status["playing"].as_bool().unwrap(),
+            status["playhead_seconds"].as_f64().unwrap(),
+        )
+    };
+    run(&mut window, "transport.locate", json!({"at": 4})).unwrap();
+    for _ in 0..4 {
+        window.state_mut().output.play_idle(1024);
+    }
+    let (_, before) = seconds(&mut window);
+    run(&mut window, "transport.play", json!({})).unwrap();
+    let mut last = before;
+    for read in 0..40 {
+        window.state_mut().output.play_idle(4800);
+        let (playing, now) = seconds(&mut window);
+        assert!(playing);
+        // Once the engine plays, a tenth of a second at a time.
+        if read > 2 {
+            assert!(
+                (now - last - 0.1).abs() < 0.002,
+                "read {read}: {last} then {now}"
+            );
+        }
+        assert!(now >= before - 0.001, "read {read}: {now}, from {before}");
+        last = now;
+    }
+}
+
+#[test]
+fn modifiers_the_agent_holds_change_what_its_drags_and_clicks_do() {
+    let dir = TempDir::new("agents-held-modifiers");
+    let file = dir.0.join("Song.musicable");
+    project::save(&file, &song()).unwrap();
+    let mut window = window(&dir.0, Some(file));
+    switch_agents(&mut window);
+    window
+        .get_by_label("Let agents use the mouse and keys")
+        .click();
+    window.run();
+    std::thread::sleep(crate::agent_hands::IDLE);
+    let agent = Agent::connect(&dir.0);
+    // The middle of each clip's title bar, which moves it, left to right.
+    let titles = |window: &mut Window| {
+        let found = agent
+            .call(window, "get_ui_tree", json!({"filter": "Clip Chord"}))
+            .unwrap();
+        let mut titles: Vec<[f64; 2]> = (every_node(&found["nodes"]).into_iter())
+            .filter(|node| node["label"] == "Clip Chord")
+            .map(|clip| {
+                let at = |axis: usize| clip["at"][axis].as_f64().unwrap();
+                [at(0) + clip["size"][0].as_f64().unwrap() / 2.0, at(1) + 4.0]
+            })
+            .collect();
+        titles.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        titles
+    };
+    let clips = |window: &Window| window.state().session.project().tracks[0].clips.len();
+
+    // Ctrl held from before the button goes down copies the clip.
+    let [x, y] = titles(&mut window)[0];
+    let done = use_hands(
+        &agent,
+        &mut window,
+        json!({"steps": [
+            {"hold": "Ctrl"},
+            {"drag": [x, y], "to": [x + 200.0, y], "seconds": 0.2},
+            {"release": "Ctrl"},
+        ]}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(clips(&window), 2, "Ctrl copies the clip: {done}");
+
+    // A click with Ctrl held adds to what's selected.
+    let [first, copy] = titles(&mut window)[..] else {
+        panic!("two clips");
+    };
+    let done = use_hands(
+        &agent,
+        &mut window,
+        json!({"steps": [
+            {"click": first},
+            {"hold": "Ctrl"},
+            {"click": copy},
+            {"release": "Ctrl"},
+        ]}),
+        None,
+    )
+    .unwrap();
+    let selected = window.state().session.editor().selection.clips.len();
+    assert_eq!(selected, 2, "Ctrl adds the copy to the selection: {done}");
 }

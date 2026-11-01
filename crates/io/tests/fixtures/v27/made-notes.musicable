@@ -72,8 +72,6 @@
               "kind": "instrument",
               "inputs": [],
               "note_output": true,
-              "note_timing": "as_played",
-              "note_timing_chosen": false,
               "state": null,
               "params": []
             }
@@ -155,8 +153,6 @@
               "kind": "audio_effect",
               "inputs": [],
               "note_output": true,
-              "note_timing": "with_sound",
-              "note_timing_chosen": false,
               "state": null,
               "params": []
             }
@@ -197,5 +193,6 @@
       "channel": null
     }
   ],
-  "workspace": null
+  "workspace": null,
+  "view": null
 }

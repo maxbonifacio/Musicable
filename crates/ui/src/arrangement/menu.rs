@@ -160,6 +160,10 @@ pub(super) fn show(ui: &mut Ui, scene: &Scene<'_>, spot: Spot, actions: &mut Vec
         }
     }
     context_menu(ui, view, &entries, actions);
+    if let Hit::Header(_) | Hit::TrackEdge(_) = spot.hit {
+        ui.separator();
+        ui.menu_button("Track Height", |ui| heights(ui, scene, Some(spot), actions));
+    }
     // A track's header is made of parts, which the user can hide.
     if let Hit::Header(_) | Hit::TrackEdge(_) | Hit::MasterHeader | Hit::MasterEdge = spot.hit {
         ui.separator();
@@ -266,4 +270,56 @@ fn fits(id: &CommandId, scene: &Scene<'_>, spot: Spot) -> bool {
         id if *id == automation::CLEAR => lane.is_some(),
         _ => true,
     }
+}
+
+/// The menu of track heights: the presets, Fit and Auto Zoom. From a
+/// track's header (`spot`), the presets size the track it was opened on,
+/// or the selected tracks if it's one of them; from the arrangement's
+/// corner, the selected tracks, or every track with none selected. With
+/// Alt held, they size every track.
+pub(super) fn heights(
+    ui: &mut Ui,
+    scene: &Scene<'_>,
+    spot: Option<Spot>,
+    actions: &mut Vec<Action>,
+) {
+    let shown = scene.view;
+    let alt = ui.input(|i| i.modifiers.alt);
+    let editor = scene.editor();
+    let tracks = |command: &Command| match spot {
+        Some(spot) if !alt => args(command, scene, spot),
+        _ => Some(Args::new()),
+    };
+    let mut entries: Vec<Option<(&Command, Args)>> = Vec::new();
+    for (id, _) in view::PRESETS {
+        if let Some(command) = shown.commands.get(&id) {
+            let args = match alt {
+                true => Args::new().with("all", true),
+                false => tracks(command).unwrap_or_default(),
+            };
+            entries.push(Some((command, args)));
+        }
+    }
+    // Fit fits the tracks the presets would size, or every track.
+    let chosen = match spot {
+        Some(spot) => spot.hit.track().is_some(),
+        None => !editor.selection.tracks.is_empty(),
+    };
+    let fit = match chosen && !alt {
+        true => view::FIT_SELECTED_TRACKS,
+        false => view::FIT_TRACK_HEIGHTS,
+    };
+    if let Some(command) = shown.commands.get(&fit) {
+        let args = tracks(command).unwrap_or_default();
+        entries.push(Some((command, args)));
+    }
+    entries.push(None);
+    for id in [view::FIT_TRACK_HEIGHTS, view::TOGGLE_AUTO_ZOOM] {
+        if id != fit
+            && let Some(command) = shown.commands.get(&id)
+        {
+            entries.push(Some((command, Args::new())));
+        }
+    }
+    context_menu(ui, shown, &entries, actions);
 }

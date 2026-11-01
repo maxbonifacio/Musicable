@@ -524,6 +524,8 @@ fn select_tracks(
     }
     if let Some(&track) = tracks.iter().rev().find(|t| selection.tracks.contains(t)) {
         editor.select_track(Chain::Track(track));
+        // Selected from the mixer or a controller, it comes into sight.
+        editor.reveal_track(project, track);
     }
     editor.focus_arrangement();
     Ok(())

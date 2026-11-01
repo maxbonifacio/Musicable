@@ -31,6 +31,8 @@ pub mod routing;
 pub mod time;
 pub mod warp;
 
+use std::collections::BTreeMap;
+
 use automation::Lane;
 use clip::{Clip, ClipContent, ClipId};
 use mixer::Bus;
@@ -589,6 +591,39 @@ pub struct Project {
     /// app's panels out, for the app to switch to when it opens the
     /// project. Edits leave it alone: the app sets it as it saves.
     pub workspace: Option<String>,
+    /// Where the arrangement was when the project was saved, and the views
+    /// kept in its slots. Like the workspace, edits leave it alone: the app
+    /// sets it as it saves, and takes it as it opens the project.
+    pub view: Option<SavedView>,
+}
+
+/// How many views a project keeps in slots, for Recall View 1 to 5.
+pub const VIEW_SLOTS: usize = 5;
+
+/// The arrangement's view as a project file keeps it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SavedView {
+    /// Where the arrangement was.
+    pub place: ViewPlace,
+    /// Whether Follow was on in the arrangement, the piano roll and the
+    /// Sample Editor.
+    pub follow: [bool; 3],
+    /// The views saved with Save View 1 to 5.
+    pub slots: [Option<ViewPlace>; VIEW_SLOTS],
+}
+
+/// A place in the arrangement: where it starts, its zoom, how far down
+/// it's scrolled, and the heights the user gave its rows.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ViewPlace {
+    /// The song position at the left edge.
+    pub start: Beats,
+    /// How many points a beat takes.
+    pub zoom: f64,
+    /// How far down the tracks are scrolled, in points.
+    pub top: f32,
+    /// The heights the user gave tracks and the master's row, in points.
+    pub heights: BTreeMap<Chain, f32>,
 }
 
 impl Default for Project {
@@ -617,6 +652,7 @@ impl Default for Project {
             next_routing_id: 0,
             next_wire_id: 0,
             workspace: None,
+            view: None,
         }
     }
 }

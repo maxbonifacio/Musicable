@@ -83,5 +83,6 @@
   "locators": [],
   "automation": [],
   "wires": [],
-  "workspace": "Mixage à deux"
+  "workspace": "Mixage à deux",
+  "view": null
 }

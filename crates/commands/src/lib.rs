@@ -41,6 +41,7 @@ mod keymap;
 pub mod locator;
 pub mod mixer;
 pub mod modulation;
+pub mod navigation;
 pub mod notes;
 pub mod options;
 pub mod panel;
@@ -114,7 +115,8 @@ pub struct Command {
     pub agents: bool,
     /// Whether it runs on its own only, never among others as one step of
     /// the undo history ([`Registry::run_batch`]): it opens, saves or
-    /// replaces the project, or steps through the undo history.
+    /// replaces the project, steps through the undo history, or asks for
+    /// something whose outcome is its answer ([`Request::answers`]).
     pub alone: bool,
     /// Whether it needs at least one of its arguments, though each of them
     /// is optional: see [`needs_arguments`](Self::needs_arguments).
@@ -210,6 +212,11 @@ pub enum When {
     CanRename,
     /// The project has locators.
     HasLocators,
+    /// The view with the focus has a view to go back to: the
+    /// arrangement's, the piano roll's or the Sample Editor's.
+    CanZoomBack,
+    /// The view with the focus went back, and has a view to go forward to.
+    CanZoomForward,
     /// The piano roll has the focus, and notes selected.
     NotesSelected,
     /// The devices panel has devices selected, wherever the focus is.
@@ -292,6 +299,14 @@ impl When {
                 selection.clips.len() == 1 || matches!(editor.selected_track, Some(Chain::Track(_)))
             }
             When::HasLocators => !project.locators.is_empty(),
+            When::CanZoomBack => {
+                let panel = navigation::Panel::of(editor.focus);
+                editor.navigation.of(panel).can_go_back()
+            }
+            When::CanZoomForward => {
+                let panel = navigation::Panel::of(editor.focus);
+                editor.navigation.of(panel).can_go_forward()
+            }
             When::CanQuantize if notes => roll.clip.is_some(),
             When::CanQuantize if markers => sample
                 .clip
@@ -351,6 +366,11 @@ pub enum Request {
     },
     /// Show the command palette.
     CommandPalette,
+    /// Tell the user this, in the status bar.
+    Notice(String),
+    /// Keep the editor's behaviour, which a command changed, in the
+    /// profile's settings.
+    SaveBehaviour,
     /// Show the Settings window, at the page it showed last.
     Settings,
     /// Show the Settings window's Audio page.
@@ -369,6 +389,8 @@ pub enum Request {
     NextProfile,
     /// Show or hide the panel with this id, such as the mixer.
     TogglePanel(&'static str),
+    /// Show or hide the overview over the arrangement.
+    ToggleOverview,
     /// Show the panel with this id, such as the piano roll, if it's hidden.
     ShowPanel(&'static str),
     /// Bring the panel with this id, the piano roll or the Sample Editor,
@@ -518,6 +540,35 @@ pub struct AudioDevice {
 }
 
 impl Request {
+    /// Whether, asked for by an agent's command, its outcome is the
+    /// command's answer: a file opened, saved, imported or exported, a
+    /// setting changed, a recording or a blind test made. A command that
+    /// asks for one runs on its own ([`Command::alone`]), as a batch has
+    /// no answer of its own to give each of its commands.
+    pub fn answers(&self) -> bool {
+        matches!(
+            self,
+            Request::New
+                | Request::NewDemo
+                | Request::Open(_)
+                | Request::Save
+                | Request::SaveAs(_)
+                | Request::ImportAudio { .. }
+                | Request::ExportAudio { .. }
+                | Request::SetSetting { .. }
+                | Request::SetAudioDevice(_)
+                | Request::SetKeys { .. }
+                | Request::ResetKeys(_)
+                | Request::SaveWorkspaceAs(_)
+                | Request::RenameWorkspace(_)
+                | Request::RecordOutput(_)
+                | Request::StopRecordingOutput
+                | Request::MeasureResponse(_)
+                | Request::MakeBlindTest(_)
+                | Request::OpenBlindTest(_)
+        )
+    }
+
     /// Whether an agent can ask for it. Agents can't see a window, or
     /// answer a question in one, so the requests that only show a window
     /// or ask the user for something are the user's, and so is quitting.
@@ -666,7 +717,9 @@ impl Registry {
         if args.is_empty() && !command.when.applies(document.project(), document.editor()) {
             return Err(CommandError::NotNow(id.clone()));
         }
-        run(context, args)
+        let result = run(context, args);
+        context.document.editor_mut().settle_auto_zoom();
+        result
     }
 
     /// Runs `commands` in order, each with its arguments, as one step in

@@ -295,5 +295,6 @@
   "locators": [],
   "automation": [],
   "wires": [],
-  "workspace": null
+  "workspace": null,
+  "view": null
 }

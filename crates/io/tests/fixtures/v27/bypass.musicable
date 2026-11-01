@@ -256,8 +256,6 @@
             "kind": "audio_effect",
             "inputs": [],
             "note_output": false,
-            "note_timing": "with_sound",
-            "note_timing_chosen": false,
             "state": null,
             "params": []
           }
@@ -288,5 +286,6 @@
     }
   ],
   "wires": [],
-  "workspace": null
+  "workspace": null,
+  "view": null
 }

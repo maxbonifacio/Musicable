@@ -1,0 +1,538 @@
+{
+  "format": "musicable-project",
+  "version": 28,
+  "ticks_per_beat": 322560,
+  "tempo": {
+    "tempos": [
+      {
+        "at": 0,
+        "bpm": 120.0
+      }
+    ],
+    "signatures": [
+      {
+        "bar": 0,
+        "numerator": 4,
+        "denominator": 4
+      }
+    ]
+  },
+  "loop_region": {
+    "start": 0,
+    "end": 5160960
+  },
+  "looping": false,
+  "metronome": false,
+  "punch_in": false,
+  "punch_out": false,
+  "next_track_id": 1,
+  "next_send_id": 0,
+  "next_device_id": 0,
+  "next_clip_id": 10,
+  "next_locator_id": 0,
+  "next_take_id": 0,
+  "next_modulator_id": 0,
+  "next_routing_id": 0,
+  "next_wire_id": 0,
+  "tracks": [
+    {
+      "id": 0,
+      "name": "Drums",
+      "kind": "audio",
+      "gain": 1.0,
+      "pan": 0.0,
+      "muted": false,
+      "solo": false,
+      "solo_safe": false,
+      "armed": false,
+      "input": {
+        "audio": {
+          "device": "",
+          "name": "",
+          "channel": 0,
+          "stereo": true
+        }
+      },
+      "monitor": "auto",
+      "always_live": false,
+      "output": null,
+      "sends": [],
+      "tone": null,
+      "clips": [
+        {
+          "id": 0,
+          "name": "Break",
+          "start": 0,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "off",
+                  "envelope": 0.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 1,
+          "name": "Break",
+          "start": 1290240,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "bar",
+                  "transient_loop": "forward",
+                  "envelope": 37.5
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 2,
+          "name": "Break",
+          "start": 2580480,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "1/2",
+                  "transient_loop": "back_and_forth",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 3,
+          "name": "Break",
+          "start": 3870720,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "1/4",
+                  "transient_loop": "off",
+                  "envelope": 0.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 4,
+          "name": "Break",
+          "start": 5160960,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "1/8",
+                  "transient_loop": "forward",
+                  "envelope": 37.5
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 5,
+          "name": "Break",
+          "start": 6451200,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "1/16",
+                  "transient_loop": "back_and_forth",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 6,
+          "name": "Break",
+          "start": 7741440,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "1/32",
+                  "transient_loop": "off",
+                  "envelope": 0.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 7,
+          "name": "Low",
+          "start": 9031680,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 120.0,
+                "transpose": -48,
+                "detune": -50,
+                "slice": {
+                  "preserve": "transients",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 8,
+          "name": "Kept",
+          "start": 10321920,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "re_pitch",
+                "tempo": 120.0,
+                "transpose": 48,
+                "detune": 50,
+                "slice": {
+                  "preserve": "1/16",
+                  "transient_loop": "forward",
+                  "envelope": 100.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": []
+            }
+          }
+        },
+        {
+          "id": 9,
+          "name": "Moving",
+          "start": 11612160,
+          "length": 1290240,
+          "content": {
+            "audio": {
+              "file": "Loops/Break 120 BPM.wav",
+              "offset": 0,
+              "gain": 1.0,
+              "fade_in": 0,
+              "fade_out": 0,
+              "warp": {
+                "mode": "slice",
+                "tempo": 120.0,
+                "transpose": 0,
+                "detune": 0,
+                "slice": {
+                  "preserve": "1/8",
+                  "transient_loop": "off",
+                  "envelope": 50.0
+                },
+                "granular": {
+                  "follow_pitch": true,
+                  "grain_size": 30.0,
+                  "fluctuation": 25.0
+                },
+                "spectral": {
+                  "high_quality": false,
+                  "formants": 100.0,
+                  "envelope": 128.0
+                },
+                "markers": [
+                  [0, 0]
+                ],
+                "onsets": null
+              },
+              "automation": [
+                {
+                  "param": "transpose",
+                  "points": [
+                    [0, -48.0],
+                    [645120, 12.5],
+                    [1290240, 48.0]
+                  ]
+                },
+                {
+                  "param": "detune",
+                  "points": [
+                    [-161280, -50.0],
+                    [322560, 50.0]
+                  ]
+                },
+                {
+                  "param": "transient_envelope",
+                  "points": [
+                    [0, 0.0],
+                    [1290240, 100.0]
+                  ]
+                },
+                {
+                  "param": "preserve",
+                  "points": [
+                    [0, 0.0],
+                    [645120, 0.0],
+                    [645120, 6.0]
+                  ]
+                },
+                {
+                  "param": "transient_loop",
+                  "points": [
+                    [322560, 2.0],
+                    [322560, 1.0],
+                    [967680, 0.0]
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "takes": [],
+      "devices": [],
+      "modulation": {
+        "modulators": [],
+        "routings": []
+      },
+      "clip_type": "off",
+      "console": {}
+    }
+  ],
+  "master": {
+    "gain": 1.0,
+    "pan": 0.0,
+    "devices": [],
+    "modulation": {
+      "modulators": [],
+      "routings": []
+    },
+    "clip_type": "off",
+    "console": {}
+  },
+  "locators": [],
+  "automation": [],
+  "wires": [],
+  "workspace": null,
+  "view": null
+}

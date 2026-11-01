@@ -25,6 +25,7 @@ use egui::{
     CursorIcon, Event, Id, MouseWheelUnit, Pos2, Rect, Response, Role, Sense, Ui, WidgetInfo, pos2,
 };
 use musicable_commands::editor::{Grid, Lane, Viewport};
+use musicable_commands::navigation::{Panel, Record};
 use musicable_commands::{
     Args, CommandId, Editor, Focus, Modifiers, controllers, notes, transport, view as views,
 };
@@ -33,6 +34,7 @@ use musicable_model::clip::{Clip, ClipContent, Controller, MidiClip, Note, NoteI
 use musicable_model::time::{BeatRange, Beats};
 
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
+use crate::navigate::{self, Navigating};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
 use crate::widgets::position;
@@ -55,9 +57,9 @@ pub(crate) struct PianoRoll {
     drag: Option<Drag>,
     /// What the open context menu was opened on.
     menu: Option<Spot>,
-    /// Set when the user scrolls away from the playhead while it plays, so
-    /// Follow doesn't scroll back until the playhead is in sight again.
-    follow_paused: bool,
+    /// The wheel's gesture, the last drag and the playhead, for Follow
+    /// and the view's history.
+    navigating: Navigating,
 }
 
 /// The parts of the piano roll that take the mouse.
@@ -488,7 +490,14 @@ impl Scene<'_> {
     /// What `drag` would do if it ended now.
     fn plan(&self, drag: &Drag) -> Option<Plan> {
         let layout = &self.layout;
-        let moved = layout.viewport.beats_in(drag.to.x - drag.from.x);
+        let (then, now, left) = (drag.viewport, layout.viewport, layout.rows.left());
+        let moved = navigate::moved(drag.from.x, drag.to.x, then, now, left);
+        // Where the drag started, in the view as it is now, which may have
+        // scrolled under it.
+        let from = match drag.area {
+            Area::Rows => navigate::origin(drag.from, then, now, left),
+            _ => drag.from,
+        };
         match (drag.action, drag.hit) {
             (MouseAction::Move | MouseAction::Copy, Hit::Note { note, .. }) => {
                 let grabbed = self.song(self.midi.note(note)?.start);
@@ -500,8 +509,7 @@ impl Scene<'_> {
                     .fold((Note::MAX_KEY, 0), |(low, high), n| {
                         (low.min(n.key), high.max(n.key))
                     });
-                let keys =
-                    i64::from(layout.key_at(drag.to.y)) - i64::from(layout.key_at(drag.from.y));
+                let keys = i64::from(layout.key_at(drag.to.y)) - i64::from(layout.key_at(from.y));
                 Some(Plan::Move {
                     notes: drag.notes.clone(),
                     by,
@@ -541,7 +549,7 @@ impl Scene<'_> {
                 })
             }
             (MouseAction::SelectArea, _) => {
-                let rect = Rect::from_two_pos(drag.from, drag.to);
+                let rect = Rect::from_two_pos(from, drag.to);
                 let notes = self.midi.notes.iter();
                 let inside = notes.filter(|n| self.note_rect(n).intersects(rect));
                 Some(Plan::Area {
@@ -655,7 +663,8 @@ fn send(actions: &mut Vec<Action>, scene: &Scene<'_>, plan: &Plan) {
         }
         Plan::Viewport(viewport) => {
             let roll = &scene.editor().piano_roll;
-            set_viewport(actions, viewport, roll.key_height, roll.height);
+            let record = Record::Gesture;
+            set_viewport(actions, viewport, roll.key_height, roll.height, record);
         }
     }
 }
@@ -682,14 +691,24 @@ fn drawn_value(value: f32, controller: Controller) -> f32 {
     }
 }
 
-fn set_viewport(actions: &mut Vec<Action>, viewport: &Viewport, key_height: f32, height: f32) {
+/// Asks for the piano roll's view to be `viewport` and `key_height`, with
+/// the rows `height` high, counting it in the view's history as `record`
+/// says.
+fn set_viewport(
+    actions: &mut Vec<Action>,
+    viewport: &Viewport,
+    key_height: f32,
+    height: f32,
+    record: Record,
+) {
     let args = Args::new()
         .with("start", viewport.start)
         .with("zoom", viewport.zoom)
         .with("top", viewport.top)
         .with("width", viewport.width)
         .with("height", height)
-        .with("key_height", key_height);
+        .with("key_height", key_height)
+        .with("history", record.name());
     run(actions, views::SET_PIANO_ROLL_VIEWPORT, args);
 }
 
@@ -766,11 +785,21 @@ impl PianoRoll {
         for (response, area) in &responses {
             self.respond(ui, &scene, response, *area, actions);
         }
-        self.wheel(ui, &scene, &mut viewport, &mut key_height);
-        self.follow(&scene, &mut viewport);
+        let wheeled = self.wheel(ui, &scene, &mut viewport, &mut key_height);
+        self.edge_scroll(ui, &scene, &mut viewport, key_height);
+        let (record, force) = self.navigating.frame(
+            ui,
+            &view.playback,
+            editor,
+            Panel::PianoRoll,
+            &mut viewport,
+            (wheeled, self.drag.is_some()),
+        );
         let height = scene.layout.rows.height();
-        if viewport != roll.viewport || key_height != roll.key_height || height != roll.height {
-            set_viewport(actions, &viewport, key_height, height);
+        let changed =
+            viewport != roll.viewport || key_height != roll.key_height || height != roll.height;
+        if changed || force {
+            set_viewport(actions, &viewport, key_height, height, record);
             scene.layout = Layout::new(rect, theme, viewport, key_height);
         }
         scene.free = self.drag.as_ref().is_some_and(|drag| drag.free);
@@ -938,18 +967,25 @@ impl PianoRoll {
         self.drag = Some(drag);
     }
 
-    /// Scrolls and zooms with the wheel, over the piano roll.
-    fn wheel(&mut self, ui: &Ui, scene: &Scene<'_>, viewport: &mut Viewport, key_height: &mut f32) {
+    /// Scrolls and zooms with the wheel, over the piano roll. Returns
+    /// whether it changed the view.
+    fn wheel(
+        &mut self,
+        ui: &Ui,
+        scene: &Scene<'_>,
+        viewport: &mut Viewport,
+        key_height: &mut f32,
+    ) -> bool {
         let layout = &scene.layout;
         let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
-            return;
+            return false;
         };
         let parts = [layout.rows, layout.keys, layout.ruler, layout.lane];
         let Some(&over) = parts
             .iter()
             .find(|rect| rect.contains(pos) && ui.rect_contains_pointer(**rect))
         else {
-            return;
+            return false;
         };
         let target = if over == layout.keys {
             Target::PianoKey
@@ -960,7 +996,7 @@ impl PianoRoll {
         let x = pos.x.clamp(layout.rows.left(), layout.rows.right());
         let at = layout.viewport.beats_at(x - layout.rows.left());
         let mut wheel = Vec::new();
-        let before = *viewport;
+        let (before, height_before) = (*viewport, *key_height);
         ui.input(|i| {
             for event in &i.events {
                 match event {
@@ -994,7 +1030,8 @@ impl PianoRoll {
                     let factor = f64::from(((delta.x + delta.y) * ZOOM_SPEED).exp());
                     viewport.zoom_around(factor, at);
                 }
-                Some(MouseAction::ZoomKeys) => {
+                // Making the rows taller is making the keys taller, here.
+                Some(MouseAction::ZoomKeys | MouseAction::TrackHeight) => {
                     // The key under the pointer stays there.
                     let y = pos.y - layout.rows.top();
                     let (min, max) = (
@@ -1012,25 +1049,35 @@ impl PianoRoll {
         viewport.start = viewport.start.max(Beats::ZERO);
         let lowest = (KEYS * *key_height - layout.rows.height()).max(0.0);
         viewport.top = viewport.top.clamp(0.0, lowest);
-        let sideways = viewport.start != before.start || viewport.zoom != before.zoom;
-        if sideways && scene.view.playback.playing {
-            self.follow_paused = true;
-        }
+        *viewport != before || *key_height != height_before
     }
 
-    /// Scrolls to keep the playhead in sight while it plays, a page at a
-    /// time, if Follow is on, as the arrangement does.
-    fn follow(&mut self, scene: &Scene<'_>, viewport: &mut Viewport) {
-        let playback = scene.view.playback;
-        if !playback.playing || !scene.editor().follow {
-            self.follow_paused = false;
+    /// Scrolls the rows while a drag is held at their edge: sideways for
+    /// the drags that go along the clip, and up and down for those that go
+    /// across keys too.
+    fn edge_scroll(&self, ui: &Ui, scene: &Scene<'_>, viewport: &mut Viewport, key_height: f32) {
+        let Some(drag) = &self.drag else {
             return;
+        };
+        let (sideways, down) = match drag.action {
+            MouseAction::Move
+            | MouseAction::Copy
+            | MouseAction::SelectArea
+            | MouseAction::DrawNotes => (true, drag.area == Area::Rows),
+            MouseAction::Trim
+            | MouseAction::TrimFree
+            | MouseAction::DrawController
+            | MouseAction::EraseController => (true, false),
+            _ => (false, false),
+        };
+        let rows = scene.layout.rows;
+        if sideways {
+            navigate::edge_scroll_sideways(ui, rows, Some(drag.from.x), drag.to.x, viewport);
         }
-        let in_sight = viewport.visible().contains(playback.playhead);
-        if self.follow_paused {
-            self.follow_paused = !in_sight;
-        } else if self.drag.is_none() {
-            viewport.follow(playback.playhead);
+        if down {
+            let lowest = (KEYS * key_height - rows.height()).max(0.0);
+            let (from, top) = (Some(drag.from.y), &mut viewport.top);
+            navigate::edge_scroll_down(ui, rows, from, drag.to.y, top, lowest);
         }
     }
 
@@ -1159,8 +1206,20 @@ fn drag_stopped(scene: &Scene<'_>, drag: &Drag, actions: &mut Vec<Action>) {
         // Moving nowhere does nothing.
         Plan::Move { by, keys, .. } if *by == Beats::ZERO && *keys == 0 => {}
         Plan::Draw { notes } if notes.is_empty() => {}
-        // These were asked for as the drag went.
-        Plan::Area { .. } | Plan::Viewport(_) => {
+        // The view was asked for as the drag went: its end makes the drag
+        // one step of the view's history.
+        Plan::Viewport(viewport) => {
+            let roll = &scene.editor().piano_roll;
+            set_viewport(
+                actions,
+                viewport,
+                roll.key_height,
+                roll.height,
+                Record::Step,
+            );
+        }
+        // This was asked for as the drag went.
+        Plan::Area { .. } => {
             if drag.sent.as_ref().map(sent_as) != Some(sent_as(&plan)) {
                 send(actions, scene, &plan);
             }
@@ -1225,6 +1284,14 @@ fn clicked(
         (MouseAction::Locate, Hit::Ruler) => {
             let at = scene.snapped(pos.x);
             run(actions, transport::LOCATE, Args::new().with("at", at));
+        }
+        // The selected notes, or with none selected the whole clip.
+        (MouseAction::ZoomToFit, Hit::Ruler) => {
+            let zoom = match selected.is_empty() {
+                true => views::FIT_SONG_WIDTH,
+                false => views::ZOOM_TO_SELECTION,
+            };
+            actions.push(Action::Run(zoom));
         }
         // A step of the curve, as a drag that goes nowhere draws.
         (MouseAction::DrawController | MouseAction::EraseController, Hit::Controller) => {

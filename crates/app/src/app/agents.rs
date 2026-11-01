@@ -200,8 +200,11 @@ impl App {
             return;
         }
         self.handle_requests(ctx, frame);
-        // The plugins' parameters, as of now.
+        // The plugins' parameters, and the meters and CPU figures, as of now:
+        // the frame before can be long ago while the window is behind
+        // others.
         self.update_plugin_status();
+        self.take_readings_for_agents();
         for call in calls {
             let mut agent = Agent {
                 app: self,
@@ -246,7 +249,7 @@ impl App {
                 let ran = result.is_ok();
                 let mut reply = Some(reply);
                 for request in self.session.take_requests() {
-                    if answers(&request) {
+                    if request.answers() {
                         if let Some(reply) = reply.take() {
                             self.answer_request(request, reply, ctx, frame);
                         }
@@ -267,7 +270,7 @@ impl App {
                 // Commands that run alone, as those that ask for files or
                 // change settings do, can't be part of a batch.
                 for request in self.session.take_requests() {
-                    if request.for_agents() && !answers(&request) {
+                    if request.for_agents() && !request.answers() {
                         self.carry_out(request, ctx, frame);
                     }
                 }
@@ -881,34 +884,6 @@ impl musicable_mcp::Window for Agent<'_> {
             Err(why) => reply.failed(why),
         });
     }
-}
-
-/// Whether the app answers the agent whose command made `request`, rather
-/// than the command: it's for a file, one an agent's command gives, where
-/// the user's would ask for one, or it changes a setting, which says what
-/// it was.
-fn answers(request: &Request) -> bool {
-    matches!(
-        request,
-        Request::New
-            | Request::NewDemo
-            | Request::Open(_)
-            | Request::Save
-            | Request::SaveAs(_)
-            | Request::ImportAudio { .. }
-            | Request::ExportAudio { .. }
-            | Request::SetSetting { .. }
-            | Request::SetAudioDevice(_)
-            | Request::SetKeys { .. }
-            | Request::ResetKeys(_)
-            | Request::SaveWorkspaceAs(_)
-            | Request::RenameWorkspace(_)
-            | Request::RecordOutput(_)
-            | Request::StopRecordingOutput
-            | Request::MeasureResponse(_)
-            | Request::MakeBlindTest(_)
-            | Request::OpenBlindTest(_)
-    )
 }
 
 /// The first path in `request` that isn't a full one, if there's one:
