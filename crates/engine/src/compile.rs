@@ -1259,15 +1259,22 @@ fn modulate(
     }
     // But for notes made as something rendered that the modulators move,
     // directly or along the way: they'd have to move it before it made
-    // them, so they don't hear those.
-    for (&chain, notes) in instrument_notes {
-        if let Some(node) = node_of(chain) {
-            for &notes in notes {
-                match graph.send_notes(notes, node) {
-                    Ok(()) | Err(GraphError::Cycle) => {}
-                    Err(e) => panic!("notes go from the channels to their nodes: {e}"),
-                }
-            }
+    // them, so they don't hear those, nor anything else that comes the
+    // same way (`Project::unheard_notes`). Each way is judged against the
+    // graph before any of them joins it, in channel order, so it's the
+    // same whatever order they come in.
+    let mut heard: Vec<(Chain, NodeId, NodeId)> = (instrument_notes.iter())
+        .filter_map(|(&chain, notes)| Some((chain, notes, node_of(chain)?)))
+        .flat_map(|(chain, notes, node)| notes.iter().map(move |&notes| (chain, notes, node)))
+        .collect();
+    heard.sort_unstable();
+    heard.retain(|&(_, notes, node)| !graph.notes_would_loop(notes, node));
+    for (_, notes, node) in heard {
+        match graph.send_notes(notes, node) {
+            // Two channels' modulators each moving what makes the notes
+            // the other's hear.
+            Ok(()) | Err(GraphError::Cycle) => {}
+            Err(e) => panic!("notes go from the channels to their nodes: {e}"),
         }
     }
 }
@@ -2864,14 +2871,88 @@ mod tests {
             meters.output(Output::new(id, 0)).unwrap().get() > 0.0
         };
         assert!(opened(&p));
+        assert_eq!(p.unheard_notes(), []);
         // It hears them moving the instrument they play.
         let plays = p.new_routing(Output::new(id, 0), ParamAddress::Device(synth_id, 3), 0.5);
         p.master.modulation.routings.push(plays);
         assert!(opened(&p));
+        assert_eq!(p.unheard_notes(), []);
         // Moving the instrument that makes them, it can't: it would have to
-        // move it before it made them.
+        // move it before it made them. The project says so too.
         p.master.modulation.routings = vec![routing];
         assert!(!opened(&p));
+        let unheard = musicable_model::routing::UnheardNotes {
+            chain: Chain::Master,
+            wire: Some(wire.id),
+            maker: echo,
+        };
+        assert_eq!(p.unheard_notes(), [unheard]);
+        // Nor what it moves before it, the Keys' track's fader aside.
+        let keys = p.tracks[0].id;
+        let compressor = DeviceKind::Native(NativeDevice::new(NativeKind::Compressor));
+        let before = p.new_device(compressor);
+        let before_id = before.id;
+        p.track_mut(keys).unwrap().devices.insert(0, before);
+        let threshold = ParamAddress::Device(before_id, compressor::THRESHOLD as u32);
+        let routing = p.new_routing(Output::new(id, 0), threshold, 0.5);
+        p.master.modulation.routings = vec![routing];
+        assert!(!opened(&p));
+        assert_eq!(p.unheard_notes(), [unheard]);
+        let fader = ParamAddress::Volume(Chain::Track(keys));
+        p.master.modulation.routings = vec![p.new_routing(Output::new(id, 0), fader, 0.5)];
+        assert!(opened(&p));
+        assert_eq!(p.unheard_notes(), []);
+    }
+
+    #[test]
+    fn modulators_dont_hear_a_way_that_brings_notes_made_by_what_they_move() {
+        // The Keys' instrument plays out notes, which a MIDI track with a
+        // clip of its own takes as its input, and wires on to an instrument
+        // on the master, whose Envelope hears them.
+        let mut p = note_through(vec![echoing()]);
+        let echo = p.tracks[0].devices[0].id;
+        let double = p.add_track("Double", TrackKind::Midi);
+        let mut notes = musicable_model::clip::MidiClip::default();
+        notes.add_note(Beats::ZERO, Beats::new(1), 72, 1.0);
+        let range = BeatRange::new(Beats::ZERO, Beats::new(1));
+        let clip = p.new_clip("Own", range, ClipContent::Midi(notes));
+        let t = p.track_mut(double).unwrap();
+        t.input = Some(musicable_model::Input::Tap(Tap::Device(echo)));
+        t.clips.push(clip);
+        let synth = p.new_device(plugin(true));
+        let synth_id = synth.id;
+        p.master.devices.push(synth);
+        let wire = p.new_wire(Tap::PostFx(Chain::Track(double)), Port::Notes(synth_id));
+        p.wires.push(wire);
+        let envelope = p.new_modulator(ModulatorKind::Envelope, "Envelope 1");
+        let id = envelope.id;
+        p.master.modulation.modulators.push(envelope);
+        let moves_echo = p.new_routing(Output::new(id, 0), ParamAddress::Device(echo, 3), 0.5);
+        p.master.modulation.routings.push(moves_echo);
+        let devices = || {
+            let mut devices = Devices::new();
+            devices.insert(echo, Echoes::new(12));
+            devices.insert(synth_id, Arc::new(Arc::new(Parts::default())));
+            devices
+        };
+        let graph = compile_with_devices(&p, &Meters::new(), &Media::new(), &devices());
+        let (from, to) = (
+            graph.find(keys::wire(wire.id)),
+            graph.find(keys::modulation(Chain::Master)),
+        );
+        assert!(!graph.sends_notes(from.unwrap(), to.unwrap()));
+        let unheard = musicable_model::routing::UnheardNotes {
+            chain: Chain::Master,
+            wire: Some(wire.id),
+            maker: echo,
+        };
+        assert_eq!(p.unheard_notes(), [unheard]);
+        // An Envelope that notes don't gate hears nothing to miss.
+        let never = musicable_model::modulation::NoteTrigger::Never;
+        let trigger = envelope::NOTE_TRIGGER as u32;
+        let modulator = p.modulator_mut(id).unwrap();
+        modulator.set(trigger, never as u8 as f64).unwrap();
+        assert_eq!(p.unheard_notes(), []);
     }
 
     #[test]

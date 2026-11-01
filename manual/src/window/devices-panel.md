@@ -120,6 +120,11 @@ panel or the mixer, to have the modulator move it, and the control shows how
 far its modulators take it
 ([Modulation](../using/modulation.md#the-modulator-strip)).
 
+On a group or the master, a line under the channel's name, in the warning
+colour, says which notes its modulators can't hear: those a plugin they
+move plays out, and whatever comes with them
+([Notes and triggers](../using/modulation.md#notes-and-triggers)).
+
 ## Built-in devices
 
 A built-in device has its name and its controls, which [Using the

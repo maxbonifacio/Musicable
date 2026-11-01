@@ -1337,7 +1337,12 @@ plays them in the same block, never one late.
   that would close one through made notes. The project's flow catches
   the sound and the notes before then, but not modulation, so the
   compiler has a group's or the master's modulators skip the notes made
-  by a plugin they move, or by one before it.
+  by a plugin they move, or by one before it: it leaves out the whole way
+  they'd come, a note wire's or a track's own notes. It judges each way
+  against the graph before any joins it, in channel order, so the same
+  project always leaves out the same ones. `Project::unheard_notes` finds
+  them in the project, point by point, for the devices panel's warning
+  and agents, and a compile test holds the two to each other.
 - The compiler routes a plugin's made notes from the point after it
   (`Tap::Device`) to a MIDI track's input, a note wire or a note record,
   as it routes what a MIDI effect plays. A node hears that its notes go

@@ -291,7 +291,9 @@ fn master(project: &Project) -> Json {
 
 /// A channel's modulators and routings, if it has any: each modulator's
 /// id, name and kind, and each routing's settings, with the names the
-/// modulation commands give them.
+/// modulation commands give them, and the ways notes come that its
+/// modulators can't hear (`Project::unheard_notes`), by the note wire and
+/// the plugin that makes them.
 fn add_modulation(entry: &mut Json, project: &Project, chain: Chain, modulation: &Modulation) {
     if modulation.is_empty() {
         return;
@@ -334,6 +336,14 @@ fn add_modulation(entry: &mut Json, project: &Project, chain: Chain, modulation:
         .collect();
     entry["modulators"] = modulators.into();
     entry["routings"] = routings.into();
+    // The ways notes come that the modulators can't hear, as they're made
+    // after something the modulators move.
+    let unheard: Vec<Json> = (project.unheard_notes_of(chain).into_iter())
+        .map(|unheard| json!({ "wire": unheard.wire.map(|w| w.0), "maker": unheard.maker.0 }))
+        .collect();
+    if !unheard.is_empty() {
+        entry["unheard_notes"] = unheard.into();
+    }
 }
 
 fn clip_type(clip_type: ClipType) -> &'static str {

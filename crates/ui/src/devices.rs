@@ -19,6 +19,7 @@ use musicable_commands::{Args, CommandId, device, edit};
 use musicable_model::native::NativeKind;
 use musicable_model::param::ParamSpec;
 use musicable_model::plugin::PluginKind;
+use musicable_model::routing::UnheardNotes;
 use musicable_model::{Chain, Device, DeviceId, DeviceKind, PluginFormat, Project};
 
 use crate::browser::{self, Destination, Dragged};
@@ -171,6 +172,14 @@ impl DevicesPanel {
             });
         });
         ui.add_space(theme.devices.margin);
+        if let Some(chain) = chain {
+            for unheard in project.unheard_notes_of(chain) {
+                let text = RichText::new(unheard_text(project, unheard))
+                    .size(theme.small_text)
+                    .color(theme.warning);
+                ui.add(Label::new(text).wrap());
+            }
+        }
         self.boxes.clear();
         self.sight = None;
         let shown = chain.and_then(|chain| Some((chain, project.devices(chain)?)));
@@ -1124,6 +1133,26 @@ pub(crate) fn onto(args: Args, chain: Option<Chain>) -> Args {
     }
 }
 
+/// What the devices panel says of notes a channel's modulators don't hear
+/// ([`Project::unheard_notes`]).
+fn unheard_text(project: &Project, unheard: UnheardNotes) -> String {
+    let maker = project
+        .find_device(unheard.maker)
+        .map_or("A plugin", |(_, _, device)| device.kind.name());
+    let from = unheard
+        .wire
+        .and_then(|id| project.wires.iter().find(|w| w.id == id))
+        .and_then(|wire| project.tap_name(wire.from));
+    let notes = match from {
+        Some(tap) => format!("the notes from {tap}"),
+        None => "the notes from this track's input".to_owned(),
+    };
+    format!(
+        "The modulators don't hear {notes}: {maker} plays them out, and they move it, or \
+         something before it."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use egui::accesskit::Toggled;
@@ -1327,6 +1356,48 @@ mod tests {
         click(&mut harness, "Add Device...");
         harness.get_by_label("Plugins");
         assert!(actions(&mut harness).is_empty());
+    }
+
+    #[test]
+    fn the_panel_says_which_notes_the_modulators_cant_hear() {
+        // The Keys' synth plays out notes, which a note wire plays on the
+        // master's synth, and the master's Envelope, which hears what that
+        // plays, moves the Keys' synth.
+        let mut project = Project::new();
+        let keys = project.add_track("Keys", TrackKind::Midi);
+        let mut echo = plugin(&mut project, "Echo", PluginKind::Instrument);
+        if let DeviceKind::Plugin(plugin) = &mut echo.kind {
+            plugin.note_output = true;
+        }
+        let master_synth =
+            project.new_device(DeviceKind::Native(NativeDevice::new(NativeKind::Synth)));
+        let wire = project.new_wire(Tap::Device(echo.id), Port::Notes(master_synth.id));
+        project.wires.push(wire);
+        let envelope = project.new_modulator(
+            musicable_model::modulation::ModulatorKind::Envelope,
+            "Envelope 1",
+        );
+        let output = musicable_model::modulation::Output::new(envelope.id, 0);
+        let moves = project.new_routing(
+            output,
+            musicable_model::param::ParamAddress::Device(echo.id, 3),
+            0.5,
+        );
+        project.master.modulation.modulators.push(envelope);
+        project.master.modulation.routings.push(moves);
+        project.track_mut(keys).unwrap().devices.push(echo);
+        project.master.devices.push(master_synth);
+        let mut harness = harness(project);
+        harness.state_mut().editor.selected_track = Some(Chain::Master);
+        harness.run();
+        harness.get_by_label(
+            "The modulators don't hear the notes from Keys after Echo: Echo plays them out, and \
+             they move it, or something before it.",
+        );
+        // The Keys' own devices say nothing of it.
+        harness.state_mut().editor.selected_track = Some(Chain::Track(keys));
+        harness.run();
+        assert!(harness.query_by_label_contains("don't hear").is_none());
     }
 
     #[test]

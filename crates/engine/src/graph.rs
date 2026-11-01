@@ -308,6 +308,13 @@ impl Graph {
         Ok(())
     }
 
+    /// Whether the notes `from` plays go to `to`, to its main input for
+    /// notes or its side one.
+    #[cfg(test)]
+    pub(crate) fn sends_notes(&self, from: NodeId, to: NodeId) -> bool {
+        (self.note_routes.iter()).any(|&(f, t, _)| (f, t) == (from, to))
+    }
+
     /// Whether sending the notes `from` plays to `to`
     /// ([`send_notes`](Graph::send_notes)) would close a loop, which it
     /// refuses.

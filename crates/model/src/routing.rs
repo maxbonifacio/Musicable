@@ -32,6 +32,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+mod unheard;
+
+pub use unheard::UnheardNotes;
+
 use crate::mixer::Bus;
 use crate::native::NativeKind;
 use crate::{Chain, DeviceId, DeviceKind, Input, Project, TrackId, TrackKind, next_id};

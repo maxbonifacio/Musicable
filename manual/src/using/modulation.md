@@ -137,6 +137,15 @@ their **Note Trigger** says:
   its Trigger, or an Envelope's Gate Level. Then as Never, so that routing
   has it to itself.
 
+A group's or the master's modulators hear the notes a MIDI To or a note
+wire plays on the instrument there. They can't hear notes a plugin plays
+out if they move that plugin, or anything before it on its track: they'd
+have to move it before it made them. That goes for everything else coming
+the same way, so a note wire that carries any such notes brings them
+nothing at all, not even the other notes on it. The devices panel says so
+under the channel's name, in the warning colour, while an LFO or an
+Envelope there would hear notes.
+
 ## The LFO
 
 {{#include ../generated/modulators/lfo.md}}

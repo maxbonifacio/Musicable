@@ -195,7 +195,8 @@ pub fn list() -> Vec<Tool> {
             "Get Project",
             "Reads the project: its file, the tempo map and time signatures, the loop, the \
              tracks with their mixer settings, devices and clips, and their modulators and \
-             routings if they have any, the master, the wires, each taking a tap's signal into a \
+             routings if they have any, with the note wires whose notes the modulators can't \
+             hear, as a plugin they move makes them, in unheard_notes, the master, the wires, each taking a tap's signal into a \
              device's side input at a gain, or a MIDI track's notes into an instrument's or a \
              MIDI effect's note input, on a MIDI channel from 0 to 15 if it has one, the \
              locators, and which parameters are automated, each with its id. A wire's tap and \
