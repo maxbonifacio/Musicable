@@ -482,13 +482,15 @@ ruler = 3
                 "\"Click\" under [clip_title] keeps its action: there's no action called \
                  \"teleport\"",
                 "\"Ctrl+Fling\" under [clip_title] is left out: there's no gesture called \
-                 \"Fling\" (they are Click, Double-click, Drag and Wheel)",
+                 \"Fling\" (they are Click, Double-click, Drag, Wheel, Middle-drag and \
+                 Right-drag)",
                 "\"Drag\" under [clip_title] keeps its action: it should be given the name of \
                  one, or \"none\"",
                 "\"Hyper+Drag\" under [clip_title] is left out: \"Hyper\" isn't a modifier (they \
                  are Ctrl, Alt, Shift and Cmd)",
                 "\"Shift+Drag\" under [clip_title] keeps its action: it can't \"fade\" there, \
-                 only \"move\", \"copy\", \"move_free\" or \"select_time\"",
+                 only \"move\", \"copy\", \"move_free\", \"select_time\", \"pan\" or \
+                 \"zoom_to_area\"",
                 "ruler should be a table of gestures, such as [ruler] with \"Drag\" = \
                  \"move\" under it, so it's left out",
                 "\"Alt+Drag\" is under [clip_title] more than once, so it keeps its action",

@@ -490,10 +490,23 @@ pub(crate) fn drag_pressing<S>(
     first: egui::Modifiers,
     then: egui::Modifiers,
 ) {
+    drag_with(harness, egui::PointerButton::Primary, from, to, first, then);
+}
+
+/// Drags with `button` from `from` to `to`, with `first` held, then `then`
+/// part of the way through.
+pub(crate) fn drag_with<S>(
+    harness: &mut Harness<'_, S>,
+    button: egui::PointerButton,
+    from: Pos2,
+    to: Pos2,
+    first: egui::Modifiers,
+    then: egui::Modifiers,
+) {
     let press = |harness: &mut Harness<'_, S>, pos, pressed, modifiers| {
         harness.event(Event::PointerButton {
             pos,
-            button: egui::PointerButton::Primary,
+            button,
             pressed,
             modifiers,
         });

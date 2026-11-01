@@ -104,6 +104,8 @@ changes it ([The mouse](../customising/mouse.md)):
 | Solo, in a header or a strip | Click; Ctrl-click | Solos the track alone; along with the others |
 | Anywhere | Wheel; Shift-wheel; Ctrl-wheel | Scrolls up and down; sideways; zooms around the pointer |
 | | Alt-wheel | Makes the track under the pointer taller or shorter, or the selected tracks, if it's one of them |
+| The lanes, the headers or the ruler | Middle-drag | Pans: scrolls along and up and down with the pointer, as in Bitwig, FL Studio and REAPER |
+| A lane, a clip or an automation lane | Ctrl+Alt-drag | Pans, as in Live |
 
 Modifiers count while a drag goes, not only as it starts. **Alt** keeps
 any drag that snaps to the grid off it while it's held, from whenever it's
@@ -200,6 +202,13 @@ keys at first, since Alt and the numbers switch workspaces, but you can
 give them some. **View > Zoom to Locators** shows the stretch between the
 locator at or before the playhead and the next one, from the song's start
 before the first locator, or to its end after the last.
+
+**Zoom to Area**, which nothing does at first, zooms to the time a box
+dragged out spans and scrolls down to its top; give it a gesture on the
+Mouse page ([The mouse](../customising/mouse.md)), such as a right-drag,
+Ctrl and a right-drag as in FL Studio, or Alt+Shift and a drag as in
+Studio Pro. Panning and zooming to a box are each a step that X goes
+back over.
 
 Each view keeps its own history of where it's been, up to 32 steps back. A
 gesture is one step: a burst of the wheel, a drag of the ruler or the

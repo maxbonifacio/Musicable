@@ -21,7 +21,7 @@ use musicable_model::{DeviceKind, LocatorId, PluginFormat, Project, TakeId, Trac
 
 use super::*;
 use crate::shell::{Audio, KeymapStatus, Playback};
-use crate::testing::{Player, drag_pressing};
+use crate::testing::{Player, drag_pressing, drag_with};
 use crate::{Levels, Live, Plugins, Waveforms};
 
 struct State {
@@ -2434,5 +2434,66 @@ fn the_heights_menus_size_tracks_fit_the_selected_and_auto_zoom() {
         editor.track_heights.get(&Chain::Track(ids.keys)),
         Some(&24.0)
     );
+    assert!(harness.state().errors.is_empty());
+}
+
+#[test]
+fn the_middle_button_and_ctrl_alt_pan_and_a_box_zooms_to_its_time() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    // Scrolled along first, so panning back has room.
+    harness.state_mut().document.editor_mut().viewport.start = Beats::new(32);
+    harness.run();
+    let before = harness.state().editor().viewport;
+    let from = in_lane(&harness, "Keys", 40.0);
+    let to = from + vec2(width(&harness, 8.0), 0.0);
+    drag_with(
+        &mut harness,
+        PointerButton::Middle,
+        from,
+        to,
+        Modifiers::NONE,
+        Modifiers::NONE,
+    );
+    let viewport = harness.state().editor().viewport;
+    let moved = (before.start - viewport.start).to_f64();
+    assert!((moved - 8.0).abs() < 0.1, "{moved}");
+    assert_eq!(viewport.zoom, before.zoom);
+    assert_eq!(harness.state().editor().navigation.arrangement.len(), 1);
+    // Nothing was selected or moved on the way.
+    assert!(harness.state().editor().selection.time.is_none());
+    // Ctrl+Alt-dragging pans too, as in Live.
+    let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+    let from = in_lane(&harness, "Keys", 40.0);
+    let to = from - vec2(width(&harness, 4.0), 0.0);
+    drag_pressing(&mut harness, from, to, ctrl_alt, ctrl_alt);
+    let panned = harness.state().editor().viewport;
+    assert!(((panned.start - viewport.start).to_f64() - 4.0).abs() < 0.1);
+    assert_eq!(harness.state().editor().navigation.arrangement.len(), 2);
+
+    // Zoom to Area is unbound in Live's mouse: bound, a box dragged out
+    // shows its time across.
+    harness.state_mut().mouse.bind(
+        Target::Lane,
+        Gesture::RightDrag,
+        musicable_commands::Modifiers::NONE,
+        MouseAction::ZoomToArea,
+    );
+    let from = in_lane(&harness, "Keys", 40.0);
+    let to = in_lane(&harness, "Keys", 44.0);
+    drag_with(
+        &mut harness,
+        PointerButton::Secondary,
+        from,
+        to,
+        Modifiers::NONE,
+        Modifiers::NONE,
+    );
+    let visible = harness.state().editor().viewport.visible();
+    assert!(
+        visible.start <= Beats::new(40) && Beats::new(44) <= visible.end,
+        "{visible:?}"
+    );
+    assert!(visible.len() < Beats::new(6), "{visible:?}");
     assert!(harness.state().errors.is_empty());
 }

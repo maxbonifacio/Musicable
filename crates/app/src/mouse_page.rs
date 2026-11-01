@@ -336,6 +336,16 @@ fn file_section(ui: &mut Ui, map: &MouseMap, live: &MouseMap, file: &UserMouse) 
         if reset.clicked() {
             asked = Some(Asked::Reset);
         }
+        let reaper = MouseMap::reaper_navigation();
+        let use_reaper = ui
+            .add_enabled(*map != reaper, Button::new("REAPER Navigation"))
+            .on_hover_text(
+                "Gets around as REAPER does: the wheel zooms, Ctrl and the wheel scroll up and \
+                 down, Shift and the wheel scroll along, and a middle-button drag pans",
+            );
+        if use_reaper.clicked() {
+            asked = Some(Asked::Map(reaper));
+        }
         if let Some(path) = file.path() {
             if path.exists() {
                 let reload = ui
