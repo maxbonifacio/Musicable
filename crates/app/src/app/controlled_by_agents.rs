@@ -1270,6 +1270,13 @@ fn agents_record_what_the_device_plays_with_a_timeline() {
     // What the device plays, as the engine hands it over, with a change of
     // volume in between.
     window.state_mut().output.play_idle(512);
+    // The renderer's threads render the next 512 frames ahead in the
+    // background: the volume waits for those once they're rendered.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while window.state().session.stats().rendered < 1024 {
+        assert!(Instant::now() < deadline, "the engine didn't render ahead");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     run(
         &mut window,
         "mixer.set_volume",
