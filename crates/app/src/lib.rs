@@ -28,6 +28,7 @@ pub mod null_test;
 mod output;
 mod output_recorder;
 mod performance;
+mod playhead;
 mod plugin_scan;
 mod plugin_windows;
 mod plugins;

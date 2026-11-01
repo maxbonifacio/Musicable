@@ -151,7 +151,7 @@ four on the piano roll and the Sample Editor while they have it:
 |---|---|
 | W | Fit Song Width: shows the whole song across, from its start to the end of its last clip, locator, automation point or loop, or 16 bars of an empty song. In the piano roll and the Sample Editor, the whole clip |
 | X, Shift+X | Zoom Back and Zoom Forward: back to the view before the last change of zoom or scrolling, and forward again |
-| Ctrl+Shift+F | Follow, on or off |
+| Ctrl+Shift+F | Follow, on or off, in the panel with the focus |
 | Home, End | Go to Start and Go to End of the song, scrolling there if it's out of sight |
 | H | Fit Track Heights: makes the tracks share the arrangement's height, as far as they can. If they can't all fit at the smallest size, it says how many are in sight |
 | Alt+Equals, Alt+Minus | Make Tracks Taller and Shorter: the selected tracks, or the selected track, a size at a time, through 24, 60, 120 and 200 points |
@@ -163,10 +163,22 @@ does nothing the second time, and X after W goes back to where you were.
 Scroll to Playhead and Reset Track Height are in the View and Track menus,
 and in the command palette.
 
-While the transport plays, **Follow** turns the page when the playhead
-leaves the view. Scrolling, zooming or jumping away while it plays pauses
-it in that view until the playhead plays into sight again, or Play starts
-again; a drag or the wheel holds it while they go on.
+While the transport plays, **Follow** keeps the playhead in sight. It
+turns a page when the playhead leaves the view, or, with Continuous Follow
+on the Behaviour page ([Settings](../customising/settings.md#behaviour)),
+keeps the playhead still a third of the way in, or in the middle, and
+moves the song under it. **Switch Follow Mode**, in the View menu, switches
+between the two. The arrangement, the piano roll and the Sample Editor
+each have their own Follow switch, Ctrl+Shift+F in the one with the
+focus, and share the mode.
+
+Scrolling, zooming or jumping away while the song plays pauses Follow in
+that view: a page at a time, until the playhead plays into sight again;
+continuously, until it plays up to its place from the left of it, so the
+view never jumps. Play from stopped, Scroll to Playhead and turning Follow
+on follow again at once. A drag or the wheel holds the view while they go
+on, and in Continuous mode a drag let go of leaves Follow paused, since
+the playhead moved on meanwhile. Stop never moves the view.
 
 ## Audio files
 

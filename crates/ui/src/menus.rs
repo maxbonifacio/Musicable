@@ -201,6 +201,7 @@ const LAST_MENUS: [MenuSpec; 5] = [
             Some(view::ZOOM_BACK),
             Some(view::ZOOM_FORWARD),
             Some(view::TOGGLE_FOLLOW),
+            Some(view::SWITCH_FOLLOW_MODE),
             Some(view::SCROLL_TO_PLAYHEAD),
             Some(view::TOGGLE_TAKE_LANES),
             None,

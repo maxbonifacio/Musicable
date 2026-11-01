@@ -367,6 +367,9 @@ pub enum Request {
     CommandPalette,
     /// Tell the user this, in the status bar.
     Notice(String),
+    /// Keep the editor's behaviour, which a command changed, in the
+    /// profile's settings.
+    SaveBehaviour,
     /// Show the Settings window, at the page it showed last.
     Settings,
     /// Show the Settings window's Audio page.

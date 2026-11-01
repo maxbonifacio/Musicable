@@ -49,11 +49,25 @@ fn new_chords(count: usize) -> Vec<KeyChord> {
     let defaults = Keymap::default_keymap();
     let letters = ('A'..='Z').map(|letter| format!("Ctrl+Alt+Shift+{letter}"));
     let digits = (0..=9).map(|n| format!("Ctrl+Alt+Shift+{n}"));
+    let marks = [
+        "Minus",
+        "Equals",
+        "OpenBracket",
+        "CloseBracket",
+        "Backslash",
+        "Semicolon",
+        "Quote",
+        "Comma",
+        "Period",
+        "Slash",
+    ]
+    .map(|mark| format!("Ctrl+Alt+Shift+{mark}"));
     let functions = ["Ctrl+Alt+Shift", "Ctrl+Shift", "Alt+Shift", "Ctrl+Alt"]
         .into_iter()
         .flat_map(|mods| (1..=24).map(move |n| format!("{mods}+F{n}")));
     let chords: Vec<_> = letters
         .chain(digits)
+        .chain(marks)
         .chain(functions)
         .map(|text| chord(&text))
         .filter(|&chord| defaults.lookup(chord).is_none())

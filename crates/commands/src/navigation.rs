@@ -61,11 +61,15 @@ pub enum Record {
     /// reaches the edge, or the view keeping within the song: neither the
     /// history nor Follow takes it as navigating.
     None,
+    /// A drag ended while Continuous Follow held the view still: the
+    /// playhead has moved from its place, so Follow waits rather than jump
+    /// to it, and the history is left alone.
+    Suspend,
 }
 
 impl Record {
     /// Their names, as the view commands' `history` argument takes them.
-    pub const NAMES: &'static [&'static str] = &["step", "gesture", "follow", "none"];
+    pub const NAMES: &'static [&'static str] = &["step", "gesture", "follow", "none", "suspend"];
 
     /// The way of counting `name` names.
     pub fn from_name(name: &str) -> Option<Self> {
@@ -74,6 +78,7 @@ impl Record {
             "gesture" => Record::Gesture,
             "follow" => Record::Follow,
             "none" => Record::None,
+            "suspend" => Record::Suspend,
             _ => return None,
         })
     }
@@ -84,6 +89,7 @@ impl Record {
             Record::Gesture => "gesture",
             Record::Follow => "follow",
             Record::None => "none",
+            Record::Suspend => "suspend",
         }
     }
 }
@@ -105,7 +111,7 @@ pub struct Place {
 }
 
 /// A panel's history of views, and its Follow state.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct History {
     /// The views to go back to, the latest last.
     back: Vec<Place>,
@@ -113,9 +119,24 @@ pub struct History {
     forward: Vec<Place>,
     /// The view from before the gesture going on, if one is.
     pending: Option<Place>,
+    /// Whether Follow is on in the panel: each has its own switch, as in
+    /// Bitwig, and they share the mode.
+    pub follow: bool,
     /// Whether the user navigated away from the playhead while the song
     /// played, so Follow leaves the view alone.
     pub suspended: bool,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            back: Vec::new(),
+            forward: Vec::new(),
+            pending: None,
+            follow: true,
+            suspended: false,
+        }
+    }
 }
 
 impl History {
@@ -270,6 +291,11 @@ pub fn song_end(project: &Project) -> Beats {
 }
 
 impl Editor {
+    /// Whether Follow is on in `panel`.
+    pub fn follows(&self, panel: Panel) -> bool {
+        self.navigation.of(panel).follow
+    }
+
     /// The view of `panel` now.
     pub fn place(&self, panel: Panel) -> Place {
         let (viewport, heights, key_height) = match panel {
@@ -360,6 +386,7 @@ impl Editor {
             }
             Record::Follow => history.suspended = false,
             Record::None => {}
+            Record::Suspend => history.suspended |= playing,
         }
         changed
     }

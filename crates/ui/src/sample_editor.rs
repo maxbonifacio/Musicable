@@ -33,7 +33,7 @@ use egui::{
     RichText, Role, ScrollArea, Sense, Ui, UiBuilder, WidgetInfo, pos2,
 };
 use musicable_commands::editor::{Grid, Viewport};
-use musicable_commands::navigation::Record;
+use musicable_commands::navigation::{Panel, Record};
 use musicable_commands::{
     Args, CommandId, Editor, Focus, Modifiers, auto_warp, automation, transient, transport,
     view as views, warp, warp_mode,
@@ -51,7 +51,7 @@ use musicable_model::warp::{
 use crate::arrangement::{distance_to_segment, simplified};
 use crate::mixer::{decibels, name_menu};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
-use crate::navigate::{self, Wheeling};
+use crate::navigate::{self, Navigating};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
 use crate::waveform::Peaks;
@@ -69,8 +69,9 @@ const GAIN_FLOOR: f64 = -70.0;
 #[derive(Debug, Default)]
 pub(crate) struct SampleEditor {
     drag: Option<Drag>,
-    /// The wheel's gesture, while it lasts.
-    wheeling: Wheeling,
+    /// The wheel's gesture, the last drag and the playhead, for Follow
+    /// and the view's history.
+    navigating: Navigating,
     /// Where the context menu that's open was opened.
     menu: Option<Spot>,
 }
@@ -1078,14 +1079,14 @@ impl SampleEditor {
         }
         let wheeled = self.wheel(ui, &scene, &mut viewport);
         self.edge_scroll(ui, &scene, &mut viewport);
-        let followed = navigate::follow(
+        let (record, force) = self.navigating.frame(
+            ui,
             &view.playback,
-            editor.follow,
-            editor.navigation.sample_editor.suspended,
-            self.drag.is_some() || wheeled,
+            editor,
+            Panel::SampleEditor,
             &mut viewport,
+            (wheeled, self.drag.is_some()),
         );
-        let (record, force) = self.wheeling.record(ui, wheeled, followed);
         if viewport != editor.sample_editor.viewport || force {
             set_viewport(actions, &viewport, record);
             scene.layout = Layout::new(rect, theme, viewport);

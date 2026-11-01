@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use egui::{Align, Button, Layout, RichText, Ui};
 use musicable_commands::editor::Lane;
 use musicable_commands::mixer::Change;
+use musicable_commands::navigation::Panel;
 use musicable_commands::{
     Args, Command, CommandId, Editor, Focus, KeyChord, Keymap, Named, Problem, Registry, Steps,
     Value, arrange, controllers, edit, locator, modulation, notes, options, take, track, transport,
@@ -1650,7 +1651,7 @@ pub(crate) fn toggled(view: &View<'_>, id: &CommandId) -> Option<bool> {
         (transport::TOGGLE_PUNCH_OUT, project.punch_out),
         (transport::TOGGLE_LOOP, project.looping),
         (transport::TOGGLE_METRONOME, project.metronome),
-        (view::TOGGLE_FOLLOW, editor.follow),
+        (view::TOGGLE_FOLLOW, editor.follows(Panel::of(editor.focus))),
         (view::TOGGLE_SNAP, editor.grid.snap),
         (view::TRIPLET_GRID, editor.grid.triplet),
         (view::FIXED_GRID, editor.grid.fixed.is_some()),

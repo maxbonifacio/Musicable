@@ -2289,3 +2289,44 @@ fn a_clip_held_at_the_edge_scrolls_the_lanes_and_keeps_its_place() {
     assert!(moved > along + Beats::new(4), "{moved:?} {along:?}");
     assert!(harness.state().errors.is_empty());
 }
+
+#[test]
+fn continuous_follow_keeps_the_playhead_still_and_waits_after_a_drag() {
+    let (project, _) = project();
+    let mut harness = harness(project);
+    let behaviour = &mut harness.state_mut().document.editor_mut().behaviour;
+    behaviour.follow_mode = musicable_commands::editor::FollowMode::Continuous;
+    let lanes = harness.get_by_label("Arrangement").rect();
+    let third = lanes.left() + lanes.width() / 3.0;
+    for at in [80_i32, 81] {
+        harness.state_mut().player.playing = true;
+        harness.state_mut().player.playhead = Beats::new(i64::from(at));
+        harness.run();
+        let x = x_of(&harness, f64::from(at));
+        assert!((x - third).abs() < 0.5, "{x} {third}");
+    }
+    // A drag holds the view, and once it's let go Follow waits rather than
+    // jump to the playhead, which moved on meanwhile.
+    let from = in_lane(&harness, "Keys", 82.0);
+    harness.hover_at(from);
+    harness.run();
+    press(&mut harness, from, true, Modifiers::NONE);
+    harness.hover_at(from + vec2(30.0, 0.0));
+    harness.run();
+    harness.state_mut().player.playhead = Beats::new(84);
+    harness.run();
+    press(&mut harness, from + vec2(30.0, 0.0), false, Modifiers::NONE);
+    let held = harness.state().editor().viewport;
+    harness.state_mut().player.playhead = Beats::new(85);
+    harness.run();
+    let editor = harness.state().editor();
+    assert!(editor.navigation.arrangement.suspended);
+    assert_eq!(editor.viewport, held);
+    // Scroll to Playhead follows again.
+    harness
+        .state_mut()
+        .carry_out(&Action::Run(views::SCROLL_TO_PLAYHEAD));
+    harness.run();
+    assert!(!harness.state().editor().navigation.arrangement.suspended);
+    assert!(harness.state().errors.is_empty());
+}

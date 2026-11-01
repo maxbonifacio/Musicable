@@ -35,7 +35,7 @@ use egui::{
     RichText, Role, ScrollArea, Sense, SetOpenCommand, Ui, WidgetInfo, pos2, vec2,
 };
 use musicable_commands::editor::{Grid, Viewport};
-use musicable_commands::navigation::{Lanes, Record};
+use musicable_commands::navigation::{Lanes, Panel, Record};
 use musicable_commands::{
     Args, CommandId, Editor, Modifiers, arrange, automation, edit, locator, notes, param_text,
     take as takes, transport, view as views, warp,
@@ -51,7 +51,7 @@ use crate::browser::{Destination, Dragged};
 use crate::devices::describe;
 use crate::mixer::{decibels, pan_text};
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
-use crate::navigate::{self, Wheeling};
+use crate::navigate::{self, Navigating};
 use crate::parts::{Parts, TRACK_HEADER};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
@@ -89,8 +89,9 @@ pub(crate) struct Arrangement {
     landed: Option<Plan>,
     /// What the open context menu was opened on.
     menu: Option<Spot>,
-    /// The wheel's gesture, while it lasts.
-    wheeling: Wheeling,
+    /// The wheel's gesture, the last drag and the playhead, for Follow
+    /// and the view's history.
+    navigating: Navigating,
     /// Where what's dragged from the browser or the devices panel came
     /// into the lanes, which it scrolls at the edges it goes towards from
     /// there.
@@ -1993,14 +1994,14 @@ impl Arrangement {
         }
         let wheeled = self.wheel(ui, &scene, &mut viewport, actions);
         self.edge_scroll(ui, &scene, &mut viewport);
-        let followed = navigate::follow(
+        let (record, force) = self.navigating.frame(
+            ui,
             &view.playback,
-            editor.follow,
-            editor.navigation.arrangement.suspended,
-            self.drag.is_some() || wheeled,
+            editor,
+            Panel::Arrangement,
             &mut viewport,
+            (wheeled, self.drag.is_some()),
         );
-        let (record, force) = self.wheeling.record(ui, wheeled, followed);
         if viewport != editor.viewport || force {
             set_viewport(actions, &viewport, record);
         }

@@ -1620,6 +1620,7 @@ fn examples() -> Vec<Example> {
         leaves(view::TOGGLE_CLIP_EDITOR, bare),
         leaves(view::TOGGLE_DEVICES, bare),
         leaves(view::TOGGLE_FOLLOW, bare),
+        leaves(view::SWITCH_FOLLOW_MODE, bare),
         leaves(view::TOGGLE_HISTORY, bare),
         leaves(view::TOGGLE_MIXER, bare),
         leaves(view::TOGGLE_PERFORMANCE, bare),

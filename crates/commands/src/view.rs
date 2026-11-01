@@ -10,7 +10,7 @@
 use musicable_model::time::Beats;
 use musicable_model::{Chain, TrackId};
 
-use crate::editor::{Editor, Focus, PianoRoll, Step, Viewport};
+use crate::editor::{Editor, Focus, FollowMode, PianoRoll, Step, Viewport};
 use crate::navigation::{Panel, Record, song_range};
 use crate::panel;
 use crate::{
@@ -91,8 +91,12 @@ pub const SCROLL_TO_PLAYHEAD: CommandId = CommandId::new("view.scroll_to_playhea
 /// Tells the commands the sizes the arrangement draws its lanes at, for
 /// fitting tracks to its height.
 pub const SET_LANE_SIZES: CommandId = CommandId::new("view.set_lane_sizes");
-/// Turns on or off scrolling the arrangement to keep the playhead in sight.
+/// Turns on or off scrolling the panel with the focus to keep the playhead
+/// in sight: the arrangement, the piano roll or the Sample Editor.
 pub const TOGGLE_FOLLOW: CommandId = CommandId::new("view.toggle_follow");
+/// Switches Follow between turning pages and scrolling continuously, in
+/// every panel.
+pub const SWITCH_FOLLOW_MODE: CommandId = CommandId::new("view.switch_follow_mode");
 /// Shows the selected tracks' takes in lanes under them, or hides them.
 pub const TOGGLE_TAKE_LANES: CommandId = CommandId::new("view.toggle_take_lanes");
 /// Brings the grid's lines closer together.
@@ -127,7 +131,7 @@ type Handler = fn(&mut Context<'_>);
 
 /// The view commands that take no arguments, with their titles, when they
 /// apply and what they run.
-const COMMANDS: [(CommandId, &str, When, Handler); 18] = [
+const COMMANDS: [(CommandId, &str, When, Handler); 19] = [
     (ZOOM_IN, "Zoom In", When::Always, |ctx| zoom(ctx, ZOOM_STEP)),
     (ZOOM_OUT, "Zoom Out", When::Always, |ctx| {
         zoom(ctx, 1.0 / ZOOM_STEP)
@@ -165,12 +169,24 @@ const COMMANDS: [(CommandId, &str, When, Handler); 18] = [
     ),
     (TOGGLE_FOLLOW, "Follow", When::Always, |ctx| {
         let editor = ctx.document.editor_mut();
-        editor.follow = !editor.follow;
+        let history = editor.navigation.of_mut(Panel::of(editor.focus));
+        history.follow = !history.follow;
         // Turned on, it follows the playhead from the next frame.
-        if editor.follow {
-            editor.navigation.resume_all();
-        }
+        history.suspended = false;
     }),
+    (
+        SWITCH_FOLLOW_MODE,
+        "Switch Follow Mode",
+        When::Always,
+        |ctx| {
+            let behaviour = &mut ctx.document.editor_mut().behaviour;
+            behaviour.follow_mode = match behaviour.follow_mode {
+                FollowMode::Page => FollowMode::Continuous,
+                FollowMode::Continuous => FollowMode::Page,
+            };
+            ctx.requests.push(Request::SaveBehaviour);
+        },
+    ),
     (NARROW_GRID, "Narrow Grid", When::Always, |ctx| {
         widen_grid(ctx.document.editor_mut(), -1)
     }),
@@ -716,15 +732,19 @@ fn step_heights(ctx: &mut Context<'_>, taller: bool) {
 }
 
 /// Scrolls the view with the focus so the playhead is a little way in from
-/// its left edge, and lets Follow follow again there.
+/// its left edge, or at Continuous Follow's place, and lets Follow follow
+/// again there.
 fn scroll_to_playhead(ctx: &mut Context<'_>) {
     let playing = ctx.transport.is_playing();
     let playhead = ctx.transport.playhead();
     let editor = ctx.document.editor_mut();
     let panel = Panel::of(editor.focus);
+    let fraction = match editor.behaviour.follow_mode {
+        FollowMode::Page => 1.0 / 20.0,
+        FollowMode::Continuous => editor.behaviour.follow_place.fraction(),
+    };
     editor.navigate(panel, Record::Step, playing, |editor| {
-        let viewport = editor.viewport_mut(panel);
-        viewport.start = (playhead - viewport.beats_in(viewport.width / 20.0)).max(Beats::ZERO);
+        editor.viewport_mut(panel).place(playhead, fraction);
     });
     editor.navigation.of_mut(panel).suspended = false;
 }
@@ -903,7 +923,7 @@ mod tests {
         setup.run_with(&SET_TRACK_HEIGHT, selected).unwrap();
         assert_eq!(setup.document.editor().track_heights[&track], 70.0);
         setup.run(&TOGGLE_FOLLOW);
-        assert!(!setup.document.editor().follow);
+        assert!(!setup.document.editor().follows(Panel::Arrangement));
         setup.run(&TOGGLE_MIXER);
         setup.run(&TOGGLE_DEVICES);
         setup.run(&TOGGLE_BROWSER);
@@ -1189,5 +1209,47 @@ mod tests {
                 "20 of 30 tracks are in sight at the smallest height. Scroll for the rest.".into()
             )]
         );
+    }
+
+    #[test]
+    fn each_panel_has_its_own_follow_and_they_share_the_mode() {
+        let (mut setup, clip) = with_notes();
+        let args = Args::new()
+            .with("notes", vec![musicable_model::clip::NoteId(1)])
+            .with("clip", clip);
+        setup.run_with(&crate::notes::SELECT, args).unwrap();
+        let focus = |panel: &str| Args::new().with("panel", panel);
+        setup.run_with(&SET_FOCUS, focus("piano_roll")).unwrap();
+        setup.run(&TOGGLE_FOLLOW);
+        let editor = setup.document.editor();
+        assert!(!editor.follows(Panel::PianoRoll));
+        assert!(editor.follows(Panel::Arrangement) && editor.follows(Panel::SampleEditor));
+        setup.run(&SWITCH_FOLLOW_MODE);
+        let behaviour = setup.document.editor().behaviour;
+        assert_eq!(behaviour.follow_mode, FollowMode::Continuous);
+        assert_eq!(setup.requests, [Request::SaveBehaviour]);
+        // Scroll to Playhead puts it at Continuous Follow's place, a third
+        // of the way in, and follows again.
+        setup.run_with(&SET_FOCUS, focus("arrangement")).unwrap();
+        setup.transport.playing = true;
+        setup.transport.playhead = Beats::new(100);
+        setup.document.editor_mut().navigation.arrangement.suspended = true;
+        setup.run(&SCROLL_TO_PLAYHEAD);
+        let editor = setup.document.editor();
+        let viewport = editor.viewport;
+        let x = viewport.x_of(Beats::new(100));
+        assert!((x - viewport.width / 3.0).abs() < 0.5, "{x}");
+        assert!(!editor.navigation.arrangement.suspended);
+        // A drag let go of in Continuous mode leaves Follow waiting.
+        let args = Args::new()
+            .with("start", viewport.start)
+            .with("zoom", viewport.zoom)
+            .with("top", 0.0)
+            .with("width", viewport.width)
+            .with("history", "suspend");
+        setup.run_with(&SET_VIEWPORT, args).unwrap();
+        let editor = setup.document.editor();
+        assert!(editor.navigation.arrangement.suspended);
+        assert_eq!(editor.navigation.arrangement.len(), 1);
     }
 }

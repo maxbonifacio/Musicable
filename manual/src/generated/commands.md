@@ -155,6 +155,7 @@
 | Zoom Back | X | `view.zoom_back` |
 | Zoom Forward | Shift+X | `view.zoom_forward` |
 | Follow | Ctrl+Shift+F | `view.toggle_follow` |
+| Switch Follow Mode |  | `view.switch_follow_mode` |
 | Scroll to Playhead |  | `view.scroll_to_playhead` |
 | Show/Hide Take Lanes | Ctrl+Alt+U | `view.toggle_take_lanes` |
 | Narrow Grid | Ctrl+1 | `view.narrow_grid` |

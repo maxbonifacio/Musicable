@@ -36,9 +36,6 @@ pub struct Editor {
     pub start_marker: Beats,
     pub grid: Grid,
     pub viewport: Viewport,
-    /// Whether the arrangement scrolls to keep the playhead in sight while
-    /// the transport plays.
-    pub follow: bool,
     /// The height of each track in the arrangement, and of the master's
     /// row, in points, where it isn't the theme's.
     pub track_heights: BTreeMap<Chain, f32>,
@@ -89,7 +86,6 @@ impl Default for Editor {
             start_marker: Beats::ZERO,
             grid: Grid::default(),
             viewport: Viewport::default(),
-            follow: true,
             track_heights: BTreeMap::new(),
             lanes: Lanes::default(),
             navigation: Navigation::default(),
@@ -674,6 +670,12 @@ impl Viewport {
         self.start = (range.start - Beats::from_f64(margin / self.zoom)).max(Beats::ZERO);
     }
 
+    /// Scrolls so `at` is `fraction` of the way across, or as near as the
+    /// song's start lets it, as Continuous Follow keeps the playhead.
+    pub fn place(&mut self, at: Beats, fraction: f32) {
+        self.start = (at - self.beats_in(self.width * fraction)).max(Beats::ZERO);
+    }
+
     /// Scrolls so `at` is in sight, if it isn't: a page on, as Live's Follow
     /// turns pages.
     pub fn follow(&mut self, at: Beats) {
@@ -927,6 +929,11 @@ pub struct Behaviour {
     /// Whether dragging a track's edge snaps its height to those sizes, as
     /// Cubase's Snap Track Heights does.
     pub snap_track_heights: bool,
+    /// How Follow keeps the playhead in sight while the song plays, in
+    /// every panel that follows it.
+    pub follow_mode: FollowMode,
+    /// Where Continuous Follow keeps the playhead.
+    pub follow_place: FollowPlace,
 }
 
 impl Behaviour {
@@ -964,6 +971,42 @@ impl Default for Behaviour {
             large_tracks: 120,
             huge_tracks: 200,
             snap_track_heights: false,
+            follow_mode: FollowMode::default(),
+            follow_place: FollowPlace::default(),
+        }
+    }
+}
+
+/// How Follow keeps the playhead in sight while the song plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowMode {
+    /// A page at a time: the view turns to the next page as the playhead
+    /// leaves it, as in Live.
+    #[default]
+    Page,
+    /// The playhead stays at its place and the song moves under it, as Pro
+    /// Tools' and Bitwig's continuous scrolling does.
+    Continuous,
+}
+
+/// Where Continuous Follow keeps the playhead, across the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowPlace {
+    /// A third of the way in, so more of what's coming is in sight.
+    #[default]
+    Third,
+    /// The middle, as Pro Tools and Bitwig keep it.
+    Middle,
+}
+
+impl FollowPlace {
+    /// How far across the view the playhead stays, from 0 to 1.
+    pub fn fraction(self) -> f32 {
+        match self {
+            FollowPlace::Third => 1.0 / 3.0,
+            FollowPlace::Middle => 0.5,
         }
     }
 }

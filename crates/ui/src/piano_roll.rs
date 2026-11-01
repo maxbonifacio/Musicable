@@ -25,7 +25,7 @@ use egui::{
     CursorIcon, Event, Id, MouseWheelUnit, Pos2, Rect, Response, Role, Sense, Ui, WidgetInfo, pos2,
 };
 use musicable_commands::editor::{Grid, Lane, Viewport};
-use musicable_commands::navigation::Record;
+use musicable_commands::navigation::{Panel, Record};
 use musicable_commands::{
     Args, CommandId, Editor, Focus, Modifiers, controllers, notes, transport, view as views,
 };
@@ -34,7 +34,7 @@ use musicable_model::clip::{Clip, ClipContent, Controller, MidiClip, Note, NoteI
 use musicable_model::time::{BeatRange, Beats};
 
 use crate::mouse::{Gesture, MouseAction, MouseMap, Target, modifiers};
-use crate::navigate::{self, Wheeling};
+use crate::navigate::{self, Navigating};
 use crate::shell::{Action, View};
 use crate::theme::Theme;
 use crate::widgets::position;
@@ -57,8 +57,9 @@ pub(crate) struct PianoRoll {
     drag: Option<Drag>,
     /// What the open context menu was opened on.
     menu: Option<Spot>,
-    /// The wheel's gesture, while it lasts.
-    wheeling: Wheeling,
+    /// The wheel's gesture, the last drag and the playhead, for Follow
+    /// and the view's history.
+    navigating: Navigating,
 }
 
 /// The parts of the piano roll that take the mouse.
@@ -786,14 +787,14 @@ impl PianoRoll {
         }
         let wheeled = self.wheel(ui, &scene, &mut viewport, &mut key_height);
         self.edge_scroll(ui, &scene, &mut viewport, key_height);
-        let followed = navigate::follow(
+        let (record, force) = self.navigating.frame(
+            ui,
             &view.playback,
-            editor.follow,
-            editor.navigation.piano_roll.suspended,
-            self.drag.is_some() || wheeled,
+            editor,
+            Panel::PianoRoll,
             &mut viewport,
+            (wheeled, self.drag.is_some()),
         );
-        let (record, force) = self.wheeling.record(ui, wheeled, followed);
         let height = scene.layout.rows.height();
         let changed =
             viewport != roll.viewport || key_height != roll.key_height || height != roll.height;
