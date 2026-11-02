@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 mod bundle;
 pub mod clap;
 mod instance;
+mod loaded;
 mod midi;
 mod process;
 pub mod scan;
@@ -52,6 +53,16 @@ pub mod vst3;
 static ALLOC: musicable_engine::rt::CheckedAlloc = musicable_engine::rt::CheckedAlloc;
 
 pub use instance::{Instance, NodeSource};
+
+/// Unloads the plugin libraries that the thread calling it loaded, and that
+/// were let go of on other threads, as the engine's compiler thread lets go
+/// of the nodes of a job it skips. Call it regularly on the thread that
+/// makes the instances, the app's main thread: a library is only ever
+/// deinitialized or exited there.
+pub fn unload_unused() {
+    clap::Library::close_unused();
+    vst3::Module::close_unused();
+}
 
 /// Tells the app that a plugin needs [`Instance::poll`] called, from
 /// whatever thread the plugin asks on, though never an audio thread.

@@ -50,7 +50,12 @@ CLAP names two threads, and Musicable's are:
 A plugin can call some of the host's functions from threads of its own:
 asking to restart, for a callback, to flush its parameters, or to resize its
 window. Those only set a flag and wake the app (`Waker`), and the main
-thread acts on them in `Instance::poll`.
+thread acts on them in `Instance::poll`. A VST3 window that asks for a new
+size on a thread other than the UI thread is resized as the main thread
+polls, rather than called back there, and an edit a VST3 plugin's controller
+reports on an audio thread neither waits for a lock nor allocates: past the
+1,024 that fit between polls, or with the main thread taking them, it's
+dropped.
 
 ## A plugin's life
 
@@ -66,6 +71,12 @@ shorter block, plays silence.
   side inputs on or off ([Side inputs](#side-inputs)), allocates the
   buffers, and reads its latency, up to `Graph::MAX_LATENCY`. Blocks can be
   any length from 1 frame to the engine's `max_block`.
+  A port the plugin counts but fails to describe keeps its place, with no
+  channels, so the plugin gets a buffer for each port it counts and the
+  others keep their indexes. Each port's channel pointers reach the plugin
+  as a copy, put back before every block, and the host reads and writes the
+  buffers through its own: formats hand them over writable, and a plugin
+  that points one elsewhere mustn't have the host write there.
 - **Deactivating** waits for a node that's processing the plugin to finish
   its block, stops the plugin processing, and deactivates it. CLAP lets any
   thread be the audio thread as long as only one is at a time, so the main
@@ -96,10 +107,20 @@ shorter block, plays silence.
 - **Destroying.** Dropping the `Instance` closes the plugin's window,
   deactivates the plugin and destroys it. A node left over plays silence.
   If a node has been stuck in the plugin's `process` for five seconds, the
-  plugin is left alone, and its library stays loaded.
+  plugin is left alone: its library stays loaded, and the host it was
+  given stays where it is, for its own threads to call, as long as the
+  process runs.
 
 Each library is loaded once per process and unloaded when nothing uses it
-any more: every instance and every node holds it.
+any more: every instance and every node holds it. It's unloaded on the
+thread that loaded it, the main thread, as VST3 has modules exit on the UI
+thread (`loaded::Registry`). The last to let go of it can be elsewhere, as
+the engine's compiler lets go of the nodes of a job it skips on its own
+thread, and then it waits for the main thread, which unloads it in
+`musicable_plugins::unload_unused`, as `Session::tick` calls it, unless
+it's loaded again first, when it's taken back as it is. A library on its
+way out is loaded again only once it's gone, so it's never initialized
+again before it's deinitialized.
 
 ## Parameters
 
@@ -409,12 +430,14 @@ ids: 32 hex digits, written as VST3 writes them on every platform.
   per-note pitch bend: VST3 has no MPE MIDI to fall back on.
 - **State** is a `.vstpreset` file: the plugin's class id, the component's
   state, and the controller's if it's an object of its own. Loading checks
-  the class id.
+  the class id. A state the plugin writes can't grow past 2 GiB, wherever it
+  seeks to: writing beyond fails.
 - **Windows** only go inside a window of Musicable's: an `HWND` on Windows,
   an `NSView` on macOS, an X11 window on Linux. `open_floating_window`
   fails. The scale goes to the plugin's window, except on macOS, which
   scales windows itself. A window that asks for a new size gets it at once,
-  and `poll` says so, for Musicable's to follow.
+  or as the main thread polls if it asks on another thread, and `poll` says
+  so, for Musicable's to follow.
 - **Scanning.** `scan::vst3_dirs` has VST3's standard places, and the ones
   in `VST3_PATH`, which Musicable reads as it reads `CLAP_PATH`.
 

@@ -330,6 +330,11 @@ impl IAttributeListTrait for AttributeList {
     }
 }
 
+/// The most a plugin's state can hold, 2 GiB, beyond which writing to it
+/// fails: more than any plugin keeps, short of what would bring the host
+/// down, wherever the plugin seeks to.
+const STREAM_LIMIT: usize = 1 << 31;
+
 /// A plugin's state, as it reads or writes it.
 pub(crate) struct Stream {
     /// The bytes, and where the plugin is in them.
@@ -395,9 +400,17 @@ impl IBStreamTrait for Stream {
         let (bytes, at) = &mut *inner;
         let n = count as usize;
         if n > 0 {
+            // Wherever the plugin sought to, the state can't outgrow the
+            // limit.
+            let Some(end) = at.checked_add(n).filter(|&end| end <= STREAM_LIMIT) else {
+                if !written.is_null() {
+                    // SAFETY: checked non-null.
+                    unsafe { written.write(0) };
+                }
+                return kResultFalse;
+            };
             // SAFETY: the plugin passes `count` bytes.
             let data = unsafe { slice::from_raw_parts(buffer.cast::<u8>(), n) };
-            let end = *at + n;
             if bytes.len() < end {
                 bytes.resize(end, 0);
             }
@@ -421,10 +434,12 @@ impl IBStreamTrait for Stream {
             m if m == kIBSeekEnd as int32 => bytes.len() as int64,
             _ => return kInvalidArgument,
         };
-        let Some(to) = base.checked_add(pos).filter(|to| *to >= 0) else {
+        let Some((to, at_to)) =
+            (base.checked_add(pos)).and_then(|to| Some((to, usize::try_from(to).ok()?)))
+        else {
             return kInvalidArgument;
         };
-        *at = to as usize;
+        *at = at_to;
         if !result.is_null() {
             // SAFETY: checked non-null.
             unsafe { result.write(to) };
@@ -455,7 +470,7 @@ impl ISizeableStreamTrait for Stream {
     }
 
     unsafe fn setStreamSize(&self, size: int64) -> tresult {
-        let Ok(size) = usize::try_from(size) else {
+        let Some(size) = usize::try_from(size).ok().filter(|&s| s <= STREAM_LIMIT) else {
             return kInvalidArgument;
         };
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -477,13 +492,7 @@ impl ComponentHandler {
         let Some(shared) = self.shared.upgrade() else {
             return kResultFalse;
         };
-        shared
-            .requests
-            .edits
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(edit);
-        shared.wake();
+        shared.edit(edit);
         kResultOk
     }
 }
@@ -572,11 +581,20 @@ impl IPlugFrameTrait for PlugFrame {
         let Some(shared) = self.shared.upgrade() else {
             return kResultFalse;
         };
+        // SAFETY: checked non-null.
+        let wanted = unsafe { *size };
+        let (width, height) = rect_size(&wanted);
+        // VST3 has plugins ask on the UI thread. One that asks on another
+        // has the view resized there as the main thread polls, rather than
+        // being called back here.
+        if !shared.on_main_thread() {
+            shared.requests.view_resize.store(true, Ordering::Release);
+            shared.request_resize(width, height);
+            return kResultTrue;
+        }
         if self.resizing.swap(true, Ordering::AcqRel) {
             return kResultFalse;
         }
-        // SAFETY: checked non-null.
-        let wanted = unsafe { *size };
         // As VST3's own host does: the view takes the size at once, if it
         // hasn't already, and the app's window follows it.
         // SAFETY: zeroed is a valid rect.
@@ -588,7 +606,6 @@ impl IPlugFrameTrait for PlugFrame {
             unsafe { view.onSize(size) };
         }
         self.resizing.store(false, Ordering::Release);
-        let (width, height) = rect_size(&wanted);
         shared.request_resize(width, height);
         kResultTrue
     }
@@ -603,4 +620,39 @@ pub(crate) fn rect_size(rect: &ViewRect) -> (u32, u32) {
     let side =
         |from: i32, to: i32| (i64::from(to) - i64::from(from)).clamp(0, u32::MAX.into()) as u32;
     (side(rect.left, rect.right), side(rect.top, rect.bottom))
+}
+
+#[cfg(test)]
+mod tests {
+    use vst3::Steinberg::IBStream_::IStreamSeekMode_::kIBSeekSet;
+
+    use super::*;
+
+    #[test]
+    fn a_state_cant_grow_past_its_limit() {
+        let stream = Stream::new(&[]);
+        let mut data = *b"state";
+        let mut written = -1;
+        let mut at = -1;
+        // SAFETY: the stream is alive, with what each call takes.
+        unsafe {
+            assert_eq!(
+                stream.write(data.as_mut_ptr().cast(), 5, &mut written),
+                kResultOk
+            );
+            assert_eq!(written, 5);
+            // A plugin that seeks far past the end can't write there.
+            let far = STREAM_LIMIT as int64;
+            assert_eq!(stream.seek(far, kIBSeekSet as int32, &mut at), kResultOk);
+            assert_eq!(at, far);
+            assert_eq!(
+                stream.write(data.as_mut_ptr().cast(), 1, &mut written),
+                kResultFalse
+            );
+            assert_eq!(written, 0);
+            assert_eq!(stream.setStreamSize(far + 1), kInvalidArgument);
+            assert_eq!(stream.setStreamSize(int64::MAX), kInvalidArgument);
+        }
+        assert_eq!(stream.take(), b"state");
+    }
 }

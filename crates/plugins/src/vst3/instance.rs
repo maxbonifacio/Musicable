@@ -45,6 +45,7 @@ use super::host::{Edit, NO_RESIZE, Shared};
 use super::module::{self, Module, parse_class_id, utf16};
 use super::node::{self, Audio, BusInfo, Controllers, NodeSource};
 use super::preset::{self, Preset};
+use crate::loaded::Loaded;
 use crate::process::ParamChange;
 use crate::threads::{DESTROYED, INACTIVE, PROCESSING};
 use crate::{Error, ParamInfo, ParentWindow, PluginEvent, PluginInfo, Waker};
@@ -107,7 +108,7 @@ struct Window {
 /// there, and what happened to the plugin comes back from it.
 pub struct Instance {
     shared: Arc<Shared>,
-    module: Arc<Module>,
+    module: Arc<Loaded<Module>>,
     info: PluginInfo,
     parts: ManuallyDrop<Parts>,
     /// What the plugin knows the host by.
@@ -775,15 +776,7 @@ impl Instance {
     /// what happened to it.
     pub fn poll(&mut self) -> Vec<PluginEvent> {
         let mut events = Vec::new();
-        let edits = mem::take(
-            &mut *self
-                .shared
-                .requests
-                .edits
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        );
-        for edit in edits {
+        for edit in self.shared.take_edits() {
             match edit {
                 Edit::Begin(param) => events.push(PluginEvent::GestureBegin { param }),
                 // The controller has it: it goes to the processor too.
@@ -848,11 +841,20 @@ impl Instance {
             .requests
             .window_resize
             .swap(NO_RESIZE, Ordering::AcqRel);
-        if size != NO_RESIZE && self.window.is_some() {
-            events.push(PluginEvent::WindowResize {
-                width: (size >> 32) as u32,
-                height: size as u32,
-            });
+        let view_resize = (self.shared.requests.view_resize).swap(false, Ordering::AcqRel);
+        if size != NO_RESIZE
+            && let Some(window) = &self.window
+        {
+            let (width, height) = ((size >> 32) as u32, size as u32);
+            // It asked on another thread, where its view isn't to be
+            // called, so the view takes the size now, as it would have
+            // there.
+            if view_resize && self.window_size() != Some((width, height)) {
+                let mut rect = view_rect(width, height);
+                // SAFETY: on the main thread, with the view attached.
+                unsafe { window.view.onSize(&mut rect) };
+            }
+            events.push(PluginEvent::WindowResize { width, height });
         }
         events
     }
@@ -923,6 +925,7 @@ impl Instance {
         // It's the size it ended up, whatever it asked for as it opened.
         let requests = &self.shared.requests;
         requests.window_resize.store(NO_RESIZE, Ordering::Release);
+        requests.view_resize.store(false, Ordering::Release);
         self.window_size().ok_or_else(|| fail("has no size"))
     }
 
@@ -963,13 +966,7 @@ impl Instance {
         // SAFETY: on the main thread, with the view attached: every call.
         if self.window_size() != Some((width, height)) && unsafe { view.canResize() } == kResultTrue
         {
-            let side = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
-            let mut rect = ViewRect {
-                left: 0,
-                top: 0,
-                right: side(width),
-                bottom: side(height),
-            };
+            let mut rect = view_rect(width, height);
             // SAFETY: as above.
             unsafe {
                 view.checkSizeConstraint(&mut rect);
@@ -1014,6 +1011,17 @@ impl Drop for Instance {
             }
             parts.component.terminate();
         }
+    }
+}
+
+/// A rect `width` by `height`, at the origin.
+fn view_rect(width: u32, height: u32) -> ViewRect {
+    let side = |n: u32| i32::try_from(n).unwrap_or(i32::MAX);
+    ViewRect {
+        left: 0,
+        top: 0,
+        right: side(width),
+        bottom: side(height),
     }
 }
 

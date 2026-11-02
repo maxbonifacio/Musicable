@@ -125,6 +125,10 @@ pub(crate) static MIDI_OUT: AtomicBool = AtomicBool::new(false);
 /// always on: the library's file is named so.
 pub(crate) static FIXED_PORTS: AtomicBool = AtomicBool::new(false);
 
+/// Whether the gain fails to describe its sidechain, its second audio
+/// input, though it counts it: the library's file is named so.
+pub(crate) static UNDESCRIBED: AtomicBool = AtomicBool::new(false);
+
 /// Whether the synth plays each MIDI channel an octave above the channel
 /// before, as a part of its own: the library's file is named so.
 pub(crate) static PARTS: AtomicBool = AtomicBool::new(false);
@@ -178,6 +182,7 @@ unsafe extern "C" fn entry_init(path: *const c_char) -> bool {
     MPE.store(name.starts_with("mpe"), Ordering::SeqCst);
     MIDI_OUT.store(name.starts_with("midi"), Ordering::SeqCst);
     FIXED_PORTS.store(name.starts_with("fixed"), Ordering::SeqCst);
+    UNDESCRIBED.store(name.starts_with("undescribed"), Ordering::SeqCst);
     PARTS.store(name.starts_with("parts"), Ordering::SeqCst);
     ECHO.store(name.starts_with("echo"), Ordering::SeqCst);
     LIVE.store(name.starts_with("live"), Ordering::SeqCst);
@@ -251,6 +256,13 @@ pub(crate) fn violation(message: &str) {
     let mut violations = VIOLATIONS.lock().unwrap_or_else(|e| e.into_inner());
     violations.0 += 1;
     violations.1.get_or_insert_with(|| message.to_owned());
+}
+
+/// Whether this copy of the library is initialized: between CLAP's entry's
+/// `init` and `deinit`.
+#[unsafe(no_mangle)]
+pub extern "C" fn musicable_test_initialized() -> bool {
+    INITIALIZED.load(Ordering::SeqCst)
 }
 
 /// How many times a host broke CLAP's rules with the plugins of this copy

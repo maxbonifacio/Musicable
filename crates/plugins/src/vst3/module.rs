@@ -4,7 +4,7 @@
 use std::ffi::{c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use musicable_model::PluginFormat;
@@ -21,6 +21,7 @@ use vst3::{ComPtr, ComWrapper, Interface};
 
 use super::com::HostApplication;
 use crate::bundle::{self, canonical};
+use crate::loaded::{Loaded, Open, Registry};
 use crate::{Buses, Error, PluginInfo};
 
 /// The category of the classes that are plugins.
@@ -49,7 +50,8 @@ type GetFactory = unsafe extern "system" fn() -> *mut IPluginFactory;
 type Exit = unsafe extern "C" fn() -> bool;
 
 /// A `.vst3` module, loaded and entered. It exits and is unloaded once
-/// nothing holds it.
+/// nothing holds it, on the thread that loaded it ([`Loaded`]), as VST3
+/// has modules exit on the UI thread.
 pub(crate) struct Module {
     path: PathBuf,
     /// Released before the module exits.
@@ -69,9 +71,9 @@ unsafe impl Send for Module {}
 // SAFETY: as above.
 unsafe impl Sync for Module {}
 
-/// The modules loaded, by path, so the process loads each one once. Its lock
-/// is held while one enters or exits.
-static LOADED: Mutex<Vec<(PathBuf, Weak<Module>)>> = Mutex::new(Vec::new());
+/// The modules loaded, so the process loads each one once. Its lock is held
+/// while one enters or exits.
+static LOADED: Registry<Module> = Registry::new();
 
 /// A class in a module, as its factory describes it.
 struct Class {
@@ -86,21 +88,16 @@ struct Class {
 impl Module {
     /// Loads and enters the module at `path`, or hands back the one already
     /// loaded.
-    pub(crate) fn load(path: &Path) -> Result<Arc<Module>, Error> {
+    pub(crate) fn load(path: &Path) -> Result<Arc<Loaded<Module>>, Error> {
         let path = canonical(path)
             .map_err(|e| Error::new(format!("{} can't be read: {e}", path.display())))?;
-        let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
-        loaded.retain(|(_, module)| module.strong_count() > 0);
-        if let Some(module) = loaded
-            .iter()
-            .find(|(p, _)| *p == path)
-            .and_then(|(_, module)| module.upgrade())
-        {
-            return Ok(module);
-        }
-        let module = Arc::new(Self::open(&path)?);
-        loaded.push((path, Arc::downgrade(&module)));
-        Ok(module)
+        LOADED.load(&path, Self::open)
+    }
+
+    /// Exits and unloads the modules this thread loaded that were let go of
+    /// on other threads.
+    pub(crate) fn close_unused() {
+        LOADED.close_unused();
     }
 
     fn open(path: &Path) -> Result<Module, Error> {
@@ -277,9 +274,9 @@ impl Module {
     }
 }
 
-impl Drop for Module {
-    fn drop(&mut self) {
-        let _loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
+impl Open for Module {
+    /// Called inside `LOADED`'s lock.
+    fn close(mut self) {
         drop(self.factory.take());
         if let Some(exit) = self.exit {
             // SAFETY: entered in `open`, and nothing of the module's is in

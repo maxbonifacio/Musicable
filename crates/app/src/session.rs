@@ -1158,7 +1158,8 @@ impl Session {
     /// says so. Carries out what the plugins asked for and takes in what
     /// changed in them, adds what was recorded, sends the graphs the
     /// compiler has finished and what the engine had no room for earlier,
-    /// and drops the graphs and tempo maps the engine has replaced.
+    /// and drops the graphs and tempo maps the engine has replaced, and
+    /// unloads the plugin libraries nothing uses any more.
     pub fn tick(&mut self) {
         let changes = self.plugins.poll();
         if !changes.is_empty() {
@@ -1167,6 +1168,9 @@ impl Session {
         self.take_recordings();
         self.tick_library();
         self.engine.handle.collect_garbage();
+        // After the graphs: the libraries let go of on the compiler's
+        // thread are unloaded here, on the thread that loaded them.
+        musicable_plugins::unload_unused();
         self.engine.flush();
     }
 

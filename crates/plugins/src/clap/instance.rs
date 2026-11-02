@@ -34,6 +34,7 @@ use clap_sys::ext::render::{CLAP_EXT_RENDER, clap_plugin_render};
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_plugin_state};
 use clap_sys::ext::thread_pool::CLAP_EXT_THREAD_POOL;
 use clap_sys::ext::timer_support::{CLAP_EXT_TIMER_SUPPORT, clap_plugin_timer_support};
+use clap_sys::id::CLAP_INVALID_ID;
 use clap_sys::plugin::clap_plugin;
 use clap_sys::stream::{clap_istream, clap_ostream};
 use musicable_engine::{EngineConfig, Graph};
@@ -43,6 +44,7 @@ use super::events::{self, Event, OutEvent};
 use super::host::{NO_RESIZE, Shared};
 use super::library::Library;
 use super::node::{Audio, EVENT_CAPACITY, NodeSource, NotePort, PortInfo};
+use crate::loaded::Loaded;
 use crate::process::ParamChange;
 use crate::threads::{ACTIVE, AudioThread, DESTROYED, FAILED, INACTIVE, PROCESSING};
 use crate::{Error, ParamInfo, ParentWindow, PluginEvent, PluginInfo, Waker};
@@ -110,7 +112,7 @@ struct Extensions {
 /// there, and what happened to the plugin comes back from it.
 pub struct Instance {
     shared: Arc<Shared>,
-    library: Arc<Library>,
+    library: Arc<Loaded<Library>>,
     info: PluginInfo,
     ext: Extensions,
     params: Vec<ParamInfo>,
@@ -599,29 +601,45 @@ impl Instance {
         };
         // SAFETY: on the main thread.
         let count = unsafe { count(plugin, inputs) };
+        // A port the plugin fails to describe keeps its place, with no
+        // channels: the plugin gets a buffer for each of its ports, and the
+        // others keep their indexes.
         let mut ports: Vec<PortInfo> = (0..count)
-            .filter_map(|index| {
+            .map(|index| {
                 let mut info = MaybeUninit::<clap_audio_port_info>::zeroed();
                 // SAFETY: on the main thread, with somewhere to write. A
                 // zeroed info is a valid one.
                 let info = unsafe {
                     get(plugin, index, inputs, info.as_mut_ptr()).then(|| info.assume_init())
-                }?;
-                Some(PortInfo {
+                };
+                let Some(info) = info else {
+                    return PortInfo {
+                        id: CLAP_INVALID_ID,
+                        name: String::new(),
+                        channels: 0,
+                        main: false,
+                        described: false,
+                        on: !inputs,
+                    };
+                };
+                PortInfo {
                     id: info.id,
                     name: fixed_string(&info.name),
                     // More than any real port has: it guards against
                     // nonsense.
                     channels: info.channel_count.min(64),
                     main: info.flags & CLAP_AUDIO_PORT_IS_MAIN != 0,
+                    described: true,
                     on: !inputs,
-                })
+                }
             })
             .collect();
-        // The port the plugin calls main, or the first.
-        let main = ports.iter().position(|p| p.main).unwrap_or(0);
+        // The port the plugin calls main, or the first it describes.
+        let main = (ports.iter().position(|p| p.main))
+            .or_else(|| ports.iter().position(|p| p.described))
+            .unwrap_or(0);
         for (index, port) in ports.iter_mut().enumerate() {
-            port.main = index == main;
+            port.main = index == main && port.described;
             port.on |= port.main;
         }
         ports
@@ -635,7 +653,8 @@ impl Instance {
         // SAFETY: the extension lives as long as the plugin.
         let activation = unsafe { self.ext.ports_activation.as_ref() };
         let set_active = activation.and_then(|a| a.set_active);
-        for (index, port) in ports.iter_mut().enumerate().filter(|(_, p)| !p.main) {
+        let sides = ports.iter_mut().enumerate();
+        for (index, port) in sides.filter(|(_, p)| !p.main && p.described) {
             let wired = self.wired.contains(&port.id);
             // SAFETY: on the main thread, and inactive, for buffers of 32-bit
             // samples.
@@ -1028,15 +1047,13 @@ impl Drop for Instance {
     fn drop(&mut self) {
         self.close_window();
         if let Err(e) = self.deactivate() {
-            // A node is stuck in the plugin, so it can't be destroyed. Its
-            // code stays loaded for as long as the process runs.
             eprintln!("{e}: leaving it be");
-            std::mem::forget(Arc::clone(&self.library));
+            self.leave_be();
             return;
         }
         let plugin = self.plugin();
         let Ok(_busy) = self.shared.enter() else {
-            std::mem::forget(Arc::clone(&self.library));
+            self.leave_be();
             return;
         };
         self.shared.set_lifecycle(DESTROYED);
@@ -1055,12 +1072,30 @@ impl Drop for Instance {
     }
 }
 
+impl Instance {
+    /// Leaves a plugin that a node is stuck in alive, as it can't be
+    /// destroyed: its code stays loaded, and the host it was given, which
+    /// is in `shared`, stays where it is for its own threads to call, for
+    /// as long as the process runs.
+    fn leave_be(&self) {
+        std::mem::forget(Arc::clone(&self.library));
+        std::mem::forget(Arc::clone(&self.shared));
+    }
+
+    /// What's shared with the plugin's nodes and its calls to the host,
+    /// for tests that watch what happens to it.
+    #[cfg(test)]
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+}
+
 /// The side inputs among a plugin's input ports: all but the main one, by
 /// their ids, named "Input 2" and so on where the plugin names them
 /// nothing.
 fn side_inputs(ports: &[PortInfo]) -> Vec<PluginInput> {
     (ports.iter().enumerate())
-        .filter(|(_, port)| !port.main)
+        .filter(|(_, port)| !port.main && port.described)
         .map(|(index, port)| PluginInput {
             id: port.id,
             name: match port.name.trim() {

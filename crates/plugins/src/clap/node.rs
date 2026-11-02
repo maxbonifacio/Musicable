@@ -31,6 +31,7 @@ use super::events::{self, Event, InputEvents, OutEvent};
 use super::host::Shared;
 use super::library::Library;
 use super::voices::{VOICE_CAPACITY, Voices};
+use crate::loaded::Loaded;
 use crate::midi::{Layout, MidiOut};
 use crate::process::{
     Channels, Kept, Made, ParamChange, PlayedTo, Sounding, SoundingNote, Transport,
@@ -128,8 +129,11 @@ pub(crate) struct PortInfo {
     pub(crate) name: String,
     pub(crate) channels: u32,
     /// Whether it's the port audio goes in or comes out of: the one the
-    /// plugin calls main, or the first.
+    /// plugin calls main, or the first it describes.
     pub(crate) main: bool,
+    /// Whether the plugin described it. One it failed to has no channels,
+    /// and keeps its place among the ports, for the others' indexes.
+    pub(crate) described: bool,
     /// Whether audio goes to it: an input's main port, and a side input
     /// while something's wired to it. Every output is on.
     pub(crate) on: bool,
@@ -177,10 +181,10 @@ impl Ports {
             .collect();
         let constant = (ports.iter())
             .map(|p| {
-                if p.on {
+                if p.on || p.channels == 0 {
                     0
                 } else {
-                    u64::MAX >> (64 - p.channels.clamp(1, 64))
+                    u64::MAX >> (64 - p.channels.min(64))
                 }
             })
             .collect();
@@ -211,7 +215,7 @@ impl Ports {
 #[derive(Clone)]
 pub struct NodeSource {
     pub(crate) shared: Arc<Shared>,
-    pub(crate) library: Arc<Library>,
+    pub(crate) library: Arc<Loaded<Library>>,
 }
 
 impl NodeSource {
@@ -273,7 +277,7 @@ impl fmt::Debug for NodeSource {
 pub struct ClapNode {
     shared: Arc<Shared>,
     /// Keeps the plugin's code loaded for as long as the node can call it.
-    _library: Arc<Library>,
+    _library: Arc<Loaded<Library>>,
     /// The transport for the block, where the plugin can see it.
     transport: clap_event_transport,
     /// The notes whose voices the plugin ended in the last block.

@@ -34,6 +34,7 @@ use vst3::Steinberg::{int32, kResultOk, tresult, uint16, uint32};
 use super::changes::{EVENT_CAPACITY, Events, InputChanges, OutputChanges, QUEUE_CAPACITY};
 use super::host::Shared;
 use super::module::Module;
+use crate::loaded::Loaded;
 use crate::process::{
     Channels, Kept, Made, ParamChange, PlayedTo, Sounding, SoundingNote, Transport,
 };
@@ -200,7 +201,7 @@ impl Buses {
 #[derive(Clone)]
 pub struct NodeSource {
     pub(crate) shared: Arc<Shared>,
-    pub(crate) module: Arc<Module>,
+    pub(crate) module: Arc<Loaded<Module>>,
 }
 
 impl NodeSource {
@@ -256,7 +257,7 @@ impl fmt::Debug for NodeSource {
 pub struct Vst3Node {
     shared: Arc<Shared>,
     /// Keeps the plugin's code loaded for as long as the node can call it.
-    _module: Arc<Module>,
+    _module: Arc<Loaded<Module>>,
     /// Whether the plugin resets before it next processes.
     resetting: bool,
     /// Whether the notes the plugin plays out as it renders go somewhere.

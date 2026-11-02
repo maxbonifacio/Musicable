@@ -160,6 +160,12 @@ impl Library {
         }
     }
 
+    /// Whether the host has this copy initialized, as a CLAP library:
+    /// between its entry's `init` and `deinit`.
+    pub fn initialized(&self) -> bool {
+        self.hook::<extern "C" fn() -> bool>("musicable_test_initialized")()
+    }
+
     /// How many of this copy's plugins are alive.
     pub fn alive(&self) -> u32 {
         self.hook::<extern "C" fn() -> u32>("musicable_test_alive")()

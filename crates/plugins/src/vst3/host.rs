@@ -10,7 +10,7 @@ use std::sync::atomic::{
 use vst3::Steinberg::Vst::IAudioProcessor;
 
 use super::node::Audio;
-use crate::threads::{Busy, BusyFlag, INACTIVE, is_audio_thread};
+use crate::threads::{Busy, BusyFlag, INACTIVE, is_audio_thread, thread_mark};
 use crate::{Error, Waker};
 
 /// What a plugin instance shares with its nodes and with the plugin's
@@ -33,6 +33,9 @@ pub(crate) struct Shared {
     /// What the plugin calls itself, for errors.
     pub(crate) name: String,
     pub(crate) waker: Option<Waker>,
+    /// The plugin's UI thread, which made the instance, as [`thread_mark`]
+    /// gives it.
+    main_thread: usize,
 }
 
 // SAFETY: `audio` is only touched by whoever holds `busy`, and the
@@ -50,14 +53,23 @@ pub(crate) struct Requests {
     pub(crate) restart: AtomicI32,
     /// The plugin said its state changed.
     pub(crate) dirty: AtomicBool,
-    /// Edits made in the plugin's window, oldest first.
+    /// Edits made in the plugin's window, oldest first. It has room for
+    /// [`EDITS`] without allocating.
     pub(crate) edits: Mutex<Vec<Edit>>,
     /// The size the window asks for, as `width << 32 | height`, or
     /// [`NO_RESIZE`].
     pub(crate) window_resize: AtomicU64,
+    /// The plugin asked for that size on another thread than the UI
+    /// thread, so its view takes it as the main thread polls.
+    pub(crate) view_resize: AtomicBool,
 }
 
 pub(crate) const NO_RESIZE: u64 = u64::MAX;
+
+/// How many edits [`Requests::edits`] holds between polls without
+/// allocating: all a plugin that edits on an audio thread, as VST3 forbids,
+/// gets in.
+pub(crate) const EDITS: usize = 1024;
 
 /// What someone did in a plugin's window, as its controller says.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,13 +90,50 @@ impl Shared {
             requests: Requests {
                 restart: AtomicI32::new(0),
                 dirty: AtomicBool::new(false),
-                edits: Mutex::new(Vec::new()),
+                edits: Mutex::new(Vec::with_capacity(EDITS)),
                 window_resize: AtomicU64::new(NO_RESIZE),
+                view_resize: AtomicBool::new(false),
             },
             audio: UnsafeCell::new(audio),
             name: name.to_owned(),
             waker,
+            main_thread: thread_mark(),
         }
+    }
+
+    /// Whether this is the thread that made the instance, the plugin's UI
+    /// thread.
+    pub(crate) fn on_main_thread(&self) -> bool {
+        thread_mark() == self.main_thread
+    }
+
+    /// Takes an edit made in the plugin's window. VST3 has the controller
+    /// edit on the UI thread, but some edit as they process: on an audio
+    /// thread, an edit neither waits for the lock nor allocates, and one
+    /// there's no room for is dropped.
+    pub(crate) fn edit(&self, edit: Edit) {
+        let edits = &self.requests.edits;
+        if is_audio_thread() {
+            if let Ok(mut edits) = edits.try_lock()
+                && edits.len() < edits.capacity()
+            {
+                edits.push(edit);
+            }
+        } else {
+            edits.lock().unwrap_or_else(|e| e.into_inner()).push(edit);
+        }
+        self.wake();
+    }
+
+    /// The edits made in the plugin's window since this was last asked,
+    /// oldest first.
+    pub(crate) fn take_edits(&self) -> Vec<Edit> {
+        let mut edits = self
+            .requests
+            .edits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        edits.drain(..).collect()
     }
 
     pub(crate) fn processor(&self) -> *mut IAudioProcessor {
@@ -143,5 +192,40 @@ impl Shared {
         {
             waker();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use musicable_engine::rt;
+
+    use super::*;
+    use crate::threads::AudioThread;
+
+    #[test]
+    fn edits_on_an_audio_thread_neither_wait_nor_allocate() {
+        let (to_audio, from_main) = rtrb::RingBuffer::new(1);
+        let (to_main, _from_audio) = rtrb::RingBuffer::new(1);
+        let shared = Shared::new("Test", Audio::new(from_main, to_main), None);
+        let _keep = to_audio;
+        rt::scope(|| {
+            let _audio_thread = AudioThread::enter();
+            // Past the room it has, edits are dropped.
+            for _ in 0..EDITS + 10 {
+                shared.edit(Edit::Begin(1));
+            }
+        });
+        assert_eq!(shared.take_edits().len(), EDITS);
+        // With the lock held elsewhere, an edit is dropped, not waited for.
+        let held = shared.requests.edits.lock().unwrap();
+        rt::scope(|| {
+            let _audio_thread = AudioThread::enter();
+            shared.edit(Edit::End(1));
+        });
+        drop(held);
+        assert!(shared.take_edits().is_empty());
+        // Elsewhere, edits wait for the lock.
+        shared.edit(Edit::End(1));
+        assert_eq!(shared.take_edits(), [Edit::End(1)]);
     }
 }

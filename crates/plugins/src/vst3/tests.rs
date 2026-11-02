@@ -1101,6 +1101,35 @@ fn the_plugins_window_opens_inside_ours() {
 }
 
 #[test]
+fn a_window_that_asks_for_a_size_on_another_thread_gets_it_on_the_ui_thread() {
+    let plugins = TestPlugins::new("resize-elsewhere");
+    let mut instance = plugins.gain();
+    let parent = ParentWindow::Win32(ptr::without_provenance_mut(77));
+    assert_eq!(instance.open_window(parent, 1.0), Ok((400, 300)));
+    let controller = instance.raw_controller() as usize;
+    let library = &plugins.library;
+    // SAFETY: the plugin is alive, and its window open, while it asks.
+    let asked = std::thread::scope(|scope| {
+        let ask = || unsafe { library.vst3_request_resize(controller as *mut _, 640, 480) };
+        scope.spawn(ask).join().unwrap()
+    });
+    assert!(asked);
+    // Its view isn't called back on that thread, but as the main thread
+    // polls.
+    assert_eq!(instance.window_size(), Some((400, 300)));
+    assert_eq!(
+        instance.poll(),
+        [PluginEvent::WindowResize {
+            width: 640,
+            height: 480
+        }]
+    );
+    assert_eq!(instance.window_size(), Some((640, 480)));
+    drop(instance);
+    plugins.assert_alright();
+}
+
+#[test]
 fn an_arpeggiator_plays_notes_of_its_own() {
     let plugins = TestPlugins::new("arpeggiator");
     let mut instance = plugins.arpeggiator();

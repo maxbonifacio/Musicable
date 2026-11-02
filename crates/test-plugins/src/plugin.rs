@@ -70,7 +70,8 @@ use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
 
 use crate::arp::{Arp, Stepped};
 use crate::{
-    ALIVE, ECHO, ECHO_UP, FIXED_PORTS, LIVE, MIDI_OUT, MPE, PARTS, gui, part_transpose, violation,
+    ALIVE, ECHO, ECHO_UP, FIXED_PORTS, LIVE, MIDI_OUT, MPE, PARTS, UNDESCRIBED, gui,
+    part_transpose, violation,
 };
 
 pub const GAIN_ID: &CStr = c"org.musicable.test.gain";
@@ -1959,7 +1960,8 @@ unsafe extern "C" fn plugin_process(
         violation("process got the wrong number of audio ports");
         return CLAP_PROCESS_ERROR;
     }
-    if this.kind == Kind::Gain && !this.sidechain() {
+    // A sidechain it didn't describe is the host's to fill as it likes.
+    if this.kind == Kind::Gain && !this.sidechain() && !UNDESCRIBED.load(Ordering::SeqCst) {
         // SAFETY: the host passes two input ports, as just checked.
         let side = unsafe { &*process.audio_inputs.add(1) };
         // SAFETY: as above, `frames` long.
@@ -2336,6 +2338,7 @@ unsafe extern "C" fn audio_ports_get(
     this.on_main("audio_ports.get");
     let (port, id, flags) = match (this.kind, is_input, index) {
         (Kind::Gain, true, 0) => ("In", 0, CLAP_AUDIO_PORT_IS_MAIN),
+        (Kind::Gain, true, 1) if UNDESCRIBED.load(Ordering::SeqCst) => return false,
         (Kind::Gain, true, 1) => ("Sidechain", SIDECHAIN, 0),
         (Kind::Load, true, 0) => ("In", 0, CLAP_AUDIO_PORT_IS_MAIN),
         (_, false, 0) => ("Out", 1, CLAP_AUDIO_PORT_IS_MAIN),

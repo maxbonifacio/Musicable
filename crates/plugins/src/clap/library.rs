@@ -3,7 +3,7 @@
 use std::ffi::{CStr, CString, c_char};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
@@ -13,10 +13,11 @@ use clap_sys::version::clap_version_is_compatible;
 use musicable_model::PluginFormat;
 
 use crate::bundle::{self, canonical};
+use crate::loaded::{Loaded, Open, Registry};
 use crate::{Error, PluginInfo};
 
 /// A `.clap` file, loaded and initialized. It's deinitialized and unloaded
-/// once nothing holds it.
+/// once nothing holds it, on the thread that loaded it ([`Loaded`]).
 pub(crate) struct Library {
     path: PathBuf,
     entry: *const clap_plugin_entry,
@@ -31,29 +32,24 @@ unsafe impl Send for Library {}
 // SAFETY: as above.
 unsafe impl Sync for Library {}
 
-/// The libraries loaded, by path, so the process loads each file once:
-/// CLAP forbids initializing a library twice. Its lock is held while one
-/// initializes or deinitializes, which CLAP forbids doing concurrently.
-static LOADED: Mutex<Vec<(PathBuf, Weak<Library>)>> = Mutex::new(Vec::new());
+/// The libraries loaded, so the process loads each file once: CLAP forbids
+/// initializing a library twice. Its lock is held while one initializes or
+/// deinitializes, which CLAP forbids doing concurrently.
+static LOADED: Registry<Library> = Registry::new();
 
 impl Library {
     /// Loads and initializes the library at `path`, or hands back the one
     /// already loaded.
-    pub(crate) fn load(path: &Path) -> Result<Arc<Library>, Error> {
+    pub(crate) fn load(path: &Path) -> Result<Arc<Loaded<Library>>, Error> {
         let path = canonical(path)
             .map_err(|e| Error::new(format!("{} can't be read: {e}", path.display())))?;
-        let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
-        loaded.retain(|(_, library)| library.strong_count() > 0);
-        if let Some(library) = loaded
-            .iter()
-            .find(|(p, _)| *p == path)
-            .and_then(|(_, library)| library.upgrade())
-        {
-            return Ok(library);
-        }
-        let library = Arc::new(Self::open(&path)?);
-        loaded.push((path, Arc::downgrade(&library)));
-        Ok(library)
+        LOADED.load(&path, Self::open)
+    }
+
+    /// Deinitializes and unloads the libraries this thread loaded that were
+    /// let go of on other threads.
+    pub(crate) fn close_unused() {
+        LOADED.close_unused();
     }
 
     fn open(path: &Path) -> Result<Library, Error> {
@@ -180,11 +176,10 @@ impl Library {
     }
 }
 
-impl Drop for Library {
-    fn drop(&mut self) {
-        // As in `load`: CLAP forbids deinitializing as another library
-        // initializes.
-        let _loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
+impl Open for Library {
+    /// Called inside `LOADED`'s lock, as CLAP forbids deinitializing as
+    /// another library initializes.
+    fn close(mut self) {
         // SAFETY: initialized in `open`, and nothing of the library's is in
         // use: every instance holds the library.
         if let Some(deinit) = unsafe { (*self.entry).deinit } {

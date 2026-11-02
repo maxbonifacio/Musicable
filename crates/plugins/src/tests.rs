@@ -1939,3 +1939,63 @@ fn playing_a_plugin_says_when_its_notes_come_against_its_latency() {
     drop(instance);
     plugins.assert_alright();
 }
+
+#[test]
+fn a_library_let_go_of_on_another_thread_unloads_on_the_one_that_loaded_it() {
+    let plugins = TestPlugins::new("unloading");
+    let initialized = || plugins.library.initialized();
+    // The last of it let go of here, it unloads at once.
+    drop(plugins.gain());
+    assert!(!initialized());
+    // The last of it is a node, let go of on another thread, as the
+    // engine's compiler lets go of a job it skips.
+    let instance = plugins.gain();
+    let node = instance.node_source().node();
+    drop(instance);
+    std::thread::spawn(move || drop(node)).join().unwrap();
+    assert!(initialized(), "it waits for the thread that loaded it");
+    // Loaded again meanwhile, it's taken as it is, not initialized twice.
+    let instance = plugins.gain();
+    let node = instance.node_source().node();
+    drop(instance);
+    std::thread::spawn(move || drop(node)).join().unwrap();
+    // Another thread can't unload it.
+    std::thread::spawn(crate::unload_unused).join().unwrap();
+    assert!(initialized());
+    crate::unload_unused();
+    assert!(!initialized());
+    plugins.assert_alright();
+}
+
+#[test]
+fn a_plugin_a_node_is_stuck_in_keeps_its_host() {
+    let plugins = TestPlugins::new("stuck");
+    let instance = plugins.gain();
+    let shared = Arc::clone(instance.shared());
+    let host = Arc::downgrade(&shared);
+    // A node holds the plugin for longer than the instance waits for it.
+    let busy = shared.try_enter().unwrap();
+    drop(instance);
+    drop(busy);
+    drop(shared);
+    // The plugin was left alive, and the host it was given with it, for
+    // its own threads to call.
+    assert!(host.upgrade().is_some());
+    assert_eq!(plugins.library.alive(), 1);
+}
+
+#[test]
+fn a_port_the_plugin_fails_to_describe_keeps_its_place() {
+    // The gain counts two inputs, and fails to describe its sidechain.
+    let plugins = TestPlugins::new("undescribed");
+    let mut instance = plugins.gain();
+    assert!(instance.side_inputs().is_empty());
+    instance.activate(CONFIG).unwrap();
+    // It still gets a buffer for each port it counts.
+    let mut node = instance.node_source().node();
+    let input = ramp(64);
+    let [left, _] = play(&mut node, &input, &Block::default());
+    assert_eq!(left, input);
+    drop((node, instance));
+    plugins.assert_alright();
+}

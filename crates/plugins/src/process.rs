@@ -45,8 +45,14 @@ pub(crate) struct Channels {
     /// The samples of every channel of every port, one channel after
     /// another. Only ever touched through `channels`, which point into it.
     _samples: Vec<f32>,
-    /// One pointer per channel, port after port.
+    /// One pointer per channel, port after port: the host's own, which the
+    /// host reads and writes the buffers through.
     channels: Vec<*mut f32>,
+    /// A copy of `channels` for the plugin, which hands it over as its
+    /// buffers. A plugin can write to it, as the formats hand it over
+    /// writable, so it's copied afresh before every block, and the host
+    /// never goes by it.
+    shown: Vec<*mut f32>,
     /// Where each port's channels start in `channels`, and how many it has.
     ports: Vec<(usize, usize)>,
     /// The port audio goes in or comes out of.
@@ -69,7 +75,7 @@ impl Channels {
         let base = samples.as_mut_ptr();
         // SAFETY: each channel starts inside `samples`, or at its end when
         // it holds nothing.
-        let channels = (0..total)
+        let channels: Vec<*mut f32> = (0..total)
             .map(|c| unsafe { base.add(c * frames) })
             .collect();
         let mut ports = Vec::with_capacity(counts.len());
@@ -80,6 +86,7 @@ impl Channels {
         }
         Self {
             _samples: samples,
+            shown: channels.clone(),
             channels,
             ports,
             main: main.filter(|&m| m < counts.len()),
@@ -93,11 +100,12 @@ impl Channels {
     }
 
     /// Where port `port`'s channel pointers are, one per channel, for the
-    /// plugin. They stay put for as long as the buffers live.
+    /// plugin. They stay put for as long as the buffers live, and are
+    /// copied afresh as the buffers are cleared, before every block.
     pub(crate) fn pointers(&mut self, port: usize) -> *mut *mut f32 {
         let (first, _) = self.ports[port];
         // SAFETY: `first` is at most the number of channels.
-        unsafe { self.channels.as_mut_ptr().add(first) }
+        unsafe { self.shown.as_mut_ptr().add(first) }
     }
 
     /// Port `port`'s channels.
@@ -106,9 +114,11 @@ impl Channels {
         &self.channels[first..][..count]
     }
 
-    /// Silences the first `frames` samples of every channel.
+    /// Silences the first `frames` samples of every channel, and puts back
+    /// the pointers the plugin gets, whatever it did to them.
     pub(crate) fn clear(&mut self, frames: usize) {
         debug_assert!(frames <= self.frames);
+        self.shown.copy_from_slice(&self.channels);
         for &channel in &self.channels {
             // SAFETY: every channel holds `self.frames` samples, and
             // nothing else uses them now.
@@ -665,6 +675,25 @@ mod tests {
         let mut played = Vec::new();
         play(made, &mut |p| played.push(p));
         played
+    }
+
+    #[test]
+    fn the_channel_pointers_a_plugin_rewrites_are_put_back() {
+        let mut channels = Channels::new(&[2], Some(0), 4);
+        let pointers = channels.pointers(0);
+        // The plugin points its first channel at a buffer of its own.
+        let mut its_own = [7.0f32; 4];
+        // SAFETY: the port has two channels.
+        unsafe { pointers.write(its_own.as_mut_ptr()) };
+        let mut out = [0.0f32; 8];
+        let mut output = AudioMut::from_planar(&mut out, 2);
+        channels.play(0, 4, 0, &mut output);
+        // The host plays and clears its own buffers, not the plugin's.
+        assert_eq!(out, [0.0; 8]);
+        channels.clear(4);
+        assert_eq!(its_own, [7.0; 4]);
+        // SAFETY: as above.
+        assert_ne!(unsafe { pointers.read() }, its_own.as_mut_ptr());
     }
 
     #[test]
