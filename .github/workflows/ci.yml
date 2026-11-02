@@ -1,13 +1,30 @@
 name: CI
 
+# Which machine runs each job: GitHub's hosted runners, or one of our own
+# when a repository variable names its label (docs/ci-runners.md):
+# RUNNER_WINDOWS, RUNNER_LINUX and RUNNER_MACOS. A pull request from a fork
+# always runs on hosted runners, never on our machines. macOS runs on every
+# push while the repository is public, where hosted runners are free, and
+# otherwise nightly on main and when run by hand.
+
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 # Read-only: no job writes to the repository.
 permissions:
   contents: read
+
+# A new push to a pull request cancels its run still going, as does a new
+# nightly run the last one, if it's still waiting for a Mac. Each push to main
+# gets a group of its own, so every merge is tested.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.run_id) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,21 +32,24 @@ env:
 jobs:
   test:
     name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ !github.event.pull_request.head.repo.fork && (matrix.os == 'windows-latest' && vars.RUNNER_WINDOWS || matrix.os == 'ubuntu-latest' && vars.RUNNER_LINUX || matrix.os == 'macos-latest' && vars.RUNNER_MACOS) || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # Windows is the primary platform; the others keep the build portable.
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        # The schedule runs macOS alone, as Windows and Linux ran on each push
+        # to main.
+        os: ${{ fromJSON(github.event_name == 'schedule' && '["macos-latest"]' || (github.event_name == 'workflow_dispatch' || github.event.repository.private == false) && '["windows-latest", "macos-latest", "ubuntu-latest"]' || '["windows-latest", "ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # cpal's ALSA backend needs the ALSA headers.
+      # cpal's ALSA backend needs the ALSA headers. Our own Linux runner has
+      # them already, so it needs no password for sudo.
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: dpkg -s libasound2-dev >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y libasound2-dev)
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The Beat This! models, which the analysis tests need and the
       # repository leaves out: fetched by the script, checked against its
@@ -49,7 +69,8 @@ jobs:
       - run: cargo test --workspace
 
   fmt:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+    runs-on: ${{ !github.event.pull_request.head.repo.fork && vars.RUNNER_LINUX || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -60,7 +81,7 @@ jobs:
   dco:
     name: DCO sign-off
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ${{ !github.event.pull_request.head.repo.fork && vars.RUNNER_LINUX || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:

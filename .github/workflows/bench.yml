@@ -8,7 +8,9 @@ name: Benchmarks
 # there, so the parallel renderer has three workers at most, and the numbers
 # are rough and say little about scaling: they catch big slowdowns and keep
 # the benchmarks working. Tune the scheduler on real hardware (see
-# CONTRIBUTING.md).
+# CONTRIBUTING.md). With RUNNER_WINDOWS set, they run on our own Windows
+# machine instead (docs/ci-runners.md), whose numbers are real but move with
+# whatever else it's doing.
 
 on:
   push:
@@ -30,13 +32,19 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its run still going. Each push to
+# main gets a group of its own, so every merge is checked.
+concurrency:
+  group: bench-${{ github.event_name }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.run_id) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   bench:
     name: Benchmarks (Windows)
-    runs-on: windows-latest
+    runs-on: ${{ !github.event.pull_request.head.repo.fork && vars.RUNNER_WINDOWS || 'windows-latest' }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
